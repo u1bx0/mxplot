@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net10.0; net8.0</TargetFrameworks>
+
+	  <PackageId>MxPlot</PackageId>
+	  <Version>0.0.1-alpha</Version>
+	  <Description>MxPlot is a Multi-axis Matrix Visualization Library for .NET. This project is currently under active development.</Description>
+	  
+	  <Authors>u1bx0</Authors>
+	  <Copyright>Copyright (c) 2026 u1bx0</Copyright>
+
+	  <PackageTags>plot;chart;graph;visualization;matrix;heatmap;multi-axis;dotnet;imaging;hyperstack</PackageTags>
+	  
+	  
+
+	  <RepositoryUrl>https://github.com/u1bx0/mxplot</RepositoryUrl>
+	  <RepositoryType>git</RepositoryType>
+
+	  <PackageProjectUrl>https://github.com/u1bx0/mxplot</PackageProjectUrl>
+
+	  <PackageReadmeFile>README.md</PackageReadmeFile>
+	  <PackageLicenseFile>LICENSE</PackageLicenseFile>
+	  
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\..\README.md" Pack="true" PackagePath="\" />
+		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+	</ItemGroup>
+	
+</Project>
