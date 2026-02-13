@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+	  <TargetFrameworks>net10.0; net8.0</TargetFrameworks>
+	  <!-- Directory.Build.props に移動済み
+	  <Version>0.1.0</Version>
+
+	  <Authors>u1bx0</Authors>
+	  <Description>MxPlot: Multi-axisl Matrix Visualization Library</Description>
+      -->	  
+	  
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>AnyCPU;x64</Platforms>
+  </PropertyGroup>
+
+	<ItemGroup>
+		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+	</ItemGroup>
+</Project>
