@@ -1,0 +1,233 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace MxPlot.Core
+{
+
+    public interface IMatrixData: ICloneable
+    {
+     
+
+        double XMax { get; set; }
+
+        double XMin { get; set; }
+
+        /// <summary>
+        /// Number of data points along X axis (immutable)
+        /// </summary>
+        int XCount { get; }
+
+        /// <summary>
+        ///  = (MaxX - MinX) / (NumX - 1)
+        /// </summary>
+        double XStep { get; }
+
+        /// <summary>
+        ///  = MaxX - MinX
+        /// </summary>
+        double XRange { get; }
+
+        double YMax { get; set; }
+
+        double YMin { get; set; }
+
+        int YCount{ get; }
+
+        double YStep { get; }
+
+        /// <summary>
+        /// = MaxY - MinY
+        /// </summary>
+        double YRange { get; }
+
+        /// <summary>
+        /// Unit string for X axis
+        /// </summary>
+        string XUnit { get; set; }
+
+        /// <summary>
+        /// Unit string for Y axis
+        /// </summary>
+        string YUnit { get; set; }
+
+        /// <summary>
+        /// Total number of frames (1 if not a series)
+        /// </summary>
+        int FrameCount { get; }
+
+        /// <summary>
+        /// Active frame index (0 if not a series)
+        /// </summary>
+        int ActiveIndex { get; set; }
+
+        /// <summary>
+        /// Metadata dictionary with case-insensitive string keys and string values.
+        /// Complex data types should be serialized to string (e.g., JSON, CSV).
+        /// </summary>
+        IDictionary<string, string> Metadata { get; }
+
+        /// <summary>
+        /// Define hyperstack dimensions
+        /// </summary>
+        DimensionStructure Dimensions { get; }
+
+        /// <summary>
+        /// Get the list of axes defined in Dimensions. 
+        /// This is a convenience alias for <see cref="DimensionStructure.Axes"/>.
+        /// 
+        /// </summary>
+        /// <returns>The list of <see cref="Axis"/>. </returns>
+        IReadOnlyList<Axis> Axes { get; }
+
+        /// <summary>
+        /// 
+        /// XYスケールが変化した場合に呼ばれる
+        /// </summary>
+        event EventHandler? ScaleChanged;
+
+        /// <summary>
+        /// Seriesのスケールが変化した場合に呼ばれる
+        /// </summary>
+        event EventHandler? FrameAxisChanged;
+
+        /// <summary>
+        /// アクティブなMatrixDataのIndexが変化した場合に呼ばれる
+        /// </summary>
+        event EventHandler? ActiveIndexChanged;
+
+        /// <summary>
+        /// 単位表記が変わった場合に呼ばれる
+        /// </summary>
+        event EventHandler? UnitChanged;
+
+
+        Type ValueType { get; }
+
+        /// <summary>
+        /// Returns the minimum value supported by the implementation.
+        /// </summary>
+        /// <returns>The smallest value that can be represented or processed. The exact value depends on the specific
+        /// implementation.</returns>
+        double GetMinValue();
+
+        /// <summary>
+        /// Returns the largest value available in the current frame with a default value type.
+        /// </summary>
+        /// <returns>The maximum value as a double. </returns>
+        double GetMaxValue();
+
+        double XValue(int ix);
+        
+        int XIndexOf(double x, bool extendRange = false);
+
+        double YValue(int iy);
+
+        int YIndexOf(double y, bool extendRange = false);
+
+        void SetXYScale(double xmin, double xmax, double ymin, double ymax);
+
+        /// <summary>
+        /// Define axes for series data: FrameCount must match the sum of counts in each axis.
+        /// </summary>
+        /// <param name="axes"></param>
+        void DefineDimensions(params Axis[] axes);
+
+        /// <summary>
+        /// Get axis by its name. 
+        /// This is a convenience alias for the indexer <see cref="DimensionStructure.this[string]"/>.
+        /// </summary>
+        /// <param name="axisName"></param>
+        /// <returns>The <see cref="Axis"/> object, or null if not found.</returns>
+        /// <seealso cref="DimensionStructure.this[string]"/>
+        Axis? this [string axisName] { get; }
+
+       
+
+        /// <summary>
+        /// Find and update max and min values in the specific frame. This is necessary when an array data is directly modified.
+        /// 
+        /// <param indexInSeires></param>
+        /// </summary>
+        void RefreshValueRange(int frameIndex);
+
+        /// <summary>
+        /// Find and update max and min values in the active frame. This is necessary when an array data is directly modified.
+        /// </summary>
+        void RefreshValueRange();
+
+        /// <summary>
+        /// Get the min and max values in the active frame as a tuple (min, max).
+        /// </summary>
+        /// <returns></returns>
+        (double Min, double Max) GetMinMaxValues();
+
+        /// <summary>
+        /// Get the min and max values in the specific frame as a tuple (min, max).
+        /// </summary>
+        /// <param name="index"></param>
+        /// <returns>double[]{min, max}</returns>
+        (double Min, double Max) GetMinMaxValues(int frameIndex);
+
+        /// <summary>
+        /// Retrieves the minimum and maximum values along the specified axis.
+        /// If <paramref name="fixedCoordinates"/> is not specified, the indices of the current active frame are used.
+        /// </summary>
+        /// <param name="targetAxis">The axis to scan.</param>
+        /// <param name="fixedCoordinates">
+        /// The coordinate (index) array defining the fixed axes (must include the target axis index). 
+        /// The value for the <paramref name="targetAxis"/> index in this array is ignored.
+        /// </param>
+        /// <returns>A tuple containing the minimum and maximum values.</returns>
+        (double Min, double Max) GetMinMaxValues(Axis targetAxis, int[]? fixedCoordinates = null);
+
+        /// <summary>
+        /// Get the min and max values found in all the frames as a tuple (min, max).
+        /// </summary>
+        /// <returns>double[]{min, max}</returns>
+        (double Min, double Max) GetGlobalMinMaxValues();
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="ix"></param>
+        /// <param name="iy"></param>
+        /// <param name="v"></param>
+        void SetValueAt(int ix, int iy, double v);
+
+
+        /// <summary>
+        /// </summary>
+        /// <param name="ix"></param>
+        /// <param name="iy"></param>
+        /// <param name="indexInSeries"></param>
+        /// <param name="v"></param>
+        void SetValueAt(int ix, int iy, int frameIndex, double v);
+
+        /// <summary>
+        /// Get value at (ix, iy) as double
+        /// </summary>
+        /// <param name="ix"></param>
+        /// <param name="iy"></param>
+        /// <param name="iz">-1の場合は現在のActiveIndex</param>
+        /// <returns></returns>
+        double GetValueAt(int ix, int iy, int frameIndex = -1);
+
+        /// <summary>
+        /// Returns a read-only span containing the raw byte data for the specified frame.
+        /// </summary>
+        /// <param name="frameIndex">The zero-based index of the frame to retrieve. Specify -1 to retrieve the raw bytes for the current frame.</param>
+        /// <returns>A read-only span of bytes representing the raw data of the specified frame.</returns>
+        ReadOnlySpan<byte> GetRawBytes(int frameIndex = -1);
+        
+        /// <summary>
+        /// Sets the value of the object from the specified raw byte data.
+        /// </summary>
+        /// <param name="bytes">A read-only span of bytes containing the raw data to use for setting the value.</param>
+        /// <param name="frameIndex">The zero-based index of the frame to set from the raw bytes, or -1 to set all frames. Defaults to -1.</param>
+        void SetFromRawBytes(ReadOnlySpan<byte> bytes, int frameIndex = -1);
+
+    }
+
+}
+
