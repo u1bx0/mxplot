@@ -16,6 +16,7 @@
 	  <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
 	  <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
     <ProjectReference Include="..\MxPlot.Core\MxPlot.Core.csproj" />
+	  
   </ItemGroup>
 
 </Project>

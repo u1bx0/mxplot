@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.0.3--alpha-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.0.4--alpha-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -44,7 +44,7 @@ This repository hosts the **MxPlot ecosystem**, organized into the following lib
 - **MxPlot (Metapackage)**: A convenient entry point that bundles the core and common extensions.
 - **MxPlot.Core**: The foundational, dependency-free data engine (`MatrixData\<T\>`).
 - **MxPlot.Extensions.Tiff / .HDF5**: Specialized high-performance file I/O packages.
-- **MxPlot.Extensions.FFT**: FFT processing utilities (Coming Soon).
+- **MxPlot.Extensions.Fft**: FFT processing utilities (Coming Soon).
 - **MxPlot.Wpf / .WinForms**: Native UI controls for visualization (In Development).
 
 At its heart, **MatrixData\<T\>** serves as the central engine, engineered to maximize data throughput. 
@@ -79,7 +79,7 @@ MxPlot.Core handles arbitrary axis combinations while maintaining physical coord
 
 **Coming Soon:**
 - 📏 **Line Profile Extraction**: Extract intensity profiles along arbitrary lines *(To be implemented)*
-- 🔬 **Advanced Filtering**: Gaussian, Median, and custom convolution filters *(To be implemented)*
+- 🔬 **Filtering**: Gaussian, Median, and custom convolution filters *(To be implemented)*
 
 ## 📦 Installation
 
@@ -87,18 +87,18 @@ This ecosystem is provided as several NuGet packages.
 
 - **MxPlot (Recommended)**: For most users. Includes core and library-dependent extensions.
 ```bash
-dotnet add package MxPlot --version 0.0.3-alpha
+dotnet add package MxPlot --version 0.0.4-alpha
 ```
 
 - **MxPlot.Core**: For developers building their own tools without extra dependencies.
 ```bash
-dotnet add package MxPlot.Core --version 0.0.3-alpha
+dotnet add package MxPlot.Core --version 0.0.4-alpha
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="MxPlot" Version="0.0.3-alpha" />
+<PackageReference Include="MxPlot" Version="0.0.4-alpha" />
 ```
 
 ### 🛠️ For Developers (Manual Setup)
@@ -133,7 +133,7 @@ using MxPlot.Core;
 
 // Create a 2D matrix with physical coordinates
 var md = new MatrixData<double>(100, 100);
-md.SetXYScale(-10, 10, -10, 10); // Physical range: -10mm to +10mm
+md.SetXYScale(-10, 10, -10, 10); // Physical range: -10 mm to +10 mm
 md.XUnit = "mm";
 md.YUnit = "mm";
 
@@ -141,7 +141,7 @@ md.YUnit = "mm";
 md.Set((ix, iy, x, y) => Math.Sin(x) * Math.Cos(y));
 
 // You can dirctly access the internal array (the most efficient)
-double[] array = md.GetArray(); // Get the frame 
+double[] array = md.GetArray(); // Get the frame and access each element by array[iy * md.XCount + ix]
 
 // Get statistics
 var (min, max) = md.GetMinMaxValues();
@@ -243,18 +243,18 @@ md.ForEach((i, array) => //parallel option is true by default
     //Best way to calculate the xy position from the array index
     for (int iy = 0; iy < scale.YCount; iy++)
     {
-        double y = scale.YValue(iy); //physical y position (md.YValue(iy) is also OK.)
+        double y = scale.YValue(iy); //physical position (md.YValue(iy) is also available.)
         int offset = iy * scale.XCount; //to access the array index directly
         for (int ix = 0; ix < scale.XCount; ix++)
         {
-            double x = scale.XValue(ix); //physical x position (md.XValue(ix) is also OK.)
+            double x = scale.XValue(ix); //physical position (md.XValue(ix) is also available.)
             //Evaluation of the value at (x, y, c, z, t)
             double val = PixelValue(x, y, c, z, t);
             //Set the value to the pixel
             array[offset + ix] = val;
         }
     }
-}); //After ForEach action, the min and max values at each frame are scanned automatically.
+}); //After ForEach action, the min and max values at each frame are updated automatically.
 
 // =================================//
 // If you like more simplified expression,
@@ -279,8 +279,8 @@ var flatField = new MatrixData<double>(512, 512);
 var normalized = signal.Divide(flatField);
 
 // Gain and offset correction
-var gainCorrected = signal.Scale(1.5);         // Gain: ×1.5
-var offsetCorrected = signal.AddScalar(-100);  // Offset: -100
+var gainCorrected = signal.Multiply(1.5);         // Gain: ×1.5
+var offsetCorrected = signal.Add(-100);  // Offset: -100
 ```
 
 ### 📊 Complex Number Support
@@ -405,16 +405,6 @@ var customReduction = volume.ReduceZ((x, y, values) =>
 // Direct voxel access (no bounds checking for performance)
 double voxelValue = volume[x: 10, y: 20, z: 5];
 
-// === CrossSectionalOperator: Profile extraction and projection ===
-
-// Extract row/column profiles
-var rowProfile = matrix.GetRowProfile(y: 50);        // Horizontal line
-var colProfile = matrix.GetColumnProfile(x: 50);     // Vertical line
-
-// Project along axes (integration)
-var projX = matrix.ProjectX();  // Sum along Y direction → 1D profile
-var projY = matrix.ProjectY();  // Sum along X direction → 1D profile
-
 // === LineProfileExtractor: Extract profiles along arbitrary lines ===
 // ⚠️ To be implemented in future release
 
@@ -455,8 +445,11 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 
 ## 📊 Version History
 
+**v0.0.4-alpha** (Curretn - Planned features)
+- 🔌 Generic Bridge: Enabled non-generic layers (UI/ViewModels) to invoke strongly-typed image processing operations without compile-time knowledge of generic type <T>.
+- 🛠 Visitor Pattern: Introduced IMatrixData.Apply(IOperation) as a unified dispatch entry point to dynamically resolve and execute Volume, Filter, and Dimensional operations. 
 
-**v0.0.3-alpha** (Current - Some modifications and reorganization of packages)
+**v0.0.3-alpha** (Some modifications and reorganization of packages)
 - 🏗️ **Metapackage Structure**: Reorganized as a metapackage `MxPlot` bundling `MxPlot.Core` and common extensions for easier installation and management.
 -  🔄 **Method Renaming**: Renamed `XAt`/`YAt` to **`XValue`/`YValue`** for better clarity and naming consistency.
  - ➕ Added MxPlot.Extensions.Tiff and MxPlot.Extensions.HDF5 packages for specialized file I/O 
@@ -466,8 +459,6 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 - 🏗️ **Enhanced `IMatrixData`**: Implemented Facade pattern methods for `DimensionStructure`, simplifying the interface for complex data navigation.
 - 📖 Updated README and installation guides.
 - 🎯 Minor bug fixes in the core data processing engine.
-- ➕ **Added THIRD-PARTY-NOTICES.txt**.
-- ♻️ Re-initialized the repository to clean up git history.
   
 **v0.0.2-alpha** (First core implementation )
 - ✨ **NEW**: `VolumeAccessor<T>` - High-performance 3D volume operations with readonly struct

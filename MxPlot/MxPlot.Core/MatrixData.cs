@@ -1260,6 +1260,20 @@ namespace MxPlot.Core
         }
         #endregion
 
+
+        public IMatrixData Apply(IOperation operation)
+        {
+            if (operation == null) 
+                throw new ArgumentNullException(nameof(operation));
+
+            return operation switch
+            {
+                IMatrixDataOperation mdOp => mdOp.Execute(this),
+                IVolumeOperation volOp => volOp.Execute(AsVolume(volOp.AxisName, volOp.BaseIndices)),
+                _ => throw new NotSupportedException($"Unsupported operation type: {operation.GetType().Name}")
+            };
+        }
+
         /// <summary>
         /// Sets the custom implementation used to determine minimum and maximum values.
         /// </summary>
