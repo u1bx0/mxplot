@@ -1,6 +1,5 @@
 <Solution>
   <Project Path="MxPlot.Core/MxPlot.Core.csproj" />
-  <Project Path="MxPlot.Extensions.HDF5/MxPlot.Extensions.HDF5.csproj" />
   <Project Path="MxPlot.Extensions.Tiff/MxPlot.Extensions.Tiff.csproj" />
   <Project Path="MxPlot/MxPlot.csproj" />
 </Solution>
