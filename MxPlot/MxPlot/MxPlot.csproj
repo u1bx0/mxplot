@@ -11,6 +11,9 @@
 		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
 		<None Include="..\..\docs\images\mxplot_logo_pre.png" Pack="true" PackagePath="\" />
 		<ProjectReference Include="..\MxPlot.Core\MxPlot.Core.csproj" />
+		<ProjectReference Include="..\MxPlot.Extensions.Fft\MxPlot.Extensions.Fft.csproj" />
+		<ProjectReference Include="..\MxPlot.Extensions.Hdf5\MxPlot.Extensions.Hdf5.csproj" />
+		<ProjectReference Include="..\MxPlot.Extensions.Images\MxPlot.Extensions.Images.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Tiff\MxPlot.Extensions.Tiff.csproj" />
 	</ItemGroup>
 

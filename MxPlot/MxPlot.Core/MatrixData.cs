@@ -646,7 +646,7 @@ namespace MxPlot.Core
                 {
                     position[axisOrder] = i;
 
-                    int frameIndex = Dimensions.GetFrameIndexFrom(position);
+                    int frameIndex = Dimensions.GetFrameIndexAt(position);
                     
                     if (RefreshValueRangeRequired(frameIndex))
                         RefreshValueRange(frameIndex);
@@ -949,9 +949,10 @@ namespace MxPlot.Core
         /// [IMPORTANT] A simple two-dimension loop is used to iterate over each (ix, iy) coordinate.
         /// </summary>
         /// <param name="func"></param>
-        public void Set(Func<int, int, double, double, T> func)
+        public MatrixData<T> Set(Func<int, int, double, double, T> func)
         {
             Set(ActiveIndex, func);
+            return this;
         }
 
 
@@ -964,7 +965,7 @@ namespace MxPlot.Core
         /// </summary>
         /// <param name="frameIndex"></param>
         /// <param name="func"></param>
-        public void Set(int frameIndex, Func<int, int, double, double, T> func)
+        public MatrixData<T> Set(int frameIndex, Func<int, int, double, double, T> func)
         {
             var array = GetArray(frameIndex);
             var arraySpan = array.AsSpan();
@@ -983,6 +984,7 @@ namespace MxPlot.Core
             }
             // Recalculate statistics using MinMaxFinder
             RefreshValueRange(frameIndex);
+            return this;
         }
 
         /// <summary>
@@ -997,7 +999,7 @@ namespace MxPlot.Core
         /// is the array associated with that frame. Cannot be null.</param>
         /// <param name="useParallel">true to execute the action for each frame in parallel; otherwise, false. If there are fewer than two frames,
         /// parallel execution is not used regardless of this value.</param>
-        public void ForEach(Action<int, T[]>action, bool useParallel = true)
+        public MatrixData<T> ForEach(Action<int, T[]>action, bool useParallel = true)
         {
             if(FrameCount < 2)
             {
@@ -1019,6 +1021,7 @@ namespace MxPlot.Core
                     RefreshValueRange(i);
                 }
             }
+            return this;
         }
 
         /// <summary>
@@ -1259,6 +1262,20 @@ namespace MxPlot.Core
             writer.Write(filePath, this);
         }
         #endregion
+
+
+        public IMatrixData Apply(IOperation operation)
+        {
+            if (operation == null) 
+                throw new ArgumentNullException(nameof(operation));
+
+            return operation switch
+            {
+                IMatrixDataOperation mdOp => mdOp.Execute(this),
+                IVolumeOperation volOp => volOp.Execute(AsVolume(volOp.AxisName, volOp.BaseIndices)),
+                _ => throw new NotSupportedException($"Unsupported operation type: {operation.GetType().Name}")
+            };
+        }
 
         /// <summary>
         /// Sets the custom implementation used to determine minimum and maximum values.

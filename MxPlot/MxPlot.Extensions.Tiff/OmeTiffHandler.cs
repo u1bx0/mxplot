@@ -77,7 +77,7 @@ namespace MxPlot.Extensions.Tiff
                         for (int ic = 0; ic < cnum; ic++)
                         {
                             if (cAxisOrder >= 0) axisIndexer[cAxisOrder] = ic;
-                            sortedIndex[ip++] = dims.GetFrameIndexFrom(axisIndexer); //もしc=1,z=1,t=1ならaxisIndexerは空配列なので、0が返る    
+                            sortedIndex[ip++] = dims.GetFrameIndexAt(axisIndexer); //もしc=1,z=1,t=1ならaxisIndexerは空配列なので、0が返る    
                         }
                     }
                 }

@@ -41,7 +41,6 @@ namespace MxPlot.Core
     /// For 2D tiling, <see cref="Index"/> and tile coordinates (X, Y) are fully synchronized and work as expected.
     /// </para>
     /// </remarks>
-    [Serializable]
     public class FovAxis : Axis
     {
         // Jsonシリアライズなどでデータが消えないようにプロパティ化推奨

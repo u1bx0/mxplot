@@ -8,6 +8,7 @@ using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace MxPlot.Core.Processing
 {
+
     /// <summary>
     /// Provides multi-dimensional operators for processing MatrixData instances, including transposition, slicing, reordering, and mapping.
     /// </summary>
@@ -168,7 +169,7 @@ namespace MxPlot.Core.Processing
         public static MatrixData<T> SliceAt<T>(this MatrixData<T> src, params (string AxisName, int AxisIndex)[] coords)
             where T : unmanaged
         {
-            return SliceAt(src, src.Dimensions.At(coords), false);
+            return SliceAt(src, src.Dimensions.GetFrameIndexAt(coords), false);
         }
 
 
@@ -212,7 +213,7 @@ namespace MxPlot.Core.Processing
             for (int i = 0; i < targetAxis.Count; i++)
             {
                 workIndices[axisIndex] = i;
-                var frameIndices = dims.GetFrameIndexFrom(workIndices);
+                var frameIndices = dims.GetFrameIndexAt(workIndices);
                 order.Add(frameIndices);
             }
 
@@ -912,7 +913,7 @@ namespace MxPlot.Core.Processing
                     for (int i = 0; i < count; i++)
                     {
                         pos[targetOrder] = i;
-                        frames[i] = dims.GetFrameIndexFrom(pos);
+                        frames[i] = dims.GetFrameIndexAt(pos);
                     }
                     groups.Add((frames, (int[])pos.Clone()));
                     return;

@@ -6,7 +6,7 @@ using System.Numerics;
 namespace MxPlot.Core.Arithmetic
 {
     /// <summary>
-    /// Provides element-wise arithmetic operations for MatrixData objects using Generic Math (.NET 7+).
+    /// Provides element-wise arithmetic operations for MatrixData objects using Generic Math.
     /// Uses INumberBase&lt;T&gt; for maximum type compatibility.
     /// Optimized with Span&lt;T&gt; for better performance.
     /// </summary>
@@ -63,7 +63,7 @@ namespace MxPlot.Core.Arithmetic
         }
 
         /// <summary>
-        /// Performs element-wise multiplication of two matrices.
+        /// Performs element-wise multiplication of two matrices. If b has only one frame, it is treated as a background to be applied to all frames of a.
         /// </summary>
         /// <typeparam name="T">The numeric type (must implement INumberBase&lt;T&gt;).</typeparam>
         /// <param name="a">The first matrix.</param>

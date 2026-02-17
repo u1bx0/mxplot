@@ -1,4 +1,5 @@
-﻿# MxPlot
+﻿
+# MxPlot
 
 **Multi-Axis Matrix Visualization Library**
 
@@ -20,8 +21,10 @@ MxPlot consists of a modular core and specialized extensions:
 
 ### Available Extensions
 - **MxPlot.Extensions.Tiff**: TIFF I/O (OME-TIFF, ImageJ) via *LibTiff.NET*.
-- **MxPlot.Extensions.HDF5**: HDF5 support via *PureHDF*.
-- **MxPlot.Extensions.FFT**: Signal processing via *Math.NET Numerics*. (Coming Soon)
+- **MxPlot.Extensions.Hdf5**: HDF5 support via *PureHDF*.
+- **MxPlot.Extensions.Images**: Image loading (PNG, JPEG, BMP, TIFF) via *SkiaSharp*.
+- **MxPlot.Extensions.Fft**: Thin 2D FFT wrapper using *Math Kernel Library*  via *MathNet.Numerics*. (Preliminary implementation)
+
 
 ## 🖼️ Visualization Layer (In Development)
 Separated package for UI controls and rendering.
@@ -30,18 +33,7 @@ Separated package for UI controls and rendering.
 ---
 
 ## 📊 Version History
+For the complete changelog and version history, please visit the Releases Page on GitHub.
 
-### **v0.0.3-alpha** (Current)
-- 🏗️ **Metapackage Architecture**: Reorganized as a metapackage that bundles `MxPlot.Core` and common extensions.
-- 🔄 **Refined API**: Renamed `XAt`/`YAt` to `XValue`/`YValue` for naming consistency.
-- ⚡ **Performance**: Optimized `Scale2D` (now `readonly struct`) and improved 2D matrix manipulation overhead.
-- ✨ **New Features**: Added `GetAxisValues`/`GetAxisIndices` with C# deconstruction support and `IMatrixData` facade methods.
-
-### **v0.0.2-alpha**
-- ✨ **Core Features**: Introduced `VolumeAccessor<T>` for high-performance 3D operations.
-- ⚡ **Optimization**: `VolumeOperator` with tiled memory access (up to 3.4x speedup).
-- 🎯 **Enhanced Extraction**: Improved `DimensionalOperator.ExtractAlong()` for multi-axis data.
-
-### **v0.0.1-alpha**
-- Initial package name reservation.
+👉 [GitHub Repository: u1bx0/MxPlot](https://github.com/u1bx0/MxPlot)
 

@@ -428,7 +428,7 @@ public static class ImageJTiffHandler
             axisIndices[tOrder] = t;
         }
 
-        return dims.GetFrameIndexFrom(axisIndices);
+        return dims.GetFrameIndexAt(axisIndices);
     }
 
     #endregion

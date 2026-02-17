@@ -79,35 +79,7 @@ namespace MxPlot.Core
         /// <returns></returns>
         public Axis? this[string name] => _axisList.Find(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
 
-        /// <summary>
-        /// Returns the index corresponding to the specified axis positions within the multidimensional structure.
-        /// </summary>
-        /// <param name="coords">An array of tuples, each containing an axis name and its associated index. Specifies the position along each
-        /// axis to retrieve the corresponding index. If empty, the method returns the current active index.</param>
-        /// <returns>The index representing the position in the multidimensional structure for the specified axis indices. If no
-        /// axis indices are provided, returns the active index.</returns>
-        /// <exception cref="ArgumentException">Thrown if an axis name specified in <paramref name="coords"/> does not exist in the structure.</exception>
-        public int At(params (string AxisName, int Index)[] coords)
-        {
-            
-            if (coords.Length == 0)
-            {
-                Debug.WriteLine("[DimensionStructure.At] indexer is empty.");
-                return _md.ActiveIndex;
-            }
-
-            Span<int> pos = stackalloc int[AxisCount];
-            //Index array pointing to ActiveIndex in the entire frames.
-            CopyAxisIndicesTo(pos, _md.ActiveIndex);
-
-            foreach (var item in coords)
-            {
-                if(!Contains(item.AxisName))
-                    throw new ArgumentException($"Axis '{item.AxisName}' does not exist.");
-                pos[GetAxisOrder(item.AxisName)] = item.Index;
-            }
-            return GetFrameIndexFrom(pos);
-        }
+        
 
         /// <summary>
         /// Getsthe array of axes (as shallow copies) defined in this dimension structure. 
@@ -268,7 +240,7 @@ namespace MxPlot.Core
         {
             if (indeces.Length != _axisList.Count)
                 throw new ArgumentException("Invalid lenght of indeces!");
-            var index = GetFrameIndexFrom(indeces);
+            var index = GetFrameIndexAt(indeces);
             //内部で更新する
             UpdateAxisIndicesFromFrameIndex(index);
         }
@@ -302,7 +274,7 @@ namespace MxPlot.Core
             int pos = _axisList.IndexOf(axis);
 
             indeces[pos] = index;
-            return GetFrameIndexFrom(indeces);
+            return GetFrameIndexAt(indeces);
         }
 
         /// <summary>
@@ -547,11 +519,41 @@ namespace MxPlot.Core
         }
 
         /// <summary>
+        /// Returns the index corresponding to the specified axis positions within the multidimensional structure.
+        /// </summary>
+        /// <param name="coords">An array of tuples, each containing an axis name and its associated index. Specifies the position along each
+        /// axis to retrieve the corresponding index. If empty, the method returns the current active index.</param>
+        /// <returns>The index representing the position in the multidimensional structure for the specified axis indices. If no
+        /// axis indices are provided, returns the active index.</returns>
+        /// <exception cref="ArgumentException">Thrown if an axis name specified in <paramref name="coords"/> does not exist in the structure.</exception>
+        public int GetFrameIndexAt(params (string AxisName, int Index)[] coords)
+        {
+
+            if (coords.Length == 0)
+            {
+                Debug.WriteLine("[DimensionStructure.At] indexer is empty.");
+                return _md.ActiveIndex;
+            }
+
+            Span<int> pos = stackalloc int[AxisCount];
+            //Index array pointing to ActiveIndex in the entire frames.
+            CopyAxisIndicesTo(pos, _md.ActiveIndex);
+
+            foreach (var item in coords)
+            {
+                if (!Contains(item.AxisName))
+                    throw new ArgumentException($"Axis '{item.AxisName}' does not exist.");
+                pos[GetAxisOrder(item.AxisName)] = item.Index;
+            }
+            return GetFrameIndexAt(pos);
+        }
+
+        /// <summary>
         /// index配列で指定したindexからシリーズ中のIndexに変換する
         /// </summary>
         /// <param name="indeces"></param>
         /// <returns></returns>
-        public int GetFrameIndexFrom(int[] indeces)
+        public int GetFrameIndexAt(int[] indeces)
         {
             if(_axisList.Count == 0)
                 return 0;
@@ -568,7 +570,7 @@ namespace MxPlot.Core
             return newIndex;
         }
 
-        public int GetFrameIndexFrom(Span<int> indeces)
+        public int GetFrameIndexAt(Span<int> indeces)
         {
             if (_axisList.Count == 0)
                 return 0;
