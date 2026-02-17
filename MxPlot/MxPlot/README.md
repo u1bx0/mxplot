@@ -1,5 +1,4 @@
-﻿
-# MxPlot
+﻿# MxPlot
 
 **Multi-Axis Matrix Visualization Library**
 
@@ -22,8 +21,7 @@ MxPlot consists of a modular core and specialized extensions:
 ### Available Extensions
 - **MxPlot.Extensions.Tiff**: TIFF I/O (OME-TIFF, ImageJ) via *LibTiff.NET*.
 - **MxPlot.Extensions.HDF5**: HDF5 support via *PureHDF*.
-- **MxPlot.Extensions.Fft**: Thin 2D FFT wrapper using *Math Kernel Library*  via *MathNet.Numerics*. (Preliminary implementation)
-
+- **MxPlot.Extensions.FFT**: Signal processing via *Math.NET Numerics*. (Coming Soon)
 
 ## 🖼️ Visualization Layer (In Development)
 Separated package for UI controls and rendering.

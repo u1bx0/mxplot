@@ -8,7 +8,6 @@ using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace MxPlot.Core.Processing
 {
-
     /// <summary>
     /// Provides multi-dimensional operators for processing MatrixData instances, including transposition, slicing, reordering, and mapping.
     /// </summary>

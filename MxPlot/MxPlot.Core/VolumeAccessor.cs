@@ -41,8 +41,7 @@ namespace MxPlot.Core
     /// on indexers for performance reasons; callers must ensure indices are within valid ranges to avoid undefined
     /// behavior. Thread safety is not guaranteed.</remarks>
     /// <typeparam name="T">The type of elements stored in the volume. Must be an unmanaged type.</typeparam>
-    public readonly unsafe struct VolumeAccessor<T> 
-        where T : unmanaged
+    public readonly unsafe struct VolumeAccessor<T> where T : unmanaged
     {
         internal readonly List<T[]> _frames;
         internal readonly int _width;

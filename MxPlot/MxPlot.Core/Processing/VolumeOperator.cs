@@ -430,5 +430,4 @@ namespace MxPlot.Core.Processing
             return md;
         }
     }
-
 }

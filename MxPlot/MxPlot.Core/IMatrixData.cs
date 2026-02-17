@@ -142,12 +142,13 @@ namespace MxPlot.Core
         /// <seealso cref="DimensionStructure.this[string]"/>
         Axis? this [string axisName] { get; }
 
-
+       
 
         /// <summary>
         /// Find and update max and min values in the specific frame. This is necessary when an array data is directly modified.
+        /// 
+        /// <param indexInSeires></param>
         /// </summary>
-        /// <param name="frameIndex"></param>
         void RefreshValueRange(int frameIndex);
 
         /// <summary>
@@ -226,21 +227,6 @@ namespace MxPlot.Core
         /// <param name="frameIndex">The zero-based index of the frame to set from the raw bytes, or -1 to set all frames. Defaults to -1.</param>
         void SetFromRawBytes(ReadOnlySpan<byte> bytes, int frameIndex = -1);
 
-
-        /// <summary>
-        /// Applies the specified operation to the current IMatrixData and returns the processed result.
-        /// </summary>
-        /// <remarks>
-        /// This method serves as a generic dispatch entry point. 
-        /// Concrete implementations (e.g., <see cref="MatrixData{T}"/>) resolve the underlying generic type <typeparamref name="T"/> 
-        /// and execute the appropriate logic based on the runtime type of the <paramref name="operation"/> 
-        /// (such as <see cref="IVolumeOperation"/> for volume processing or <see cref="IFilterOperation"/> for image filtering).
-        /// </remarks>
-        /// <param name="operation">The operation to apply (e.g., Projection, Slice, or Filter). Cannot be null.</param>
-        /// <returns>An <see cref="IMatrixData"/> instance containing the result of the applied operation.</returns>
-        /// <exception cref="ArgumentNullException">Thrown if <paramref name="operation"/> is null.</exception>
-        /// <exception cref="NotSupportedException">Thrown if the specific operation type is not supported by this data implementation.</exception>
-        IMatrixData Apply(IOperation operation);
     }
 
 }
