@@ -31,8 +31,8 @@ namespace MxPlot.Core.Processing
             int newH = srcW;
             
             var transposed = new T[frameCount][];
-            var vminArray = new double[frameCount][];
-            var vmaxArray = new double[frameCount][];
+            var vminArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
+            var vmaxArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
 
             // 1. Parallel Transpose with Cache Blocking
             Parallel.For(0, frameCount, frameIndex =>
@@ -74,14 +74,14 @@ namespace MxPlot.Core.Processing
                     }
                 }
                 transposed[frameIndex] = dstArray;
-                var (minArray, maxArray) = src.GetMinMaxArrays(frameIndex);
+                var (minArray, maxArray) = src.GetValueRangeList(frameIndex);
                 vminArray[frameIndex] = minArray;
                 vmaxArray[frameIndex] = maxArray;
             });
             
 
             // 2. 新しいインスタンスの生成
-            var result = new MatrixData<T>(newW, newH, transposed.ToList(), vminArray.ToList(), vmaxArray.ToList());
+            var result = new MatrixData<T>(newW, newH, transposed.ToList(), vminArray, vmaxArray);
             // 物理スケールと単位の入れ替え
             // src.XMin -> result.YMin, src.YUnit -> result.XUnit
             result.SetXYScale(src.YMin, src.YMax, src.XMin, src.XMax);
@@ -92,22 +92,28 @@ namespace MxPlot.Core.Processing
         }
 
         /// <summary>
-        /// Creates a lower-dimensional subset (N-1) of the matrix by "snapping" the specified axis to a single index.
+        /// Selects a lower-dimensional subset (N-1) of the matrix by fixing the specified axis to a single index.
         /// The targeted axis is removed from the resulting dimensions.
         /// </summary>
-        /// <remarks>The returned matrix will have <b>one fewer dimension than the original</b>, with the
-        /// specified axis removed. If deepCopy is false, changes to the returned matrix may affect the original data.
-        /// Use deepCopy to ensure the slice is independent.</remarks>
-        /// <param name="axisName">The name of the axis along which to slice. Must correspond to an existing axis in the matrix.</param>
-        /// <param name="indexInAxis">The zero-based index along the specified axis at which to extract the slice. Must be within the valid range
-        /// for the axis.</param>
-        /// <param name="deepCopy">true to create a deep copy of the underlying data for the slice; otherwise, false to create a shallow view.</param>
-        /// <returns>A new MatrixData<typeparamref name="T"/> instance representing the slice at the specified axis and index, with the selected axis
-        /// removed from its dimensions.</returns>
-        /// <exception cref="ArgumentException">Thrown if axisKey does not correspond to an existing axis in the matrix.</exception>
-        /// <exception cref="ArgumentOutOfRangeException">Thrown if index is less than zero or greater than or equal to the number of elements in the specified axis.</exception>
-        /// <exception cref="InvalidOperationException">Thrown if the resulting slice contains no frames.</exception>
-        public static MatrixData<T> SnapTo<T>(this MatrixData<T> src, string axisName, int indexInAxis, bool deepCopy = false)
+        /// <remarks>
+        /// The returned matrix will have <b>one fewer dimension than the original</b>.
+        /// For example, selecting a specific Channel from XYCZT data returns XYZT data.
+        /// <para>
+        /// If <paramref name="deepCopy"/> is false, the returned matrix may share the underlying data buffer 
+        /// with the original. Use <paramref name="deepCopy"/> to ensure the result is independent.
+        /// </para>
+        /// </remarks>
+        /// <param name="axisName">The name of the axis to use as the selection criterion.</param>
+        /// <param name="indexInAxis">The zero-based index along the specified axis to select.</param>
+        /// <param name="deepCopy">true to create a deep copy of the underlying data; otherwise, false to create a shallow view.</param>
+        /// <returns>
+        /// A new MatrixData&lt;<typeparamref name="T"/>&gt; instance containing only the data corresponding to the selected index, 
+        /// with that axis removed from its dimensions.
+        /// </returns>
+        /// <exception cref="ArgumentException">Thrown if <paramref name="axisName"/> does not correspond to an existing axis in the matrix.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown if <paramref name="indexInAxis"/> is negative or greater than or equal to the count of the specified axis.</exception>
+        /// <exception cref="InvalidOperationException">Thrown if the resulting selection contains no frames.</exception>
+        public static MatrixData<T> SelectBy<T>(this MatrixData<T> src, string axisName, int indexInAxis, bool deepCopy = false)
             where T : unmanaged
         {
             // 1. Specify the axis to slice and validate inputs
@@ -243,22 +249,25 @@ namespace MxPlot.Core.Processing
                 throw new ArgumentException($"invalid order: min = {min}, max = {max}, count = {num}");
 
             var arrays = new List<T[]>();
-            var vminList = new List<double[]>();
-            var vmaxList = new List<double[]>();
+            var vminList = new List<List<double>>();
+            var vmaxList = new List<List<double>>();
 
             foreach (var idx in order)
             {
                 var array = src.GetArray(idx);
+                var (vmins, vmaxs) = src.GetValueRangeList(idx);
                 if (deepCopy)
                 {
                     var dst = new T[array.Length];
                     array.AsSpan().CopyTo(dst);
                     array = dst;
+                    //For deep copy, min/max value list is  not provided.
+                    vmins = []; //new instance with empy list, indicating invalid min/max values.
+                    vmaxs = [];
                 }
                 arrays.Add(array);
-                var (minArray, maxArray) = src.GetMinMaxArrays(idx);
-                vminList.Add(minArray);
-                vmaxList.Add(maxArray);
+                vminList.Add(vmins);
+                vmaxList.Add(vmaxs);
             }
 
             var md = new MatrixData<T>(src.XCount, src.YCount, arrays, vminList, vmaxList);

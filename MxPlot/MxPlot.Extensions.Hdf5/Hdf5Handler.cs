@@ -285,7 +285,7 @@ namespace MxPlot.Extensions.Hdf5
 
         private static void AddValueRangeAttributes<T>(H5Object groupOrDataset, MatrixData<T> data) where T : unmanaged
         {
-            var (globalMin, globalMax) = data.GetGlobalMinMaxValues();
+            var (globalMin, globalMax) = data.GetGlobalValueRange();
             groupOrDataset.Attributes["IMAGE_MINMAXRANGE"] = new double[] { globalMin, globalMax };
             groupOrDataset.Attributes["VALUE_MIN"] = globalMin;
             groupOrDataset.Attributes["VALUE_MAX"] = globalMax;

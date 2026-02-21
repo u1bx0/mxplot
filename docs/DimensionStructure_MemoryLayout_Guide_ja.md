@@ -2,7 +2,8 @@
 
 **MxPlot.Core 技術リファレンス**
 
-> 最終更新: 2026-02-16  
+> 最終更新: 2026-02-08  
+> バージョン: 0.0.2
 
 ## 📚 目次
 
@@ -10,11 +11,12 @@
 2. [メモリレイアウトの基礎](#メモリレイアウトの基礎)
 3. [Innermost実装の詳細](#innermost実装の詳細)
 4. [ストライド計算](#ストライド計算)
-5. [軸定義の再構成と並べ替え](#軸定義の再構成と並べ替え)
-6. [実用例](#実用例)
-7. [ベストプラクティス](#ベストプラクティス)
-8. [FovAxis: 視野タイリング](#fovaxis-視野タイリング)
-9. [将来の拡張](#将来の拡張)
+5. [他ライブラリとの比較](#他ライブラリとの比較)
+6. [軸定義の再構成と並べ替え](#軸定義の再構成と並べ替え)
+7. [実用例](#実用例)
+8. [ベストプラクティス](#ベストプラクティス)
+9. [FovAxis: 視野タイリング](#fovaxis-視野タイリング)
+10. [将来の拡張](#将来の拡張)
 
 ---
 
@@ -124,10 +126,10 @@ private void RegisterAxes(params Axis[] axes)
 - `_strides[i]` は**前の軸までの累積積**
 - これにより、axes[0]のインデックスが1増えるとframeIndexも1増える
 
-#### フレームインデックス計算（`GetFrameIndexAt`メソッド）
+#### フレームインデックス計算（`GetFrameIndexFrom`メソッド）
 
 ```csharp
-public int GetFrameIndexAt(int[] indeces)
+public int GetFrameIndexFrom(int[] indeces)
 {
     if (_axisList.Count == 0) return 0;
     if (indeces.Length != _axisList.Count)
@@ -228,7 +230,7 @@ frameIndex = Z * stride[0] + C * stride[1] + T * stride[2]
            = 23
 ```
 
-**実装** (`GetFrameIndexAt`):
+**実装** (`GetFrameIndexFrom`):
 ```csharp
 int frameIndex = 0;
 for (int i = 0; i < axisCount; i++)
@@ -251,6 +253,65 @@ for (int i = 0; i < axisCount; i++)
 - `Z = (23 / 1) % 3 = 2`
 - `C = (23 / 3) % 2 = 1`
 - `T = (23 / 6) % 4 = 3`
+
+---
+
+## 他ライブラリとの比較
+
+### 比較表
+
+| ライブラリ | デフォルト順序 | 最速変化軸 | MxPlot互換性 |
+|-----------|--------------|-----------|-------------|
+| **MxPlot.Core** | First-fastest | axes[0] | ✅ (基準) |
+| **MATLAB** | Column-major | 最初の次元 | ✅ 同じ |
+| **NumPy (C順序)** | Row-major | 最後の次元 | ❌ 逆 |
+| **NumPy (F順序)** | Column-major | 最初の次元 | ✅ 同じ |
+| **OpenCV** | Row-major | 最後の次元 | ❌ 逆 |
+| **ImageJ** | 設定可能 | 通常はChannel | △ 異なる |
+
+### NumPy (Python) - Row-Major (C順序)
+
+```python
+import numpy as np
+arr = np.zeros((4, 2, 3))  # shape = (T, C, Z)
+# メモリ順: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ..., Z2C1T3
+# 最後の軸(Z)が最速変化
+```
+
+**MxPlotに合わせるには**: Fortran順序を使用
+```python
+arr = np.zeros((3, 2, 4), order='F')  # shape = (Z, C, T)
+# これで最初の軸(Z)が最速変化
+```
+
+### MATLAB - Column-Major (Fortran)
+
+```matlab
+A = zeros(3, 2, 4);  % size = [Z, C, T]
+% 最初の次元(Z)が最速変化
+% メモリ順: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ...
+```
+
+**✅ MxPlotと完全一致！**
+
+### OpenCV (C++) - Row-Major
+
+```cpp
+cv::Mat volume(std::vector<int>{4, 2, 3}, CV_64F);  // dims = {T, C, Z}
+// 最後の次元(Z)が最速変化
+```
+
+**❌ MxPlotと逆**
+
+### ImageJ (Java) - ハイパースタック
+
+```java
+ImagePlus imp = IJ.openImage("path/to/hyperstack.tif");
+// 典型的順序: XYCZT または XYZCT
+// 通常はChannelが最速変化（設定可能）
+```
+
+**△ 異なる規約** - ImageJは可視化のためChannelを優先。
 
 ---
 

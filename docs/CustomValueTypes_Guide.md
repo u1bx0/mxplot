@@ -2,7 +2,7 @@
 
 **MxPlot.Core Advanced Topics**
 
-> Last Updated: 2026-02-08  
+> Last Updated: 2026-02-21  
 > Status: **Preliminary** (Design under active development)
 
 ## 📚 Table of Contents
@@ -83,12 +83,12 @@ var data = new MatrixData<Complex>(256, 256);
 data.Set((ix, iy, x, y) => new Complex(Math.Cos(x), Math.Sin(y)));
 
 // Access different modes
-var (magMin, magMax) = data.GetMinMaxValues(0, ComplexValueMode.Magnitude);
-var (phaseMin, phaseMax) = data.GetMinMaxValues(0, ComplexValueMode.Phase);
-var (powerMin, powerMax) = data.GetMinMaxValues(0, ComplexValueMode.Power);
+var (magMin, magMax) = data.GetValueRange(0, ComplexValueMode.Magnitude);
+var (phaseMin, phaseMax) = data.GetValueRange(0, ComplexValueMode.Phase);
+var (powerMin, powerMax) = data.GetValueRange(0, ComplexValueMode.Power);
 
 // Or using integer mode index
-var (min, max) = data.GetMinMaxValues(frameIndex: 0, valueMode: 0);  // Magnitude
+var (min, max) = data.GetValueRange(frameIndex: 0, valueMode: 0);  // Magnitude
 ```
 
 **Implementation Detail**: The built-in `MinMaxFinder` (delegate) for `Complex` returns a `double[5]` array containing min/max for all modes simultaneously, enabling efficient single-pass computation.
@@ -126,7 +126,7 @@ MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(array =>
 
 // Now all new MatrixData<Vector3D> instances can calculate min/max
 var data = new MatrixData<Vector3D>(512, 512, 100);
-var (min, max) = data.GetMinMaxValues();  // Uses registered finder
+var (min, max) = data.GetValueRange();  // Uses registered finder
 ```
 
 #### Multi-Mode Example
@@ -190,8 +190,8 @@ MatrixData<ElectricField>.RegisterDefaultMinMaxFinder(array =>
 
 // Usage with mode selection
 var data = new MatrixData<ElectricField>(256, 256, 50);
-var (min0, max0) = data.GetMinMaxValues(frameIndex: 0, valueMode: 0);  // Total
-var (min1, max1) = data.GetMinMaxValues(frameIndex: 0, valueMode: 1);  // Ex
+var (min0, max0) = data.GetValueRange(frameIndex: 0, valueMode: 0);  // Total
+var (min1, max1) = data.GetValueRange(frameIndex: 0, valueMode: 1);  // Ex
 ```
 
 ### Key Characteristics
@@ -245,7 +245,7 @@ The current design uses integer indices to select modes:
 
 ```csharp
 // Mode 0, 1, 2, ... correspond to different interpretations
-var (min, max) = data.GetMinMaxValues(frameIndex: 0, valueMode: 0);
+var (min, max) = data.GetValueRange(frameIndex: 0, valueMode: 0);
 ```
 
 **Complex Example**:
@@ -260,7 +260,7 @@ public enum ComplexValueMode
 }
 
 // Extension method for type-safe access
-var (min, max) = complexData.GetMinMaxValues(0, ComplexValueMode.Phase);
+var (min, max) = complexData.GetValueRange(0, ComplexValueMode.Phase);
 ```
 
 ### Extending to Custom Types
@@ -277,16 +277,16 @@ public enum ElectricFieldMode
 }
 
 // Type-safe extension method
-public static (double Min, double Max) GetMinMaxValues(
+public static (double Min, double Max) GetValueRange(
     this MatrixData<ElectricField> data,
     int frameIndex,
     ElectricFieldMode mode)
 {
-    return data.GetMinMaxValues(frameIndex, (int)mode);
+    return data.GetValueRange(frameIndex, (int)mode);
 }
 
 // Usage
-var (min, max) = data.GetMinMaxValues(0, ElectricFieldMode.ComponentEx);
+var (min, max) = data.GetValueRange(0, ElectricFieldMode.ComponentEx);
 ```
 
 **Option 2: Constants Class**
@@ -301,7 +301,7 @@ public static class ElectricFieldModes
 }
 
 // Usage
-var (min, max) = data.GetMinMaxValues(0, ElectricFieldModes.ComponentEx);
+var (min, max) = data.GetValueRange(0, ElectricFieldModes.ComponentEx);
 ```
 
 ### Design Tradeoffs
@@ -402,7 +402,7 @@ MatrixData<T>.RegisterDefaultMinMaxFinder(MinMaxFinder finder);
 public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
 
 // Instance-level access
-var (min, max) = data.GetMinMaxValues(frameIndex, valueMode);
+var (min, max) = data.GetValueRange(frameIndex, valueMode);
 var (minArr, maxArr) = data.GetMinMaxArrays(frameIndex);
 
 // Per-instance override (if needed)
@@ -528,12 +528,12 @@ public static class Vector3DSupport
 // 4. Extension methods (optional)
 public static class Vector3DExtensions
 {
-    public static (double Min, double Max) GetMinMaxValues(
+    public static (double Min, double Max) GetValueRange(
         this MatrixData<Vector3D> data,
         int frameIndex,
         Vector3DMode mode)
     {
-        return data.GetMinMaxValues(frameIndex, (int)mode);
+        return data.GetValueRange(frameIndex, (int)mode);
     }
 }
 
@@ -541,7 +541,7 @@ public static class Vector3DExtensions
 Vector3DSupport.RegisterMagnitudeOnly();  // Recommended for most cases
 
 var data = new MatrixData<Vector3D>(512, 512, 100);
-var (min, max) = data.GetMinMaxValues();  // Gets magnitude min/max
+var (min, max) = data.GetValueRange();  // Gets magnitude min/max
 ```
 
 ### Practical Recommendations

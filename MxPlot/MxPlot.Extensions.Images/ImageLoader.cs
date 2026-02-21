@@ -30,14 +30,14 @@ namespace MxPlot.Extensions.Images
         public static DecomposedData LoadAsDecomposedData(string path, bool toGrayscale = false, bool flipY = true)
         {
             if (!File.Exists(path))
-                throw new FileNotFoundException($"画像ファイルが見つかりません: {path}");
+                throw new FileNotFoundException($"No such file: {path}");
 
             // SKBitmap.Decode は自動的に PNG/JPG/BMP 等を判別してメモリに展開する
             using var stream = File.OpenRead(path);
             using var bitmap = SKBitmap.Decode(stream);
 
             if (bitmap == null)
-                throw new InvalidDataException("画像のデコードに失敗しました。形式が未対応か壊れています。");
+                throw new InvalidDataException("Failed to load bitmap.");
 
             int w = bitmap.Width;
             int h = bitmap.Height;

@@ -22,12 +22,11 @@ namespace MxPlot.Extensions.Fft
     /// is false.</param>
     public record Fft2DOperation
         (ShiftOption Option,
-            int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1,
-            bool SkipRefreshValueRange = false) : IMatrixDataOperation
+            int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> data) where T : unmanaged
         {
-            return data.Fft2D(Option, SrcIndex, Dst, DstIndex, SkipRefreshValueRange);
+            return data.Fft2D(Option, SrcIndex, Dst, DstIndex);
         }
     }
 
@@ -46,13 +45,12 @@ namespace MxPlot.Extensions.Fft
     /// value is false.</param>
     public record InverseFft2DOperation
     (ShiftOption Option,
-            int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1,
-            bool SkipRefreshValueRange = false)
+            int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1)
         : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> data) where T : unmanaged
         {
-            return data.InverseFft2D(Option, SrcIndex, Dst, DstIndex, SkipRefreshValueRange);
+            return data.InverseFft2D(Option, SrcIndex, Dst, DstIndex);
         }
     }
 

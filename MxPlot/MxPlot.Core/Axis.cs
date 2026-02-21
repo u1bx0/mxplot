@@ -251,6 +251,16 @@ namespace MxPlot.Core
             return new Axis(num, min, max, "Frame");
         }
 
+        /// <summary>
+        /// General axis based on index with a specified name
+        /// </summary>
+        /// <param name="name"></param>
+        /// <param name="num"></param>
+        /// <returns></returns>
+        public static Axis IndexBased(string name, int num)
+        {
+            return new Axis(num, 0, num - 1, name, "", true);
+        }
 
         /// <summary>
         /// DeepCopy of axis[] without its index (position)

@@ -2,7 +2,8 @@
 
 **MxPlot.Core Technical Reference**
 
-> Last Updated: 2026-02-16  
+> Last Updated: 2026-02-08  
+> Version: 0.0.2
 
 ## 📚 Table of Contents
 
@@ -10,11 +11,12 @@
 2. [Memory Layout Fundamentals](#memory-layout-fundamentals)
 3. [Innermost Implementation Details](#innermost-implementation-details)
 4. [Stride Calculation](#stride-calculation)
-5. [Axis Reconfiguration and Reordering](#axis-reconfiguration-and-reordering)
-6. [Practical Examples](#practical-examples)
-7. [Best Practices](#best-practices)
-8. [FovAxis: Field-of-View Tiling](#fovaxis-field-of-view-tiling)
-9. [Future Extensions](#future-extensions)
+5. [Comparison with Other Libraries](#comparison-with-other-libraries)
+6. [Axis Reconfiguration and Reordering](#axis-reconfiguration-and-reordering)
+7. [Practical Examples](#practical-examples)
+8. [Best Practices](#best-practices)
+9. [FovAxis: Field-of-View Tiling](#fovaxis-field-of-view-tiling)
+10. [Future Extensions](#future-extensions)
 
 ---
 
@@ -124,10 +126,10 @@ private void RegisterAxes(params Axis[] axes)
 - `_strides[i]` is the **cumulative product of all previous axes**
 - When axes[0] index increases by 1, frameIndex also increases by 1
 
-#### Frame Index Calculation (`GetFrameIndexAt` Method)
+#### Frame Index Calculation (`GetFrameIndexFrom` Method)
 
 ```csharp
-public int GetFrameIndexAt(int[] indeces)
+public int GetFrameIndexFrom(int[] indeces)
 {
     if (_axisList.Count == 0) return 0;
     if (indeces.Length != _axisList.Count)
@@ -228,7 +230,7 @@ frameIndex = Z * stride[0] + C * stride[1] + T * stride[2]
            = 23
 ```
 
-**Implementation** (`GetFrameIndexAt`):
+**Implementation** (`GetFrameIndexFrom`):
 ```csharp
 int frameIndex = 0;
 for (int i = 0; i < axisCount; i++)
@@ -254,7 +256,64 @@ for (int i = 0; i < axisCount; i++)
 
 ---
 
+## Comparison with Other Libraries
 
+### Summary Table
+
+| Library | Default Order | Fastest Axis | MxPlot Compatible |
+|---------|--------------|--------------|-------------------|
+| **MxPlot.Core** | First-fastest | axes[0] | ✅ (reference) |
+| **MATLAB** | Column-major | First dimension | ✅ Same |
+| **NumPy (C-order)** | Row-major | Last dimension | ❌ Opposite |
+| **NumPy (F-order)** | Column-major | First dimension | ✅ Same |
+| **OpenCV** | Row-major | Last dimension | ❌ Opposite |
+| **ImageJ** | Configurable | Usually Channel | △ Different |
+
+### NumPy (Python) - Row-Major (C-order)
+
+```python
+import numpy as np
+arr = np.zeros((4, 2, 3))  # shape = (T, C, Z)
+# Memory order: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ..., Z2C1T3
+# Last axis (Z) varies fastest
+```
+
+**To match MxPlot**: Use Fortran order
+```python
+arr = np.zeros((3, 2, 4), order='F')  # shape = (Z, C, T)
+# Now first axis (Z) varies fastest
+```
+
+### MATLAB - Column-Major (Fortran)
+
+```matlab
+A = zeros(3, 2, 4);  % size = [Z, C, T]
+% First dimension (Z) varies fastest
+% Memory order: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ...
+```
+
+**✅ Matches MxPlot perfectly!**
+
+### OpenCV (C++) - Row-Major
+
+```cpp
+cv::Mat volume(std::vector<int>{4, 2, 3}, CV_64F);  // dims = {T, C, Z}
+// Last dimension (Z) varies fastest
+```
+
+**❌ Opposite to MxPlot**
+
+### ImageJ (Java) - Hyperstack
+
+```java
+ImagePlus imp = IJ.openImage("path/to/hyperstack.tif");
+// Typical order: XYCZT or XYZCT
+// Often Channel varies fastest (configurable)
+```
+
+**△ Different convention** - ImageJ prioritizes channels for visualization.
+
+---
 
 ## FovAxis: Field-of-View Tiling
 

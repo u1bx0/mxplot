@@ -28,12 +28,12 @@ namespace MxPlot.Core.Processing
     }
 
     /// <summary>
-    /// Extracts a single frame/slice at the specified index along the given axis (SnapTo).
+    /// Extracts a single frame/slice at the specified index along the given axis (SelectBy).
     /// </summary>
-    public record SnapToOperation(string AxisName, int Index, bool DeepCopy = false) : IMatrixDataOperation
+    public record SelectByOperation(string AxisName, int Index, bool DeepCopy = false) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.SnapTo(AxisName, Index, DeepCopy);
+            => src.SelectBy(AxisName, Index, DeepCopy);
     }
 
     // =========================================================================================

@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace MxPlot.Core
 {
@@ -22,6 +23,71 @@ namespace MxPlot.Core
     /// <typeparam name="T"></typeparam>
     public class MatrixData<T> : IMatrixData where T : unmanaged
     {
+
+        /// <summary>
+        /// A stateful container that manages statistical cache via shared list instances.
+        /// </summary>
+        /// <remarks>
+        /// The essential point of this class is that it holds references to <see cref="List{Double}"/> 
+        /// instances rather than cloning their values. When multiple <see cref="ValueRange"/> 
+        /// instances share the same list references, calling <see cref="Invalidate"/> (which clears the lists) 
+        /// synchronizes the invalidation state across all associated objects.
+        /// </remarks>
+        internal class ValueRange
+        {
+            /// <summary> Gets the list of minimum values for each value mode. </summary>
+            public List<double> MinValues { get; } = [];
+
+            /// <summary> Gets the list of maximum values for each value mode. </summary>
+            public List<double> MaxValues { get; } = [];
+
+            /// <summary>
+            /// Gets a value indicating whether the current statistics are valid (calculated).
+            /// </summary>
+            public bool IsValid => MinValues.Count > 0;
+
+            /// <summary>
+            /// Clears the cached statistics and marks the state as invalid (<see cref="IsValid"/> = false).
+            /// </summary>
+            public void Invalidate() {MinValues.Clear(); MaxValues.Clear(); }   
+            public ValueRange() { }
+
+            /// <summary>
+            /// Initializes a new instance of the <see cref="ValueRange"/> class 
+            /// by wrapping existing list instances to enable shared synchronization.
+            /// </summary>
+            /// <param name="minValues">The shared list instance for minimum values.</param>
+            /// <param name="maxValues">The shared list instance for maximum values.</param>
+            public ValueRange(List<double> minValues, List<double> maxValues)
+            {
+                // Critical Logic: Capture the references of the lists to maintain 
+                // synchronization across different ValueRange containers.
+                MinValues = minValues;
+                MaxValues = maxValues;
+            }
+
+            public void Set(IEnumerable<double> minValues, IEnumerable<double> maxValues)
+            {
+                MinValues.Clear();
+                MaxValues.Clear();
+                using (var minEnum = minValues.GetEnumerator())
+                using (var maxEnum = maxValues.GetEnumerator())
+                {
+                    while (true)
+                    {
+                        bool hasMin = minEnum.MoveNext();
+                        bool hasMax = maxEnum.MoveNext();
+                        if (hasMin != hasMax)
+                        {
+                            throw new ArgumentException("Enumerables must have the same number of elements.");
+                        }
+                        if (!hasMin) break; // No elements anymore
+                        MinValues.Add(minEnum.Current);
+                        MaxValues.Add(maxEnum.Current);
+                    }
+                }
+            }
+        }
 
         /// <summary>
         /// Provider delegate for min and max arraies for the specified array
@@ -42,6 +108,14 @@ namespace MxPlot.Core
         {
             _registeredDefaultFinder = CreateBuiltInMinMaxFinder();
         }
+
+        /// <summary>
+        /// Indicates whether the type parameter T is a supported primitive type within the MatrixData framework.
+        /// </summary>
+        /// <remarks>This field is used to determine if operations involving the type T can be performed,
+        /// based on its inclusion in the supported primitive types list.</remarks>
+        private static readonly bool _isSupportedPrimitive =
+                MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
 
         /// <summary>
         /// Number of elements in x direction: immutable parameter for MatrixData instance
@@ -69,12 +143,17 @@ namespace MxPlot.Core
         /// <summary>
         /// Array holding maximum values for each frame
         /// </summary>
-        private readonly List<double[]> _valueMaxArray = [[]];
+        //private readonly List<double[]> _valueMaxArray = [[]];
 
         /// <summary>
         /// Array holding minimum values for each frame
         /// </summary>
-        private readonly List<double[]> _valueMinArray = [[]];
+        //private readonly List<double[]> _valueMinArray = [[]];
+
+        /// <summary>
+        /// A map that associates an array reference with its corresponding <see cref="ValueRange"/> statistics.
+        /// </summary>
+        private readonly Dictionary<T[], ValueRange> _valueRangeMap = new Dictionary<T[], ValueRange>(); 
 
         /// <summary>
         /// MinMaxFinder for this type. May be null for custom structs until registered.
@@ -159,7 +238,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="MatrixData&lt;T&gt;"/> class. Existing data array can be provided.
+        /// Initializes a new single-frame instance of the <see cref="MatrixData&lt;T&gt;"/> class. Existing data array can be provided (shallow copy).
         /// </summary>
         /// <param name="xnum"></param>
         /// <param name="ynum"></param>
@@ -191,7 +270,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="MatrixData&lt;T&gt;"/> class with existing data arrays.
+        /// Initializes a new instance of the <see cref="MatrixData&lt;T&gt;"/> class with existing data arrays (shallow copy).
         /// </summary>
         /// <param name="xnum"></param>
         /// <param name="ynum"></param>
@@ -208,14 +287,34 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Initializes a new instance with existing data arrays and min/max specification for non-primitive types such as Complex
+        /// Initializes a new instance by injecting existing data arrays and pre-defined min/max containers.
         /// </summary>
-        /// <param name="xnum"></param>
-        /// <param name="ynum"></param>
-        /// <param name="arrayList"></param>
-        /// <param name="minValueList">Ignored if the number of element does not match FrameCount. </param>
-        /// <param name="maxValueList">Ignored if the number of element does not match FrameCount.</param>
-        public MatrixData(int xnum, int ynum, List<T[]> arrayList, List<double[]> minValueList, List<double[]> maxValueList)
+        /// <remarks>
+        /// <para><strong>IMPORTANT:</strong></para>
+        /// This constructor is the core mechanism for establishing <b>Shared Reference Synchronization</b>. 
+        /// Unlike standard constructors, this method captures the exact instances of the inner List&lt;double&gt;  
+        /// within <paramref name="minValueList"/> and <paramref name="maxValueList"/>.
+        /// <para/>
+        /// By passing the same list instances to multiple <see cref="MatrixData"/> objects, the internal frams (T[]) and its min/max statistics become 
+        /// "linked." Any modification or invalidation in one object will automatically propagate to all 
+        /// others because they share the same underlying statistical "Source of Truth." 
+        /// Use this constructor when performing shallow copies, reordering, or view transformations 
+        /// where data integrity must be maintained across all instances.
+        /// </remarks>
+        /// <param name="xnum">The number of columns in the matrix.</param>
+        /// <param name="ynum">The number of rows in the matrix.</param>
+        /// <param name="arrayList">The list of raw data arrays to be managed.</param>
+        /// <param name="minValueList">
+        /// A nested list of minimum values. The inner <see cref="List{Double}"/> instances are 
+        /// captured by reference to enable cross-instance cache synchronization. 
+        /// Ignored if the count does not match the frame count. The order of min/max lists should correspond to the order of arrays in <paramref name="arrayList"/>.
+        /// </param>
+        /// <param name="maxValueList">
+        /// A nested list of maximum values. Similar to <paramref name="minValueList"/>, 
+        /// the inner lists are shared by reference. 
+        /// Ignored if the count does not match the frame count. The order of min/max lists should correspond to the order of arrays in <paramref name="arrayList"/>.
+        /// </param>
+        public MatrixData(int xnum, int ynum, List<T[]> arrayList, List<List<double>> minValueList, List<List<double>> maxValueList)
         {
             CheckPlane(xnum, ynum);
             _xcount = xnum;
@@ -227,28 +326,37 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Initializes a new instance with existing data arrays and primitive min/max values.
+        /// Initializes a new instance using existing data arrays and initial primitive min/max values.
         /// </summary>
-        /// <param name="xnum"></param>
-        /// <param name="ynum"></param>
-        /// <param name="arrayList"></param>
-        /// <param name="primitiveMinValueList">Ignored if the number of element does not match FrameCount.</param>
-        /// <param name="primitiveMaxValueList">Ignored if the numver of element does not match FrameCount.</param>
+        /// <remarks>
+        /// <para><strong>NOTE ON SYNCHRONIZATION:</strong></para>
+        /// Unlike the <c>List&lt;List&lt;double&gt;&gt;</c> constructor, this version <b>DOES NOT</b> establish 
+        /// a shared statistical link. Each primitive value is wrapped in a <b>new</b> inner list instance. 
+        /// While the physical data arrays (<typeparamref name="T"/>[]) are shared by reference, 
+        /// the min/max cache is unique to this instance. 
+        /// <br/>
+        /// To maintain a fully synchronized link (where invalidation propagates across instances), 
+        /// use the constructor that accepts <c>List&lt;List&lt;double&gt;&gt;</c>.
+        /// </remarks>
+        /// <param name="xnum">The number of columns.</param>
+        /// <param name="ynum">The number of rows.</param>
+        /// <param name="arrayList">The list of data arrays (shared by reference).</param>
+        /// <param name="primitiveMinValueList">Initial minimum values. New cache containers will be created from these values.</param>
+        /// <param name="primitiveMaxValueList">Initial maximum values. New cache containers will be created from these values.</param>
         public MatrixData(int xnum, int ynum, List<T[]> arrayList, List<double> primitiveMinValueList, List<double> primitiveMaxValueList)
         {
             CheckPlane(xnum, ynum);
             _xcount = xnum;
             _ycount = ynum;
             int count = arrayList?.Count ?? 1;
-            // Convert List<double> (scalar) -> List<double[]> (array)
+            // Convert List<double> (scalar) -> List<List<double>> (array)
             // Treat as empty list if no values
             var minList = primitiveMinValueList?
-                .Select(val => new double[] { val }) // Wrap double in double[1]
-                .ToList() ?? [];                     // Empty list if null
+                .Select(val => new List<double> { val }).ToList() ?? [];
 
             var maxList = primitiveMaxValueList?
-                .Select(val => new double[] { val }) // Wrap double in double[1]
-                .ToList() ?? [];                     // Empty list if null
+                .Select(val => new List<double> { val }).ToList() ?? [];
+
             AllocateArray(count, arrayList, minList, maxList);
 
             SetXYScale(0, xnum - 1, 0, ynum - 1);
@@ -368,82 +476,84 @@ namespace MxPlot.Core
 
 
         // Memory allocation
-        private void AllocateArray(int frameCount, List<T[]>? buf = null, List<double[]>? minValueList = null, List<double[]>? maxValueList = null)
+        private void AllocateArray(int frameCount, List<T[]>? buf = null, List<List<double>>? minValueList = null, List<List<double>>? maxValueList = null)
         {
             if (frameCount <= 0)
                 throw new ArgumentException($"Frame count must be > 0: frameCount = {frameCount}");
 
             _arrayList.Clear(); //Ideally, no elements should exist.
-            _valueMaxArray.Clear();
-            _valueMinArray.Clear();
             _arrayList.Capacity = frameCount;
-            _valueMaxArray.Capacity = frameCount;
-            _valueMinArray.Capacity = frameCount;
+            
             bool isMinMaxProvided = (minValueList != null && maxValueList != null) &&
                                     (minValueList.Count == frameCount) && (maxValueList.Count == frameCount);
             int length = _xcount * _ycount;
-            if (buf is not null)
+            try
             {
-                if (buf.Count != frameCount)
-                    throw new ArgumentException($"Buffer count does not match frame count: buf.Count = {buf.Count}, frameCount = {frameCount}");
-                
-                for (int i = 0; i < frameCount; i++)
+                if (buf is not null)
                 {
-                    if (buf[i] is not null && buf[i].Length != length)
-                        throw new ArgumentException($"Invalid array size at index {i}: length = {buf[i].Length}, expected = {_xcount * _ycount}");
-                    _arrayList.Add(buf[i]);
-                    if (isMinMaxProvided)
+                    if (buf.Count != frameCount)
+                        throw new ArgumentException($"Buffer count mismatch: buf={buf.Count}, expected={frameCount}");
+
+                    for (int i = 0; i < frameCount; i++)
                     {
-                        _valueMinArray.Add((double[])minValueList![i].Clone());
-                        _valueMaxArray.Add((double[])maxValueList![i].Clone());
-                    }
-                    else
-                    {
-                        _valueMaxArray.Add([]);
-                        _valueMinArray.Add([]);
-                        RefreshValueRange(i);
+                        var currentArray = buf[i];
+
+                        if (currentArray is null || currentArray.Length != length)
+                            throw new ArgumentException($"Invalid array at index {i}.");
+
+                        _arrayList.Add(currentArray);
+
+                        if (!_valueRangeMap.ContainsKey(currentArray))  //Key of currentArray does not exist in the map
+                        {
+                            if (isMinMaxProvided)
+                            {
+                                if (minValueList![i] == null || maxValueList![i] == null)
+                                    throw new ArgumentException($"Min/max arrays cannot be null at index {i}.");
+
+                                _valueRangeMap[currentArray] = new ValueRange(minValueList[i], maxValueList[i]);
+                            }
+                            else
+                            {
+                                _valueRangeMap[currentArray] = new ValueRange();
+                                //Min/max values will be calculated on demand when GetValueRange is called for this frame.
+                            }
+                        }
+                        else //currentArray already exists in the map
+                        {
+                            //Do nothing - ValueRange object for this array is already registered, so we assume the existing ValueRange is valid.
+                        }
                     }
                 }
-            }
-            else //buf is null
-            {
-                try
+                else // buf is null (new allocation)
                 {
                     for (int i = 0; i < frameCount; i++)
                     {
-                        _arrayList.Add(new T[length]);
-                        _valueMaxArray.Add([]);
-                        _valueMinArray.Add([]);
-                        //MinMav values will be calculated when needed
-                        //RefreshValueRange(i);
+                        var newArray = new T[length]; // OOM may happen here
+                        _arrayList.Add(newArray);
+                        // Initialize ValueRange with empty values. Actual min/max will be calculated on demand when GetValueRange is called for this frame.
+                        _valueRangeMap[newArray] = new ValueRange();
                     }
                 }
-                catch (Exception e)
-                {
-                    //Unexpected situation: clear all allocated memory
-                    //This object is not valid anymore.
-                    int allocatedCount = _arrayList.Count;
-                    long frameSize = (long)_xcount * _ycount * Unsafe.SizeOf<T>();
+            }
+            catch (Exception e)
+            {
+                // Clean up
+                _arrayList.Clear();
+                _valueRangeMap.Clear();
 
-                    _arrayList.Clear();
-                    _valueMaxArray.Clear();
-                    _valueMinArray.Clear();
-                    //possibly out of memory
-                    Debug.WriteLine($"[AllocateArray] Exception");
-                    // 2. 情報を付加して再スロー
-                    if (e is OutOfMemoryException ex)
-                    {
-                        throw new OutOfMemoryException(
-                            $"MatrixData allocation failed at frame {allocatedCount} of {frameCount}. " +
-                            $"Total attempted memory: {(long)frameCount * frameSize / 1024 / 1024} MB. " +
-                            $"The system may be out of memory.", ex);
-                    }
-                    else
-                    {
-                        throw;
-                    }
+                Debug.WriteLine($"[AllocateArray] Exception: {e.Message}");
+
+                if (e is OutOfMemoryException ex)
+                {
+                    long frameSize = (long)_xcount * _ycount * Unsafe.SizeOf<T>();
+                    throw new OutOfMemoryException(
+                        $"Allocation failed at frame {_arrayList.Count}/{frameCount}. " +
+                        $"Est. memory: {(long)frameCount * frameSize / 1024 / 1024} MB.", ex);
                 }
-                
+                else
+                {
+                    throw;
+                }
             }
         }
 
@@ -517,7 +627,7 @@ namespace MxPlot.Core
         /// </summary>
         /// <returns>A tuple containing the minimum and maximum values as doubles. The first item is the minimum value; the
         /// second item is the maximum value.</returns>
-        public (double Min, double Max) GetMinMaxValues() => GetMinMaxValues(ActiveIndex, 0);
+        public (double Min, double Max) GetValueRange() => GetValueRange(ActiveIndex, 0);
 
         /// <summary>
         /// Returns the minimum and maximum values for the specified frame with default value type.
@@ -526,20 +636,43 @@ namespace MxPlot.Core
         /// or equal to 0 and less than the total number of frames.</param>
         /// <returns>A tuple containing the minimum and maximum values for the specified frame. The first item is the minimum
         /// value; the second item is the maximum value.</returns>
-        public (double Min, double Max) GetMinMaxValues(int frameIndex) => GetMinMaxValues(frameIndex, 0);
+        public (double Min, double Max) GetValueRange(int frameIndex) => GetValueRange(frameIndex, 0);
 
-        public (double Min, double Max) GetMinMaxValues(int frameIndex, int valueMode)
+        /// <summary>
+        /// Retrieves the minimum and maximum values for the specified frame and value mode.
+        /// </summary>
+        /// <remarks>This method can be used  so as to handle a structured value type such as Complex.</remarks>
+        /// <param name="frameIndex">The zero-based index of the frame for which to obtain the value range. Must be within the range of available
+        /// frames.</param>
+        /// <param name="valueMode">The index specifying which value mode to use when retrieving the minimum and maximum values. Must correspond
+        /// to a valid entry in the value arrays.</param>
+        /// <returns>A tuple containing the minimum and maximum values for the specified frame and value mode. Returns
+        /// (double.NaN, double.NaN) if the value range cannot be determined.</returns>
+        public (double Min, double Max) GetValueRange(int frameIndex, int valueMode)
         {
-           return GetMinMaxArrays(frameIndex) is (var minArr, var maxArr)
+           return GetValueRangeList(frameIndex) is (var minArr, var maxArr)
                 ? (minArr[valueMode], maxArr[valueMode])
                 : (double.NaN, double.NaN);
         }
 
-        public (double[] MinArray, double[] MaxArray) GetMinMaxArrays(int frameIndex)
+        /// <summary>
+        /// Retrieves the minimum and maximum value lists for the specified frame index.
+        /// </summary>
+        /// <remarks>This method returns all the available min/max values for the structured value type. e.g. [Magnitude, Real, Imaginary, Phase, Power] for Complex </remarks>
+        /// <param name="frameIndex">The zero-based index of the frame for which to obtain value ranges. Must be within the bounds of the
+        /// underlying array list.</param>
+        /// <returns>A tuple containing two lists: the first list contains the minimum values, and the second list contains the
+        /// maximum values for the specified frame. Both lists are empty if the frame index is invalid or no value range
+        /// exists.</returns>
+        public (List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex)
         {
             if (RefreshValueRangeRequired(frameIndex))
-                RefreshValueRange(frameIndex);
-            return (_valueMinArray[frameIndex], _valueMaxArray[frameIndex]);
+                return RefreshValueRange(frameIndex);
+            if(_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+            {
+                return (range.MinValues, range.MaxValues);
+            }
+            return ([], []);
         }
 
         /// <summary>
@@ -548,9 +681,7 @@ namespace MxPlot.Core
         /// <returns>The minimum value for the currently active index.</returns>
         public double GetMinValue()
         {
-            if (RefreshValueRangeRequired(ActiveIndex))
-                RefreshValueRange(ActiveIndex);
-            return _valueMinArray[ActiveIndex][0];
+            return GetValueRangeList(ActiveIndex).MinValues.FirstOrDefault(double.NaN);
         }
 
         /// <summary>
@@ -559,9 +690,7 @@ namespace MxPlot.Core
         /// <returns>The maximum value for the active index as a double.</returns>
         public double GetMaxValue()
         {
-            if (RefreshValueRangeRequired(ActiveIndex))
-                RefreshValueRange(ActiveIndex);
-            return _valueMaxArray[ActiveIndex][0];
+            return GetValueRangeList(ActiveIndex).MaxValues.FirstOrDefault(double.NaN);
         }
 
 
@@ -581,9 +710,9 @@ namespace MxPlot.Core
         /// Thrown when targetAxis is not found in Dimensions, or when fixedCoordinates length 
         /// doesn't match the number of other axes.
         /// </exception>
-        public (double Min, double Max) GetMinMaxValues(Axis targetAxis, int[]? fixedCoordinates = null)
+        public (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null)
         {
-            return GetMinMaxValues(targetAxis, fixedCoordinates, 0);
+            return GetValueRange(targetAxis, fixedCoordinates, 0);
         }
 
         /// <summary>
@@ -601,12 +730,12 @@ namespace MxPlot.Core
         /// <returns>A tuple containing the minimum and maximum values found along the specified axis, according to the provided
         /// coordinates and value mode.</returns>
         /// <exception cref="ArgumentException">Thrown if the specified target axis does not exist in the current dimensions.</exception>
-        public (double Min, double Max) GetMinMaxValues(Axis targetAxis, int[]? fixedCoordinates = null, int valueMode = 0)
+        public (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null, int valueMode = 0)
         {
             // Special case: single frame or no dimensions
             if (FrameCount == 1)
             {
-                return (GetMinValue(), GetMaxValue());
+                return GetValueRange(0);
             }
 
             // Validate targetAxis exists
@@ -626,12 +755,14 @@ namespace MxPlot.Core
                     
                     if (RefreshValueRangeRequired(frameIndex))
                         RefreshValueRange(frameIndex);
+                    if(_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+                    {
+                        double vmin = range.MinValues[valueMode];
+                        double vmax = range.MaxValues[valueMode];
 
-                    double vmin = _valueMinArray[frameIndex][valueMode];
-                    double vmax = _valueMaxArray[frameIndex][valueMode];
-                    
-                    if (vmin < min) min = vmin;
-                    if (vmax > max) max = vmax;
+                        if (vmin < min) min = vmin;
+                        if (vmax > max) max = vmax;
+                   }
                 }
             }
             else
@@ -651,11 +782,13 @@ namespace MxPlot.Core
                     if (RefreshValueRangeRequired(frameIndex))
                         RefreshValueRange(frameIndex);
 
-                    double vmin = _valueMinArray[frameIndex][valueMode];
-                    double vmax = _valueMaxArray[frameIndex][valueMode];
-                    
-                    if (vmin < min) min = vmin;
-                    if (vmax > max) max = vmax;
+                    if(_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+                    {
+                        double vmin = range.MinValues[valueMode];
+                        double vmax = range.MaxValues[valueMode];
+                        if (vmin < min) min = vmin;
+                        if (vmax > max) max = vmax;
+                    }
                 }
             }
 
@@ -667,9 +800,9 @@ namespace MxPlot.Core
         /// </summary>
         /// <returns>A tuple containing the minimum and maximum values found globally. The first item is the minimum value; the
         /// second item is the maximum value.</returns>
-        public (double Min, double Max) GetGlobalMinMaxValues()
+        public (double Min, double Max) GetGlobalValueRange()
         {
-            return GetGlobalMinMaxValues(0);
+            return GetGlobalValueRange(0);
         }
 
         /// <summary>
@@ -680,26 +813,32 @@ namespace MxPlot.Core
         /// <returns>A tuple containing the minimum and maximum values found across all frames. The first element is the global
         /// minimum; the second element is the global maximum.</returns>
         /// <exception cref="InvalidOperationException">Thrown if there are no frames available to calculate the global minimum and maximum values.</exception>
-        public (double Min, double Max) GetGlobalMinMaxValues(int valueMode)
+        public (double Min, double Max) GetGlobalValueRange(int valueMode)
         {
             if (FrameCount == 0) throw new InvalidOperationException("No frames available to calculate global min/max.");
 
             double min = double.PositiveInfinity;
             double max = double.NegativeInfinity;
 
-            for (int i = 0; i < FrameCount; i++)
+            //Evaluate min/max throughout the map;
+            //This is more efficient if _arrayList contains many shallow copies of the same array reference, which refer to the same _valueRangeMap value;
+            foreach (var range in _valueRangeMap.Values)
             {
-                var (vmin, vmax) = GetMinMaxValues(i, valueMode);
+                if (!range.IsValid)
+                {
+                    RefreshValueRange(_arrayList.IndexOf(_valueRangeMap.First(kvp => kvp.Value == range).Key));
+                }
+                var vmin = range.MinValues[valueMode];
+                var vmax = range.MaxValues[valueMode];
                 if (vmin < min) min = vmin;
                 if (vmax > max) max = vmax;
             }
 
             return (min, max);
+
         }
 
-        public void RefreshValueRange() => RefreshValueRange(ActiveIndex);
-
-        public void RefreshValueRange(int frameIndex)
+        protected (List<double> MinValues, List<double> MaxValues) RefreshValueRange(int frameIndex)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
             
@@ -711,44 +850,92 @@ namespace MxPlot.Core
                     $"or avoid operations that require min/max statistics.");
             }
 
-            var array = GetArray(frameIndex);
+            var array = _arrayList[frameIndex]; 
             var (minValues, maxValues) = _minMaxFinder(array);
-            
-            _valueMinArray[frameIndex] = minValues;
-            _valueMaxArray[frameIndex] = maxValues;
+            if(_valueRangeMap.ContainsKey(array)) //Key exists in the map
+            {
+                _valueRangeMap[array].Set(minValues, maxValues);
+                return (_valueRangeMap[array].MinValues, _valueRangeMap[array].MaxValues);
+            }
+            else
+            {
+                //Invalid condition; Do nothing here;
+                return ([], []);
+            }
         }
 
-
+        
+        /// <summary>
+        /// Determines whether the value range for the specified frame index needs to be refreshed.
+        /// </summary>
+        /// <param name="frameIndex">The zero-based index of the frame to check for value range validity.</param>
+        /// <returns>true if the value range for the specified frame is missing, empty, mismatched in length, or contains invalid
+        /// values; otherwise, false.</returns>
         private bool RefreshValueRangeRequired(int frameIndex)
         {
             // Check if the arrays exist and if primary dimension is invalid
-            var minArr = _valueMinArray[frameIndex];
-            var maxArr = _valueMaxArray[frameIndex];
-            if(minArr == null || maxArr == null || minArr.Length == 0 || maxArr.Length == 0 || minArr.Length != maxArr.Length)
+            if(_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
             {
-                return true;
-            }
-            for (int i = 0; i < minArr.Length; i++)
-            {
-                if (minArr[i] > maxArr[i])
+                if (!range.IsValid)
+                    return true;
+                var minArr = range.MinValues;
+                var maxArr = range.MaxValues;
+                if (minArr == null || maxArr == null || minArr.Count == 0 || maxArr.Count == 0 || minArr.Count != maxArr.Count)
                 {
                     return true;
                 }
+                for (int i = 0; i < minArr.Count; i++)
+                {
+                    if (minArr[i] > maxArr[i])
+                    {
+                        return true;
+                    }
+                }
             }
+            //The key (array) does not exist in the map, which should not happen. Do nothing here;
             return false;
         }
 
         /// <summary>
-        /// Invalidates the cached min and max values for the specified frame index. 
+        /// Invalidates the cached min and max values for the specified frame index. Min/max values for the specified frame will be recalculated when next requested.
         /// </summary>
+        /// <remarks>
+        /// This method is called whenever pixel data can potentially be modified, 
+        /// ensuring that subsequent calls to retrieve min/max values will trigger a refresh of the cached statistics.<br/>
+        /// This method is called in the following methods:
+        /// <list type="bullet">  
+        ///  <item>SetValueAt(int ix, int iy, int frameIndex, double v)</item>
+        /// <item>SetValueAtTyped(int ix, int iy, int frameIndex, T value)</item> 
+        ///  <item>[ix, iy] setter</item>
+        ///  <item>GetArray(int frameIndex) </item>
+        ///  <item>GetRawBytes(int frameIndex) </item>
+        /// </list>
+        /// </remarks>
         /// <param name="frameIndex"></param>
-        private void Invalidate(int frameIndex)
+        public void Invalidate(int frameIndex)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
+            if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+            {
+                range.Invalidate();
+            }
+        }
 
-            if (_valueMinArray[frameIndex].Length == 0) return; // Already invalid
-            _valueMinArray[frameIndex] = [];
-            _valueMaxArray[frameIndex] = [];
+        /// <summary>
+        /// Min/max values for the active index will be recalculated when next requested. 
+        /// This method should be called after any operation that modifies pixel values, to ensure that subsequent calls to retrieve min/max values will return accurate results.
+        /// </summary>
+        public void Invalidate()
+        {
+            Invalidate(ActiveIndex);
+        }
+
+        public void InvalidateAllFrames()
+        {
+            for (int i = 0; i < FrameCount; i++)
+            {
+                Invalidate(i);
+            }
         }
 
         // Index/Coordinate conversion methods
@@ -851,7 +1038,8 @@ namespace MxPlot.Core
 
         /// <summary>
         /// Gets the internal array for the specified frame. If no frame index is provided, the active frame's array is returned.
-        /// After modifying the returned array, call RefreshValueRange(frameIndex) to update min/max statistics.
+        /// This method automatically invalidates the cached min/max values for the specified frame, ensuring that any modifications to the array will trigger a refresh of the statistics when next requested.
+        /// However, users should call Invalidate explicitly when further modifying the array kept outside after calling GetValueRange.
         /// </summary>
         /// <param name="frameIndex"></param>
         /// <returns></returns>
@@ -859,6 +1047,7 @@ namespace MxPlot.Core
         public T[] GetArray(int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
+            Invalidate(frameIndex); // Ensure min/max will be recalculated if data is modified through the byte span
             return _arrayList[frameIndex];
         }
 
@@ -881,16 +1070,22 @@ namespace MxPlot.Core
             if (srcArray != array)
                 srcArray.AsSpan().CopyTo(array);
 
-            if (minValues != null && maxValues != null)
+            if (minValues != null && maxValues != null 
+                && minValues.Length > 0 && maxValues.Length > 0 
+                && minValues.Length == maxValues.Length)
             {
-                _valueMinArray[frameIndex] = minValues;
-                _valueMaxArray[frameIndex] = maxValues;
+                if (_valueRangeMap.TryGetValue(array, out var range))
+                {
+                    range.Set(minValues, maxValues);
+                }
             }
             else
             {
-                RefreshValueRange(frameIndex);
+                //RefreshValueRange(frameIndex);
+                Invalidate(frameIndex);
             }
         }
+
 
         /// <summary>
         /// Accessor to get or set the value at the specified (ix, iy) position for the active frame. 
@@ -915,12 +1110,145 @@ namespace MxPlot.Core
         }
 
         /// <summary>
+        /// Accessor for a 3D matrix where <c>Axes.Length == 1</c>.
+        /// The frame index corresponds directly to the first axis.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Performance Note (Optimal Loop Order):</b></para>
+        /// <para>The internal memory layout is optimized for spatial coordinates (X, Y, Axis0). 
+        /// For maximum performance and sequential memory access, nest your loops from right to left: 
+        /// <c>i_axis0</c> (outermost) &gt; <c>iy</c> &gt; <c>ix</c> (innermost).</para>
+        /// </remarks>
+        /// <param name="ix">The x-coordinate (column index).</param>
+        /// <param name="iy">The y-coordinate (row index).</param>
+        /// <param name="i_axis0">The index for the 1st axis (Axes[0]).</param>
+        public T this[int ix, int iy, int i_axis0]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _arrayList[i_axis0][iy * _xcount + ix]; //i_axis0 corresponds to frame index directly since there's only one axis
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set
+            {
+                _arrayList[i_axis0][iy * _xcount + ix] = value;
+                Invalidate(i_axis0);
+            }
+        }
+
+        /// <summary>
+        /// Accessor for a 4D matrix where <c>Axes.Length == 2</c>.
+        /// </summary>
+        /// <remarks>
+        /// This explicit overload prevents memory allocation and ensures maximum performance via JIT inlining.
+        /// </remarks>
+        /// <param name="ix">The x-coordinate (column index).</param>
+        /// <param name="iy">The y-coordinate (row index).</param>
+        /// <param name="i_axis0">The index for the 1st axis (Axes[0]).</param>
+        /// <param name="i_axis1">The index for the 2nd axis (Axes[1]).</param>
+        /// <returns>The value at the specified multidimensional coordinates.</returns>
+        public T this[int ix, int iy, int i_axis0, int i_axis1]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1)][iy * _xcount + ix];
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set
+            {
+                int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1);
+                _arrayList[frameIndex][iy * _xcount + ix] = value;
+                Invalidate(frameIndex);
+            }
+        }
+
+        /// <summary>
+        /// Accessor for a 5D matrix where <c>Axes.Length == 3</c>.
+        /// </summary>
+        /// <remarks>
+        /// This explicit overload prevents memory allocation and ensures maximum performance via JIT inlining.
+        /// </remarks>
+        /// <param name="ix">The x-coordinate (column index).</param>
+        /// <param name="iy">The y-coordinate (row index).</param>
+        /// <param name="i_axis0">The index for the 1st axis (Axes[0]).</param>
+        /// <param name="i_axis1">The index for the 2nd axis (Axes[1]).</param>
+        /// <param name="i_axis2">The index for the 3rd axis (Axes[2]).</param>
+        /// <returns>The value at the specified multidimensional coordinates.</returns>
+        public T this[int ix, int iy, int i_axis0, int i_axis1, int i_axis2]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2)][iy * _xcount + ix];
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set
+            {
+                int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2);
+                _arrayList[frameIndex][iy * _xcount + ix] = value;
+                Invalidate(frameIndex);
+            }
+        }
+
+        /// <summary>
+        /// Accessor for a 6D matrix where <c>Axes.Length == 4</c>.
+        /// </summary>
+        /// <remarks>
+        /// This explicit overload prevents memory allocation and ensures maximum performance via JIT inlining.
+        /// </remarks>
+        /// <param name="ix">The x-coordinate (column index).</param>
+        /// <param name="iy">The y-coordinate (row index).</param>
+        /// <param name="i_axis0">The index for the 1st axis (Axes[0]).</param>
+        /// <param name="i_axis1">The index for the 2nd axis (Axes[1]).</param>
+        /// <param name="i_axis2">The index for the 3rd axis (Axes[2]).</param>
+        /// <param name="i_axis3">The index for the 4th axis (Axes[3]).</param>
+        /// <returns>The value at the specified multidimensional coordinates.</returns>
+        public T this[int ix, int iy, int i_axis0, int i_axis1, int i_axis2, int i_axis3]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2, i_axis3)][iy * _xcount + ix];
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set
+            {
+                int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2, i_axis3);
+                _arrayList[frameIndex][iy * _xcount + ix] = value;
+                Invalidate(frameIndex);
+            }
+        }
+
+        /// <summary>
+        /// Accessor for an N-dimensional matrix using an arbitrary number of axis indices.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Warning:</b> This method allocates a new array on the heap for the <c>params</c> argument. 
+        /// For high-performance tight loops, please use the explicit overloads (up to 4 axes).</para>
+        /// <para><b>Performance Note (Optimal Loop Order):</b></para>
+        /// <para>When iterating over multiple dimensions, structure your <c>for</c> loops strictly from right to left relative to the arguments. 
+        /// The last defined axis (the right-most element in <c>axisIndices</c>) MUST be the outermost loop, and <c>ix</c> MUST be the innermost loop. 
+        /// Failing to do so will result in severe cache misses and degraded performance.</para>
+        /// </remarks>
+        /// <param name="ix">The x-coordinate.</param>
+        /// <param name="iy">The y-coordinate.</param>
+        /// <param name="axisIndices">An array of indices corresponding to the layout of <c>Axes</c>.</param>
+        public T this[int ix, int iy, params int[] axisIndices]
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _arrayList[Dimensions.GetFrameIndexAt(axisIndices)][iy * _xcount + ix];
+
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set
+            {
+                int frameIndex = Dimensions.GetFrameIndexAt(axisIndices);
+                _arrayList[frameIndex][iy * _xcount + ix] = value;
+                Invalidate(frameIndex);
+            }
+        }
+
+        /// <summary>
         /// Zero-copy conversion to byte array for serialization
         /// </summary>
         public unsafe ReadOnlySpan<byte> GetRawBytes(int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
             var array = _arrayList[frameIndex];
+            Invalidate(frameIndex); // Ensure min/max will be recalculated if data is modified through the byte span
             return MemoryMarshal.AsBytes(array.AsSpan());
         }
 
@@ -940,7 +1268,8 @@ namespace MxPlot.Core
                 throw new ArgumentException($"Byte length mismatch: {bytes.Length} != {targetSpan.Length}");
 
             bytes.CopyTo(targetSpan);
-            RefreshValueRange(frameIndex);
+            //RefreshValueRange(frameIndex);
+            Invalidate(frameIndex);
         }
 
 
@@ -967,7 +1296,7 @@ namespace MxPlot.Core
         /// <param name="func"></param>
         public MatrixData<T> Set(int frameIndex, Func<int, int, double, double, T> func)
         {
-            var array = GetArray(frameIndex);
+            var array = GetArray(frameIndex); //Invalide is marked inside GetArray(). Min/max will be recalculated when next requested.
             var arraySpan = array.AsSpan();
 
             for (int iy = 0; iy < _ycount; iy++)
@@ -982,8 +1311,6 @@ namespace MxPlot.Core
                     arraySpan[rowStart + ix] = func(ix, iy, x, y);
                 }
             }
-            // Recalculate statistics using MinMaxFinder
-            RefreshValueRange(frameIndex);
             return this;
         }
 
@@ -1010,7 +1337,7 @@ namespace MxPlot.Core
                 Parallel.For(0, FrameCount, frameIndex =>
                 {
                     action(frameIndex, GetArray(frameIndex));
-                    RefreshValueRange(frameIndex);
+                    RefreshValueRange(frameIndex); //Force refresh min/max here.
                 });
             }
             else
@@ -1061,7 +1388,7 @@ namespace MxPlot.Core
         /// <param name="x">The X coordinate value (in physical coordinate system).</param>
         /// <param name="y">The Y coordinate value (in physical coordinate system).</param>
         /// <param name="frameIndex">The target frame index. If -1, uses the current ActiveIndex.</param>
-        /// <param name="isInterpolationEnabled">
+        /// <param name="interpolate">
         /// Specifies whether interpolation is enabled.
         /// <list type="bullet">
         /// <item><description>false (default): Uses nearest-neighbor method, returning the value of the closest grid point.</description></item>
@@ -1107,52 +1434,49 @@ namespace MxPlot.Core
         /// double value1 = matrix.GetValue(5.3, 7.8);
         /// 
         /// // Get smoothly interpolated value using bilinear interpolation
-        /// double value2 = matrix.GetValue(5.3, 7.8, isInterpolationEnabled: true);
+        /// double value2 = matrix.GetValue(5.3, 7.8, interpolate: true);
         /// 
         /// // Get value from a specific frame
-        /// double value3 = matrix.GetValue(5.3, 7.8, frameIndex: 2, isInterpolationEnabled: true);
+        /// double value3 = matrix.GetValue(5.3, 7.8, frameIndex: 2, interpolate: true);
         /// </code>
         /// </example>
-        public T GetValue(double x, double y, int frameIndex = -1, bool isInterpolationEnabled = false)
+        public T GetValue(double x, double y, int frameIndex = -1, bool interpolate = false)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
 
             // Without interpolation: nearest neighbor
-            if (!isInterpolationEnabled)
+            if (!interpolate)
             {
                 int ix = XIndexOf(x, false);
                 int iy = YIndexOf(y, false);
                 return _arrayList[frameIndex][iy * _xcount + ix];
             }
-
-            // With interpolation: bilinear interpolation
-            T[] array = _arrayList[frameIndex];
-            if (array == null)
-                throw new InvalidOperationException("Internal array is null");
-
-            // Calculate index (allowing out of range)
-            double iix = (x - _xmin) / XRange * (_xcount - 1);
-            double iiy = (y - _ymin) / YRange * (_ycount - 1);
-
-            // Clamp within range
-            iix = Math.Clamp(iix, 0.0, _xcount - 1.0);
-            iiy = Math.Clamp(iiy, 0.0, _ycount - 1.0);
-
-            int ix0 = (int)iix;
-            int iy0 = (int)iiy;
-            int ix1 = (ix0 < _xcount - 1) ? ix0 + 1 : ix0;
-            int iy1 = (iy0 < _ycount - 1) ? iy0 + 1 : iy0;
-
-            double dx = iix - ix0;
-            double dy = iiy - iy0;
-
-            // For Complex type, interpolate real and imaginary parts separately
-            if (typeof(T) == typeof(Complex))
+            
+            if (this is MatrixData<Complex>) //Special case for Complex type.
             {
-                var v00 = (Complex)(object)array[iy0 * _xcount + ix0]!;
-                var v10 = (Complex)(object)array[iy0 * _xcount + ix1]!;
-                var v01 = (Complex)(object)array[iy1 * _xcount + ix0]!;
-                var v11 = (Complex)(object)array[iy1 * _xcount + ix1]!;
+                Complex[] array =(Complex[])(object)_arrayList[frameIndex];
+                if (array == null)
+                    throw new InvalidOperationException("Internal array is null");
+
+                // Calculate index (allowing out of range)
+                double iix = (x - _xmin) / XStep; // XStep = XRange * (_xcount - 1);
+                double iiy = (y - _ymin) / YStep; // YStep = YRange * (_ycount - 1);
+
+                // Clamp within range
+                iix = Math.Clamp(iix, 0.0, _xcount - 1.0);
+                iiy = Math.Clamp(iiy, 0.0, _ycount - 1.0);
+
+                int ix0 = (int)iix;
+                int iy0 = (int)iiy;
+                int ix1 = (ix0 < _xcount - 1) ? ix0 + 1 : ix0;
+                int iy1 = (iy0 < _ycount - 1) ? iy0 + 1 : iy0;
+
+                double dx = iix - ix0;
+                double dy = iiy - iy0;
+                var v00 = array[iy0 * _xcount + ix0]!;
+                var v10 = array[iy0 * _xcount + ix1]!;
+                var v01 = array[iy1 * _xcount + ix0]!;
+                var v11 = array[iy1 * _xcount + ix1]!;
 
                 double vr = v00.Real * (1 - dx) * (1 - dy)
                           + v10.Real * dx * (1 - dy)
@@ -1168,20 +1492,71 @@ namespace MxPlot.Core
             }
             else
             {
-                // For standard numeric types
-                double v00 = _toDouble(array[iy0 * _xcount + ix0]);
-                double v10 = _toDouble(array[iy0 * _xcount + ix1]);
-                double v01 = _toDouble(array[iy1 * _xcount + ix0]);
-                double v11 = _toDouble(array[iy1 * _xcount + ix1]);
-
-                double v = v00 * (1 - dx) * (1 - dy)
-                         + v10 * dx * (1 - dy)
-                         + v01 * (1 - dx) * dy
-                         + v11 * dx * dy;
-
+                var v = GetValueAsDouble(x, y, frameIndex, true);
                 return _fromDouble(v);
             }
         }
+
+        /// <summary>
+        /// Retrieves the value at the specified coordinates as a double, optionally interpolating between data points
+        /// and selecting a specific frame.
+        /// </summary>
+        /// <remarks>Interpolation uses bilinear interpolation between the four nearest data points. This
+        /// method is only supported for primitive numeric types.</remarks>
+        /// <param name="x">The x-coordinate used to locate the value within the data array.</param>
+        /// <param name="y">The y-coordinate used to locate the value within the data array.</param>
+        /// <param name="frameIndex">The index of the frame from which to retrieve the value. If negative, the currently active frame is used.</param>
+        /// <param name="interpolate">A value indicating whether to interpolate between adjacent data points at the specified coordinates.</param>
+        /// <returns>The value at the specified coordinates, converted to double. If interpolation is enabled, the result is
+        /// calculated using bilinear interpolation.</returns>
+        /// <exception cref="InvalidOperationException">Thrown if the method is called on a non-primitive numeric type or if the internal array for the specified
+        /// frame is null.</exception>
+        public double GetValueAsDouble(double x, double y, int frameIndex = -1, bool interpolate = false)
+        {
+            if(!_isSupportedPrimitive)
+                throw new InvalidOperationException($"GetValueAsDouble is only supported for primitive numeric types. Current type: {typeof(T).Name}"); 
+
+            if (frameIndex < 0) frameIndex = _activeIndex;
+
+            if(!interpolate)
+            {
+                return _toDouble(GetValue(x, y, frameIndex, false));
+            }
+            //interpolation is enabled
+            var array = _arrayList[frameIndex];
+            if(array == null)
+                throw new InvalidOperationException("Internal array is null");
+
+            // Calculate index (allowing out of range)
+            double iix = (x - _xmin) / XStep;
+            double iiy = (y - _ymin) / YStep;
+
+            // Clamp within range
+            iix = Math.Clamp(iix, 0.0, _xcount - 1.0);
+            iiy = Math.Clamp(iiy, 0.0, _ycount - 1.0);
+
+            int ix0 = (int)iix;
+            int iy0 = (int)iiy;
+            int ix1 = (ix0 < _xcount - 1) ? ix0 + 1 : ix0;
+            int iy1 = (iy0 < _ycount - 1) ? iy0 + 1 : iy0;
+
+            double dx = iix - ix0;
+            double dy = iiy - iy0;
+
+            // For standard numeric types
+            double v00 = _toDouble(array[iy0 * _xcount + ix0]);
+            double v10 = _toDouble(array[iy0 * _xcount + ix1]);
+            double v01 = _toDouble(array[iy1 * _xcount + ix0]);
+            double v11 = _toDouble(array[iy1 * _xcount + ix1]);
+
+            double v = v00 * (1 - dx) * (1 - dy)
+                     + v10 * dx * (1 - dy)
+                     + v01 * (1 - dx) * dy
+                     + v11 * dx * dy;
+
+            return v;
+        }
+            
 
         /// <summary>
         /// Set the value at the point close to the specified (x, y) coordinate.
@@ -1212,12 +1587,17 @@ namespace MxPlot.Core
 
             for (int i = 0; i < FrameCount; i++)
             {
-                var minValues = (double[])_valueMinArray[i].Clone();
-                var maxValues = (double[])_valueMaxArray[i].Clone();
+                List<double>? minValueList = null;
+                List<double>? maxValueList = null;
+                if(_valueRangeMap.TryGetValue(_arrayList[i], out var range))
+                {
+                    minValueList = range.MinValues;
+                    maxValueList = range.MaxValues;
+                }
                 var srcArray = GetArray(i);
                 var dstArray = new T[srcArray.Length];
                 srcArray.AsSpan().CopyTo(dstArray);
-                clone.SetArray(dstArray, i, minValues, maxValues);
+                clone.SetArray(dstArray, i, minValueList?.ToArray(), maxValueList?.ToArray());
             }
 
             return clone;
@@ -1373,6 +1753,21 @@ namespace MxPlot.Core
     public static class MatrixData
     {
         /// <summary>
+        /// Contains the set of primitive numeric types supported for MatrixData&lt;T&gt;. 
+        /// This collection is used to determine if certain operations, such as GetValueAsDouble, are supported for a given type parameter T.
+        /// </summary>
+        /// <remarks>This static, read-only collection can be used to validate or restrict types during
+        /// processing. The set includes common integral and floating-point types recognized by the system.</remarks>
+        public static readonly HashSet<Type> SupportedPrimitiveTypes = new()
+        {
+            typeof(byte), typeof(sbyte),
+            typeof(short), typeof(ushort),
+            typeof(int), typeof(uint),
+            typeof(long), typeof(ulong),
+            typeof(float), typeof(double)
+         };
+
+        /// <summary>
         /// Internally calls Clone() method
         /// </summary>
         /// <typeparam name="T"></typeparam>
@@ -1399,11 +1794,19 @@ namespace MxPlot.Core
             return reader.Read(filePath);
         }
 
-        public static  (double Min, double Max) GetMinMaxValues(this MatrixData<Complex> src, int frameIndex, ComplexValueMode mode)
+        /// <summary>
+        /// Extension method for MatrixData<Complex> to get the value range (min and max) based on the specified ComplexValueMode.
+        /// </summary>
+        /// <param name="src"></param>
+        /// <param name="frameIndex"></param>
+        /// <param name="mode"></param>
+        /// <returns></returns>
+        public static  (double Min, double Max) GetValueRange(this MatrixData<Complex> src, int frameIndex, ComplexValueMode mode)
         {
-            return src.GetMinMaxValues(frameIndex, (int)mode);
+            return src.GetValueRange(frameIndex, (int)mode);
         }
 
+        /*
         /// <summary>
         /// Create a new MatrixData instance with the same size, scale settings, and Metadata as the source
         /// </summary>
@@ -1445,7 +1848,7 @@ namespace MxPlot.Core
 
             return ret!;
         }
-       
+        */
     }
 
 }

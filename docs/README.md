@@ -1,5 +1,7 @@
 ﻿# MxPlot.Core Documentation
 
+**Last Updated**: 2026-02-21  
+
 **Detailed guides and technical references for MxPlot.Core library**
 
 > For API overview and quick start, see the main [README.md](../README.md) at the solution level.
@@ -15,6 +17,12 @@
 
 - **[DimensionStructure & Memory Layout Guide](./DimensionStructure_MemoryLayout_Guide.md)** ([日本語](./DimensionStructure_MemoryLayout_Guide_ja.md))  
   Technical deep-dive into multi-axis data structures, memory layouts, and stride calculations.
+
+- **[MatrixData Multi-Dimensional Access Guide](./MatrixData_MultiDimensional_Access_Guide.md)**
+  Some tips for handling multi-dimensional data efficiently for optimal performance.
+
+- **[MatrixData Frame Sharing Model](./MatrixData_Frame_Sharing_Model.md)**
+  Explains how MatrixData manages the min/max values of each frame and shares them across different instances.
 
 - **[VolumeAccessor Guide](./VolumeAccessor_Guide.md)** ([日本語](./VolumeAccessor_Guide_ja.md))  
   3D volume operations: MIP/MinIP/AIP projections, orthogonal views, and performance optimization.
@@ -34,6 +42,5 @@
 
 ---
 
-**Last Updated**: 2026-02-08  
-**MxPlot.Core Version**: 0.0.2-alpha
+
 

@@ -201,16 +201,14 @@ namespace MxPlot.Extensions.Fft
         /// the output.</param>
         /// <param name="dstIndex">The starting index in the destination matrix at which to store the result. The default value is -1, which
         /// indicates that the result is stored starting from the beginning of the matrix.</param>
-        /// <param name="skipRefreshValueRange">true to skip updating the value range metadata of the destination matrix after the operation; otherwise,
-        /// false.</param>
         /// <returns>A matrix of complex numbers representing the two-dimensional FFT of the source matrix.</returns>
         public static MatrixData<Complex> Fft2D<T>(this MatrixData<T> src,
             ShiftOption option,
-            int srcIndex = -1, MatrixData<Complex>? dst = null, int dstIndex = -1,
-            bool skipRefreshValueRange = false)
+            int srcIndex = -1, MatrixData<Complex>? dst = null, int dstIndex = -1
+            )
                 where T : unmanaged
         {
-            return Fft2DProcWithSwap(true, src, option, srcIndex, dst, dstIndex, skipRefreshValueRange);
+            return Fft2DProcWithSwap(true, src, option, srcIndex, dst, dstIndex);
         }
 
         /// <summary>
@@ -222,15 +220,13 @@ namespace MxPlot.Extensions.Fft
         /// <param name="srcIndex"></param>
         /// <param name="dst"></param>
         /// <param name="dstIndex"></param>
-        /// <param name="skipRefreshValueRange"></param>
         /// <returns></returns>
         public static MatrixData<Complex> InverseFft2D<T>(this MatrixData<T> src,
             ShiftOption option,
-            int srcIndex = -1, MatrixData<Complex>? dst = null, int dstIndex = -1,
-            bool skipRefreshValueRange = false)
+            int srcIndex = -1, MatrixData<Complex>? dst = null, int dstIndex = -1)
                 where T : unmanaged
         {
-            return Fft2DProcWithSwap(false, src, option, srcIndex, dst, dstIndex, skipRefreshValueRange);
+            return Fft2DProcWithSwap(false, src, option, srcIndex, dst, dstIndex);
         }
 
         private static Scale2D GetFrequencyDomainScale(Scale2D spatialScale, ShiftOption option)
@@ -269,7 +265,6 @@ namespace MxPlot.Extensions.Fft
             MatrixData<T> src,
             ShiftOption option,
             int srcIndex = -1, MatrixData<Complex>? dst = null, int dstIndex = -1,
-            bool skipRefreshValueRange = false,
             bool useParallel = true,
             bool skipScaleSetup = false //Parallel.Forで全フレーム処理を呼び出すときはスキップする
             )
@@ -382,10 +377,6 @@ namespace MxPlot.Extensions.Fft
                 }
             }
 
-
-            if (!skipRefreshValueRange)
-                dst.RefreshValueRange(dstIndex);
-
             return dst;
         }
 
@@ -430,13 +421,12 @@ namespace MxPlot.Extensions.Fft
         private static MatrixData<Complex> Fft2DAllFramesProc<T>(this MatrixData<T> src,
             bool isForward,
             ShiftOption option,
-            MatrixData<Complex>? dst = null,
-            bool skipRefreshValueRange = false
+            MatrixData<Complex>? dst = null
             )
                 where T : unmanaged
         {
             if(src.FrameCount == 1)
-                return Fft2D(src, option, srcIndex: 0, dst, dstIndex: 0, skipRefreshValueRange: false);
+                return Fft2D(src, option, srcIndex: 0, dst, dstIndex: 0);
 
             if(dst == null)
             {
@@ -447,7 +437,7 @@ namespace MxPlot.Extensions.Fft
                 
             Parallel.For(0, src.FrameCount, frameIndex =>
             {
-                Fft2DProcWithSwap(isForward, src, option, frameIndex, dst, frameIndex, skipRefreshValueRange: skipRefreshValueRange, useParallel:false, skipScaleSetup:true);
+                Fft2DProcWithSwap(isForward, src, option, frameIndex, dst, frameIndex, useParallel:false, skipScaleSetup:true);
             });
             var ftScale = GetFrequencyDomainScale(src.GetScale(), option);
             dst!.SetXYScale(ftScale.XMin, ftScale.XMax, ftScale.YMin, ftScale.YMax);
@@ -466,8 +456,7 @@ namespace MxPlot.Extensions.Fft
         /// domain data: None (no shift), Centered (centered only during the action), and BothCentered (centered for
         /// input, action, and output). The action is applied in the frequency domain, and the result is transformed
         /// back to the spatial domain. The method manages buffer allocation and may use array pooling for temporary
-        /// storage. The value range update can be skipped for performance by setting skipRefreshValueRange to
-        /// true.</remarks>
+        /// storage. </remarks>
         /// <param name="src">The source matrix containing complex values to be transformed.</param>
         /// <param name="action">An action to perform on the transformed data, which receives the frequency-domain array and its associated
         /// scale information.</param>
@@ -477,7 +466,6 @@ namespace MxPlot.Extensions.Fft
         /// <param name="dst">An optional destination matrix to store the results. If null, a new matrix is created to hold the output.</param>
         /// <param name="dstIndex">The starting index in the destination matrix where results are written. Use -1 to write to the entire
         /// matrix.</param>
-        /// <param name="skipRefreshValueRange">true to skip updating the value range after processing; otherwise, false.</param>
         /// <param name="useParallelSwap">true to enable parallel processing during the swap operations for improved performance on large matrices; otherwise, false for single-threaded execution.</param>
         /// <returns>A new or updated matrix containing the result of the FFT pipeline and the applied action.</returns>
         /// <exception cref="ArgumentException">Thrown when the provided destination matrix's array length does not match the expected size for the
@@ -487,7 +475,6 @@ namespace MxPlot.Extensions.Fft
             ShiftOption option,
             int srcIndex = -1,
             MatrixData<Complex>? dst = null, int dstIndex = -1,
-            bool skipRefreshValueRange = false,
             bool useParallelSwap = true
             )
         {

@@ -42,14 +42,14 @@ More details are provided below.
 This repository hosts the **MxPlot ecosystem**, organized into the following library suite (including modules currently under active development):
 
 - **MxPlot (Metapackage)**: A convenient entry point that bundles the core and common extensions.
-- **MxPlot.Core**: The foundational, dependency-free data engine (`MatrixData\<T\>`).
+- **MxPlot.Core**: The foundational, dependency-free data engine (`MatrixData<T>`).
 - **MxPlot.Extensions.Tiff / .Hdf5**: Specialized high-performance file I/O packages.
-- **MxPlot.Extensions.Fft**: FFT processing utilities (✨ New!).
-- **MxPlot.Extensions.Images**: Image loading utilities (✨ New!).
+- **MxPlot.Extensions.Fft**: FFT processing utilities.
+- **MxPlot.Extensions.Images**: Image loading utilities.
 - **MxPlot.Wpf / .WinForms**: Native UI controls for visualization (In Development).
 
 At its heart, **MatrixData\<T\>** serves as the central engine, engineered to maximize data throughput. 
-While the visualization layer (**MxPlot.Wpf**) is currently under development, this core package is deliberately decoupled from any UI dependencies. 
+While the visualization layer (**MxPlot.WinForms** or **MxPlot.Wpf**) is currently under development, this core package is deliberately decoupled from any UI dependencies. 
 This makes it a versatile solution for high-performance matrix manipulation and analysis. 
 I hope this package serves as a robust foundation for your own novel applications!
 
@@ -71,8 +71,8 @@ MxPlot.Core handles arbitrary axis combinations while maintaining physical coord
 
 - 🎯 **Multi-Axis Management**: Flexible dimension definition with physical coordinates and units
 - 🔐 **Type Safety**: Full support for all numeric types including `Complex` and user-defined structures.
-- 📊 **Dimensional Operators**: Transpose, slice, map, reduce, extract along axes
-- 🧊 **Volumetric Manipulation**: 3D volume access with projections (maximum, minimum, average intensity)
+- 📊 **Dimensional Operators**: Transpose, map, reduce, slice at frame, extract along axis, select by axis
+- 🧊 **Volumetric Manipulation**: 3D volume access with projections and restacking along x, y, and z axes
 - 🚀 **High Performance**: Parallel and SIMD optimization, as well as Generic Math (.NET 10)
 - 🧪 **Scientific-Friendly Format**: Hyperstacks as bio-format (OME-TIFF), ImageJ-hyperstack TIFF, and HDF5
 - 📂 **Efficient Storage**: Direct binary serialization/deserialization (.mxd) with compression
@@ -124,6 +124,7 @@ Then add a project reference to MxPlot.Core.csproj in your solution.
 - **Left-Bottom Origin**: Coordinate origin is at the left-bottom corner (Y increases upwards).
 - **Immutable Matrix Size**: Matrix dimensions are fixed after creation for performance.
 - **Backing 1D-Array List**: Uses `List<T[]>` for frame storage to allow efficient memory pinning.
+- **Reactive Cache Synchronization**: Statistics (min/max) are synchronized via shared list references across shallow copies, ensuring data integrity without redundant calculations.
 
 ## 🚀 Quick Start
 
@@ -156,20 +157,20 @@ using MxPlot.Core;
 using MxPlot.Core.IO;
 
 // Create 512×512 images with 10 Z-slices and 20 time points (200 frames total)
-var scale = new Scale2D(512, 0, 100, 512, 0, 100); 
-var data = new MatrixData<ushort>(scale,
+var data = new MatrixData<ushort>(
+    Scale2D.Centered(512, 512, 10, 10), //X and Y have data coordinates with -5 to 5.
     Axis.Z(10, 0, 50, "µm"),        // Z: 0-50µm, 10 slices (unit is omissible)
     Axis.Time(20, 0, 10, "s")       // Time: 0-10 seconds, 20 frames
 );
 
 // Access specific frame (Z=5, Time=10)
-data.Dimensions["Z"].Index = 5;
-data.Dimensions["Time"].Index = 10;
+data["Z"].Index = 5;
+data["Time"].Index = 10;
 // ushort[] for the selected frame
 var frame = data.GetArray(); // Get current frame (Z=5, Time=10)
 
 // Extract 3D data at specific Z-depth
-var timeSeriesAtZ3 = data.SnapTo("Z", 3); // Returns MatrixData<ushort> with Time axis
+var timeSeriesAtZ3 = data.SelectBy("Z", 3); // Returns MatrixData<ushort> with Time axis
 
 // Save to compressed binary format
 MatrixDataSerializer.Save("data.mxd", data, compress: true);
@@ -191,23 +192,23 @@ var scale = new Scale2D(1024, -50, 50, 1024, -50, 50); // µm
 var hyperData = new MatrixData<double>(scale,
     new Axis(31, 400, 700, "Wavelength"), // 400-700 nm, 31 channels
     Axis.Time(100, 0, 10, "s"),           // 10 seconds, 100 frames
-    new FovAxis(4, 2)                      // 4×2 tiled FOV array
+    new FovAxis(4, 2)                      // 4×2 tiled FOV array with 8 tiles
 );
 
 // Total frames: 31 × 100 × 8 = 24,800 frames
 Console.WriteLine($"Total: {hyperData.FrameCount} frames");
 
 // Navigate axes
-hyperData.Dimensions["Wavelength"].Index = 15; // 550nm
-hyperData.Dimensions["Time"].Index = 50;       // 5 seconds
-hyperData.Dimensions["FOV"].Index = 3;         // FOV tile [1,0]
+hyperData["Wavelength"].Index = 15; // 550nm
+hyperData["Time"].Index = 50;       // 5 seconds
+hyperData["FOV"].Index = 3;         // FOV tile [1,0]
 
 // Extract data along specific axis
-var timeSeriesAt550nm = hyperData.SliceAlong("Time", 
+var timeSeriesAt550nm = hyperData.ExtractAlong("Time", 
     fixedCoords: new[] { 15, 0, 0 }); // Wavelength=15, FOV=0
 
 // Get min/max across all time points at specific wavelength
-var (minVal, maxVal) = hyperData.GetMinMaxValues("Time", 
+var (minVal, maxVal) = hyperData.GetValueRange("Time", 
     fixedCoords: new[] { 15, 0, 0 });
 ```
 
@@ -446,7 +447,13 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 
 ## 📊 Version History
 
-**v0.0.4-alpha** (Curret - added new packages and  introduced breaking changes)
+**v0.0.5-alpha** (Current - Improving the internal logic with breaking changes)
+- 🧠 Frame Sharing & Memory Model: Refined the zero-cost O(1) frame reordering (Reorder) using underlying array reference sharing.
+- 🔄 Explicit Copy Semantics: Clarified mutation semantics and introduced explicit deep copying via Duplicate() and Clone().
+- ⚡ Lazy Min/Max Evaluation: Implemented lazy evaluation and caching for frame min/max values (GetValueRange), optimizing performance during bulk array mutations, which largely modified the internal logics of MatrixData.
+- 📚 Comprehensive Documentation: Added and updated extensive Markdown guides for Core Operations, Frame Sharing Model, Volume Accessor, and Dimension Structure.
+
+**v0.0.4-alpha** (added new packages and  introduced breaking changes)
 - 🔌 Generic Bridge: Enabled non-generic layers (UI/ViewModels) to invoke strongly-typed image processing operations without compile-time knowledge of generic type <T>.
 - 🛠 Visitor Pattern: Introduced IMatrixData.Apply(IOperation) as a unified dispatch entry point to dynamically resolve and execute Volume, Filter, and Dimensional operations. 
 - ➕ Added MxPlot.Extensions.Images package for useful image loading via SkiaSharp (PNG, JPEG, BMP, TIFF).

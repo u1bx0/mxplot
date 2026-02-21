@@ -1,6 +1,7 @@
 ﻿using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using System.Text;
 
 namespace MxPlot.Core
@@ -219,11 +220,11 @@ namespace MxPlot.Core
             //Here: _isUpdating = 1;
             try
             {
-                var indeces = GetAxisIndices(frameIndex);
-                for (int i = 0; i < indeces.Length; i++)
+                var indices = GetAxisIndices(frameIndex);
+                for (int i = 0; i < indices.Length; i++)
                 {
                     //各軸のActiveなIndexを更新->イベント通知されるがスキップ
-                    _axisList[i].Index = indeces[i];
+                    _axisList[i].Index = indices[i];
                 }
             }
             finally
@@ -235,12 +236,12 @@ namespace MxPlot.Core
         /// <summary>
         /// indexの配列を指定してActiveなindexを直接変更する
         /// </summary>
-        /// <param name="indeces"></param>
-        public void SetIndeces(params int[] indeces)
+        /// <param name="indices"></param>
+        public void SetActiveIndices(params int[] indices)
         {
-            if (indeces.Length != _axisList.Count)
-                throw new ArgumentException("Invalid lenght of indeces!");
-            var index = GetFrameIndexAt(indeces);
+            if (indices.Length != _axisList.Count)
+                throw new ArgumentException("Invalid lenght of indices!");
+            var index = GetFrameIndexAt(indices);
             //内部で更新する
             UpdateAxisIndicesFromFrameIndex(index);
         }
@@ -270,11 +271,11 @@ namespace MxPlot.Core
             if (!_axisList.Contains(axis))
                 throw new ArgumentException(axis + " does not exist in this series.");
 
-            int[] indeces = GetAxisIndices();
+            int[] indices = GetAxisIndices();
             int pos = _axisList.IndexOf(axis);
 
-            indeces[pos] = index;
-            return GetFrameIndexAt(indeces);
+            indices[pos] = index;
+            return GetFrameIndexAt(indices);
         }
 
         /// <summary>
@@ -551,40 +552,73 @@ namespace MxPlot.Core
         /// <summary>
         /// index配列で指定したindexからシリーズ中のIndexに変換する
         /// </summary>
-        /// <param name="indeces"></param>
+        /// <param name="indices"></param>
         /// <returns></returns>
-        public int GetFrameIndexAt(int[] indeces)
+        public int GetFrameIndexAt(int[] indices)
         {
             if(_axisList.Count == 0)
                 return 0;
 
-            if(indeces.Length != _axisList.Count)
-                throw new ArgumentException("Invalid lenght of indeces!");
+            if(indices.Length != _axisList.Count)
+                throw new ArgumentException("Invalid lenght of indices!");
 
             int newIndex = 0;
             // ループ内で掛け算を累積するのではなく、事前計算済みのStrideと内積をとる
             for (int i = 0; i < _axisList.Count; ++i)
             {
-                newIndex += indeces[i] * _strides[i];
+                newIndex += indices[i] * _strides[i];
             }
+            //newIndex = indices[0] * _strides[0] + indices[1] * _strides[1] + ... + indices[n-1] * _strides[n-1]
             return newIndex;
         }
 
-        public int GetFrameIndexAt(Span<int> indeces)
+        public int GetFrameIndexAt(Span<int> indices)
         {
             if (_axisList.Count == 0)
                 return 0;
 
-            if (indeces.Length != _axisList.Count)
-                throw new ArgumentException("Invalid lenght of indeces!");
+            if (indices.Length != _axisList.Count)
+                throw new ArgumentException("Invalid lenght of indices!");
 
             int newIndex = 0;
             // ループ内で掛け算を累積するのではなく、事前計算済みのStrideと内積をとる
             for (int i = 0; i < _axisList.Count; ++i)
             {
-                newIndex += indeces[i] * _strides[i];
+                newIndex += indices[i] * _strides[i];
             }
             return newIndex;
+        }
+
+        /// <summary>
+        /// Calculates the frame index from multi-dimensional indices with zero memory allocation.
+        /// This is a fast, arithmetic-only method explicitly designed to ensure JIT compiler inlining.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Design Rationale:</b></para>
+        /// <para>In tight loops executing millions of times (e.g., image processing), dynamic array allocation (<c>new[]</c>) causes severe performance degradation due to Garbage Collection (GC) pressure. 
+        /// Furthermore, using <c>stackalloc</c> carries the risk of a <see cref="StackOverflowException"/> and typically causes the JIT compiler to refuse method inlining.</para>
+        /// <para>By accepting arguments directly without arrays and utilizing a <c>switch</c> statement for loop unrolling, this method completely eliminates both memory allocations and the branching overhead of a <c>for</c> loop. 
+        /// This guarantees that <see cref="MethodImplOptions.AggressiveInlining"/> is effectively applied, providing the fastest possible frame index calculation using only pure multiplication and addition (supports up to 5 dimensions).</para>
+        /// </remarks>
+        /// <param name="i0">The index for the 1st axis (Axes[0]). Default is 0.</param>
+        /// <param name="i1">The index for the 2nd axis (Axes[1]). Default is 0.</param>
+        /// <param name="i2">The index for the 3rd axis (Axes[2]). Default is 0.</param>
+        /// <param name="i3">The index for the 4th axis (Axes[3]). Default is 0.</param>
+        /// <returns>The calculated frame index used to access the underlying data array.</returns>
+        /// <exception cref="InvalidOperationException">Thrown when the number of dimensions (<c>Axes.Count</c>) is 6 or greater. Use the array-based or Span-based <c>GetFrameIndexAt</c> method instead.</exception>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int GetFrameIndexAt(int i0 = 0, int i1 = 0, int i2 = 0, int i3 = 0)
+        {
+            switch (_axisList.Count)
+            {
+                case 0: return 0;
+                case 1: return i0;
+                case 2: return i0 * _strides[0] + i1 * _strides[1];
+                case 3: return i0 * _strides[0] + i1 * _strides[1] + i2 * _strides[2];
+                case 4: return i0 * _strides[0] + i1 * _strides[1] + i2 * _strides[2] + i3 * _strides[3];
+                default:
+                    throw new InvalidOperationException("For 5 or more axes, please use the array-based GetFrameIndexAt method.");
+            }
         }
 
         /// <summary>

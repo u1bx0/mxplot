@@ -2,22 +2,25 @@
 
 **MxPlot.Core Comprehensive Reference**
 
-> Last Updated: 2026-02-16
+> Last Updated: 2026-02-21
 
 
-*Note: This document is largely based on AI-generated content and may require further review for accuracy.*
+*Note: This document is largely based on AI-generated content and requires further review for accuracy. Some descriptions may be outdated due to changes to the library.*
 
 ## 📚 Table of Contents
 
 1. [Introduction](#introduction)
 2. [Core Concepts](#core-concepts)
-3. [Data Creation & Initialization](#data-creation--initialization)
-4. [Dimensional Operations](#dimensional-operations)
-5. [Volume Operations](#volume-operations)
-6. [Arithmetic Operations](#arithmetic-operations)
-7. [Pipeline Examples](#pipeline-examples)
-8. [Extreme Examples](#extreme-examples)
-9. [Method Reference](#method-reference)
+3. [Tutorial for a Single-Frame MatrixData\<T\>](#tutorial-for-a-single-frame-matrixdatat)
+4. [Tutorial for a Multi-Dimensional Data](#tutorial-for-a-multi-dimensional-data)
+5. [Dimensional Operations](#dimensional-operations)
+   - *Transpose, Crop, Slice, Extract, Select, Map & Reduce, Reorder*
+6. [Volume Operations](#volume-operations)
+   - *VolumeAccessor, Projections (MIP/MinIP/AIP), Manipulation*
+7. [Arithmetic Operations](#arithmetic-operations)
+   - *Matrix-to-Matrix, Scalar Operations, Broadcasting*
+8. [Pipeline Examples](#pipeline-examples)
+9. [Extreme Examples](#extreme-examples)
 
 ---
 
@@ -66,76 +69,249 @@ data.DefineDimensions(
 - **Immutable Size**: Matrix dimensions fixed after creation
 
 ---
-
-## Data Creation & Initialization
-
-### Basic Creation
+## Tutorial for a Single-Frame MatrixData\<T\>
 
 ```csharp
-// 1. Simple 2D matrix
-var matrix2D = new MatrixData<double>(100, 100);
-matrix2D.SetXYScale(0, 10, 0, 10);  // 0-10mm range
-matrix2D.XUnit = "mm";
+//
+// This is a comprehensive tutorial (Cheat Sheet) on how to create, access, 
+// and manipulate MatrixData<T> with a single frame (2D image/matrix).
+//
 
-// 2. 3D data with explicit frame count
-var matrix3D = new MatrixData<ushort>(512, 512, 50);
+// --------------------------------------------------------------------------------
+// 1. Creation and Coordinate System
+// --------------------------------------------------------------------------------
 
-// 3. With Scale2D
-var scale = new Scale2D(1024, -50, 50, 1024, -50, 50);
-var matrixScaled = new MatrixData<double>(scale, 100);
+// Create a single frame of MatrixData<T>, where T can be any unmanaged primitive 
+// value type (int, float, double, etc.). System.Numerics.Complex is also supported.
+// Custom structs can be used by providing a custom MinMaxFinder.
+var md = new MatrixData<int>(128, 128); // Allocates an int array with 128x128 dimensions
 
-// 4. With pre-allocated arrays
-var arrays = new List<double[]> { new double[100*100], new double[100*100] };
-var matrixFromArrays = new MatrixData<double>(100, 100, arrays);
+// Define the physical data coordinate system. 
+// (XMin, YMin) corresponds to md[0, 0], and (XMax, YMax) corresponds to md[127, 127].
+md.SetXYScale(-1, 1, -1, 1); 
+
+// Alternatively, you can initialize MatrixData with a Scale2D object that defines 
+// the dimensions and coordinate system in one step:
+md = new MatrixData<int>(new Scale2D(128, -1, 1, 128, -1, 1));
+
+// Scale2D provides some handy factory methods:
+var scale1 = Scale2D.Pixels(128, 128);     // X and Y range from 0 to 127
+var scale2 = Scale2D.Centered(128, 128, 2, 2); // X and Y range from -1.0 to 1.0
+
+// You can also wrap an existing array (Zero-allocation initialization).
+// The length of T[] must exactly match XCount * YCount (128 * 128 = 16384).
+var array = new int[128 * 128];
+md = new MatrixData<int>(128, 128, array);
+// ⚠️ IMPORTANT: The array is stored by reference. Any external modifications to it 
+// will immediately affect the MatrixData instance, and vice versa.
+
+// Setting metadata and physical units (optional but useful for plotting/UI)
+md.XUnit = "mm"; 
+md.YUnit = "mm"; 
+md.Metadata["key"] = "value"; 
+
+
+// --------------------------------------------------------------------------------
+// 2. Raw Array Access (Maximum Performance)
+// --------------------------------------------------------------------------------
+// Directly accessing the internal 1D array is the absolute fastest way to process 
+// elements with minimal overhead.
+
+var data = md.GetArray(); // data.Length == md.XCount * md.YCount
+
+for(int iy = 0; iy < md.YCount; iy++)
+{
+    double y = md.YValue(iy);    // Get the physical Y coordinate for the grid index iy
+    int offset = iy * md.XCount; // Pre-calculate the row starting index for speed
+    
+    for (int ix = 0; ix < md.XCount; ix++)
+    {
+        double x = md.XValue(ix); // Get the physical X coordinate for the grid index ix
+        int index = offset + ix;  // Calculate the flat 1D index
+        
+        var value = data[index];
+        // Apply some high-performance operation...
+        
+        data[index] = ix + iy;    // Write back the value
+    }
+}
+
+// Retrieve the minimum and maximum values in the frame.
+// This is calculated on demand and automatically cached for subsequent calls.
+var (min, max) = md.GetValueRange(); 
+
+
+// --------------------------------------------------------------------------------
+// 3. High-Level Data Access and Modification
+// --------------------------------------------------------------------------------
+
+// Method A: Functional Generation via lambda (`Set`)
+// Highly readable, but comes with a slight delegate overhead per pixel.
+md.Set((ix, iy, x, y) => (int)(x * x + y * y)); 
+
+// Method B: The 2D Indexer [ix, iy]
+// Accepts and returns the exact underlying data type (int).
+// Note: ix (column) comes first, then iy (row).
+var value11 = md[1, 1]; 
+md[1, 1] = value11 + 2;
+
+// Method C: Type-Agnostic Set Methods (useful when working with IMatrixData interface)
+// Equivalent to md[1, 1] = 50, but takes a double and casts it internally.
+md.SetValueAt(1, 1, 50.0); 
+
+// Method D: Typed Set Methods
+// Bypass the double casting if you already know the specific type.
+// The 3rd parameter is the frameIndex (0 for a single frame).
+md.SetValueAtTyped(1, 1, 0, 50); 
+
+// Method E: Setting via Physical Coordinates
+// Sets the value at physical position (0.5, 0.5) to 100. 
+// The coordinates are automatically resolved to the nearest grid index.
+md.SetValue(0.5, 0.5, 0, 100); 
+
+// Method F: Index-based Get Methods
+var value11AsDouble = md.GetValueAt(1, 1);    // Returns casted double
+var value11AsInt = md.GetValueAtTyped(1, 1);  // Returns exact int
+
+
+// --------------------------------------------------------------------------------
+// 4. Spatial Interpolation (Physical Coordinates)
+// --------------------------------------------------------------------------------
+// MatrixData<T> can sample data at arbitrary physical coordinates (x, y).
+
+// By default (interpolate: false), it returns the exact T value (int) of the nearest grid point.
+var nearestValue = md.GetValue(0.7, -0.2); 
+
+// You can estimate the T value using Bilinear Interpolation of the 4 nearest neighbors.
+var valueByBilinear = md.GetValue(0.7, -0.2, interpolate: true);
+
+// ⚠️ NOTE ON INTEGER TYPES: 
+// When T is an integer, `GetValue` with interpolation returns a casted (truncated) int.
+// To preserve the precision of the bilinear interpolation, use `GetValueAsDouble`.
+var preciseInterpolatedValue = md.GetValueAsDouble(0.7, -0.2, interpolate: true);
 ```
 
-### Multi-Axis Initialization
+## Tutorial for a Multi-Dimensional Data
 
 ```csharp
-// Method 1: Collection expression (C# 12)
-var xyczt = new MatrixData<int>(
-    Scale2D.Pixels(5, 5),
-    [ 
-        Axis.Time(4, 0, 2, "s"),     // T=4
-        Axis.Z(3, 0, 4, "µm"),       // Z=3
-        Axis.Channel(2)              // C=2
-    ]  // Total: 4×3×2 = 24 frames
+//
+// This is a comprehensive tutorial (Cheat Sheet) on how to create, access, 
+// and manipulate MatrixData<T> with multiple frames and hyper-dimensions.
+//
+
+// --------------------------------------------------------------------------------
+// 1. Creation and Axis Definitions
+// --------------------------------------------------------------------------------
+
+// Create MatrixData<T> with multiple frames. It allocates List<T[]> internally to store the data.
+var md = new MatrixData<float>(128, 128, 32); 
+md.SetXYScale(-1, 1, -1, 1);
+
+// By default, md just has a simple 1D "Frame" axis (0 to 31). 
+// You can define hyper-stack dimensions using Axis objects.
+md.DefineDimensions(
+    Axis.Channel(2),    // Channel axis with 2 channels (index: 0 to 1)
+    Axis.Z(16, -1, 1)   // Z axis with 16 slices (index: 0 to 15, physical: -1 to 1)
 );
-xyczt.SetXYScale(-1, 1, -1, 1);
+// Note: The total product of axis lengths must match the number of frames (2 * 16 = 32 frames).
+// Axis.Channel, Axis.Z, and Axis.Time are factory methods for common axes.
 
-// Method 2: Traditional params array
-var xyczt2 = new MatrixData<int>(5, 5, 24);
-xyczt2.DefineDimensions(
-    Axis.Time(4, 0, 2, "s"),
-    Axis.Z(3, 0, 4, "µm"),
-    Axis.Channel(2)
+// A more elegant way is to initialize everything directly in the constructor:
+var xyczt = new MatrixData<ushort>(
+    Scale2D.Centered(256, 256, 2, 2), // Scale2D defines X/Y dimensions and coordinates
+    Axis.Channel(2),                  // C = 2
+    Axis.Z(16, -1, 1),                // Z = 16 (-1 to 1 µm)
+    Axis.Time(64, 0, 10)              // T = 64 (0 to 10 seconds)
+);
+// This creates a 5D dataset with 256x256 pixels and 2048 frames (2 * 16 * 64).
+
+// You can also define custom generic axes:
+var hyperStack = new MatrixData<double>(
+    Scale2D.Pixels(128, 128),
+    new Axis(5, 400, 800, "Wavelength", "nm"),          // Maps index 0~4 to physical 400~800 nm
+    new Axis(4, 0, 1, "Sensor", isIndexBasedAxis: true) // Simple index-based axis
 );
 
-// Initialize data
-for (int i = 0; i < xyczt.FrameCount; i++)
-    xyczt.Set(i, (ix, iy, x, y) => i + ix * iy);
+// You can wrap existing arrays without copying data (Zero-allocation initialization):
+var list = new List<byte[]> { new byte[128*128], new byte[128*128], new byte[128*128] };
+var md2 = new MatrixData<byte>(128, 128, list);
+
+
+// --------------------------------------------------------------------------------
+// 2. Handling Frames and Data Access
+// --------------------------------------------------------------------------------
+
+// Get the raw 1D array for a specific frame index.
+var array1 = md.GetArray(1); 
+
+// If you omit the frame index (or pass -1), it returns the array for the ActiveIndex.
+var arrayActiveIndex = md.GetArray(); 
+
+// ActiveIndex is mainly used for UI visualization (e.g., slider changes).
+// Changing it fires the ActiveIndexChanged event.
+md.ActiveIndex = 2; 
+var array2 = md.GetArray(); // Now returns the array for frame index 2
+
+// For bulk processing across all frames, ForEach is the fastest approach.
+md.ForEach((frameIndex, array) =>
+{
+    // Apply operations to the 1D 'array' here.
+    // Parallel processing is enabled by default.
+}, useParallel: true); 
+
+// Random access using the explicit frame index:
+var val1 = md.GetValueAt(1, 1, 2);             // Grid index (ix=1, iy=1) at frame 2
+var val2 = md.GetValue(0.2, 0.5, 2, true);     // Interpolated physical (x=0.2, y=0.5) at frame 2
+
+md.SetValueAt(1, 1, 2, 100);                   // Set via grid index
+md.SetValue(0.2, 0.5, 2, 200);                 // Set via physical coordinates
+
+// Multi-dimensional indexer [ix, iy, c, z, t]:
+var val3 = xyczt[2, 2, 0, 2, 3]; // X=2, Y=2, Channel=0, Z=2, Time=3
+xyczt[2, 2, 0, 2, 3] = 10; 
+// The flat frame index is calculated automatically and efficiently in the background.
+
+
+// --------------------------------------------------------------------------------
+// 3. Accessing Axis Properties
+// --------------------------------------------------------------------------------
+
+// Retrieve an axis object by its name (case-insensitive).
+var zaxis = xyczt["Z"]; 
+double zmin = zaxis.Min;                // e.g., -1.0
+double zmax = zaxis.Max;                // e.g., 1.0
+int znum = zaxis.Count;                 // e.g., 16
+int zindex = zaxis.IndexOf(0.2);        // Returns the index nearest to the physical value 0.2
+double zpos = zaxis.ValueAt(2);         // Returns the physical value at index 2
+
+
+// --------------------------------------------------------------------------------
+// 4. Slicing, Projection, and Volume Operations (Zero-copy design)
+// --------------------------------------------------------------------------------
+// NOTE: Most structural operations return light-weight views or utilize zero-copy 
+// mechanics for maximum performance.
+
+// Slicing: Extract sub-datasets based on specific axis values.
+var xytz = xyczt.SelectBy("Channel", 2);                 // Drops "Channel" axis, returns 4D data
+var xyz = xyczt.ExtractAlong("Z", [1, 0, 2]);            // Extracts a 3D Z-stack at C=1, T=2
+var xy = xyczt.SliceAt(("Channel", 0), ("Z", 1), ("Time", 2)); // Returns a single 2D frame
+
+// VolumeAccessor: View multi-dimensional data as a 3D volume (X, Y, and one target axis).
+// Uses ActiveIndex to fix the remaining dimensions (like Time or Channel).
+var volume = xyczt.AsVolume("Z"); 
+
+// Projections (Dimensionality Reduction):
+// Create a Maximum Intensity Projection (MIP) along the Y axis (resulting in an X-Z image).
+var xzProj = volume.CreateProjection(ViewFrom.Y, ProjectionMode.Maximum); 
+
+// Reshaping/Restacking:
+// Re-slice the volume along the X axis, returning a new stack of Y-Z planes.
+var yzx = volume.Restack(ViewFrom.X); 
+
+// Single Plane Extraction from Volume:
+var xzSlice = volume.SliceAt(ViewFrom.Y, 2); // Get the X-Z slice at Y index = 2
 ```
 
-### Data Population
-
-```csharp
-// 1. Lambda function (with indices and coordinates)
-matrix.Set((ix, iy, x, y) => Math.Sin(x) * Math.Cos(y));
-
-// 2. Frame-by-frame with lambda
-for (int frame = 0; frame < matrix.FrameCount; frame++)
-    matrix.Set(frame, (ix, iy, x, y) => frame * x * y);
-
-// 3. Direct array access
-var array = matrix.GetArray(0);
-for (int i = 0; i < array.Length; i++)
-    array[i] = i * 0.5;
-
-// 4. SetArray (with pre-computed data)
-var newArray = new double[matrix.XCount * matrix.YCount];
-// ... fill newArray ...
-matrix.SetArray(newArray, frameIndex: 5);
-```
 
 ---
 
@@ -165,7 +341,7 @@ var physCrop = matrix.CropByCoordinates(xMin: -5, xMax: 5, yMin: -5, yMax: 5);
 var centered = matrix.CropCenter(width: 256, height: 256);
 ```
 
-### SliceAt (2D), ExtractAlong (3D), and SnapTo (N-1D)
+### SliceAt (2D), ExtractAlong (3D), and SelectBy (N-1D)
 
 ```csharp
 // 5D data: X, Y, C=2, Z=10, Time=5 (100 frames)
@@ -184,8 +360,8 @@ var xy = hyperStack.SliceAt(("Channel", 1),("Z",0), ("Time", 2));
 var xyz = hyperStack.ExtractAlong("Z", baseIndices: new[] {0, 0, 3 });
 // Result: 512×512, 10 Z frames (Channel=0, Time=3)
 
-// SnapTo: Extract N-1D data by fixing one axis
-var xyzt = timeLapse.SnapTo("Channel", indexInAxis: 1);
+// SelectBy: Extract (N-1)D data by fixing one axis
+var xyzt = timeLapse.SelectBy("Channel", indexInAxis: 1);
 // Result: 512×512, 10 Z, 5 T (Channel=1)
 
 ```
@@ -217,13 +393,16 @@ var maxProjection = stack.Reduce((x, y, values) => values.Max());
 
 ```csharp
 // Reorder frames by custom order
-var reordered = matrix.Reorder(new[] { 2, 0, 4, 1, 3 });
+var reordered = matrix.Reorder([2, 0, 4, 1, 3]);
 
 // Use case: Sort frames by acquisition time from metadata
 var sortedIndices = Enumerable.Range(0, matrix.FrameCount)
     .OrderBy(i => matrix.Metadata[$"Time_{i}"])
     .ToList();
 var sorted = matrix.Reorder(sortedIndices);
+
+// You can repeat the same frame because it creates the reference to each frame without copying data
+var repeated = matrix.Reorder([0, 0, 1, 1, 2, 2]);
 ```
 
 ---
@@ -253,7 +432,8 @@ var volumeAtT2 = xyczt.AsVolume("Z", baseIndices: new[] { 0, 2 });  // Z=0, Time
 ### Volume Projections
 
 ```csharp
-var volume = matrix3D.AsVolume();
+
+var volume = matrix3D.AsVolume(); 
 
 // Maximum Intensity Projection (MIP)
 var mipXY = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Maximum);  // Top view
@@ -270,7 +450,7 @@ var aipXY = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Average);
 ### Volume Manipulation
 
 ```csharp
-// Restack: Reorganize volume for different viewing axes
+// Restack: Reorganize volume for different viewing axes (as a new MatrixData)
 var restackedX = volume.Restack(ViewFrom.X);  // YZ slices
 var restackedY = volume.Restack(ViewFrom.Y);  // XZ slices
 
@@ -381,7 +561,7 @@ for (int t = 0; t < 20; t++)
 // Hyperspectral imaging: X, Y, Wavelength=31, Time=100
 var hyperData = new MatrixData<double>(1024, 1024, 3100);
 hyperData.DefineDimensions(
-    new Axis(31, 400, 700, "Wavelength", "nm"),  // 400-700nm
+    new Axis(31, 400, 700, "Wavelength", "nm"),  // 400-700 nm
     Axis.Time(100, 0, 10, "s")
 );
 
@@ -390,7 +570,7 @@ int xPos = 512, yPos = 512;
 var signature = new double[31];
 for (int w = 0; w < 31; w++)
 {
-    var frameIdx = hyperData.Dimensions.GetFrameIndexAt(new[] { w, 50 });  // Wavelength=w, Time=50
+    var frameIdx = hyperData.Dimensions.GetFrameIndexFrom(new[] { w, 50 });  // Wavelength=w, Time=50
     signature[w] = hyperData.GetValueAt(xPos, yPos, frameIdx);
 }
 
@@ -425,8 +605,8 @@ var multiModal = new MatrixData<ushort>(
 
 // Practical analysis pipeline
 var result = multiModal
-    .SnapTo("Channel", 1)              // Extract GFP channel
-    .SnapTo("FOV", 1)                  // Select center FOV
+    .SelectBy("Channel", 1)              // Extract GFP channel
+    .SelectBy("FOV", 1)                  // Select center FOV
     .CropCenter(256, 256)               // Focus on ROI
     .ExtractAlong("Z", new[] { 0, 25 }) // Z-stack at Time=25
     .AsVolume()
@@ -456,36 +636,15 @@ var bigData = new MatrixData<float>(
 
 // Manipulation and processing as SQL-like queries
 var result = bigData
-    .SnapTo("DayOfWeek", 1)        // Mondays only
-    .SnapTot("Humidity", 0)     // Dry conditiions only
-    .SnapTo("Pressure", 1)      // Mid-pressure only
+    .SelectBy("DayOfWeek", 1)        // Mondays only
+    .SelectBy("Humidity", 0)     // Dry conditions only
+    .SelectBy("Pressure", 1)      // Mid-pressure only
     .ExtractAlong("Altitude", new[] { 1, 6, 0, 1 });  // Altitude stack of sensor 1 on 6 AM in January
 
-// Try to evaluate how much time it takes!
 ```
 
-### 🚀 Performance Monster
 
-```csharp
-// Process 1TB of data (hypothetically)
-var hugeData = new MatrixData<ushort>(4096, 4096, 10000);  // ~335GB if ushort
-
-// Parallel processing with Map
-var processed = hugeData.Map<ushort, double>(
-    (value, x, y, frame) =>
-    {
-        // Complex per-pixel processing
-        double normalized = value / 65535.0;
-        double filtered = ApplyGaussianKernel(normalized, x, y);
-        return filtered * CalibrationFactor;
-    },
-    useParallel: true  // Frame-level parallelization
-);
-
-// This actually works! (if you have enough RAM)
-```
-
-### 🎨 Creative (Ab)use Cases
+### 🎨 Creative Use Cases? 
 
 #### 1. Fractal Generation Across Dimensions
 
@@ -567,14 +726,22 @@ for (int level = 0; level < 5; level++)
 
 ## Method Reference
 
+The following are just representative methods and may not be comprehensive.
+
 ### MatrixData<T> Core Methods
 
 #### Construction
-- `MatrixData(int xCount, int yCount)`
-- `MatrixData(int xCount, int yCount, int frameCount)`
-- `MatrixData(Scale2D scale, params Axis[] axes)`
-- `MatrixData(Scale2D scale, IEnumerable<Axis> axes)`
-- `MatrixData(int xCount, int yCount, List<T[]> arrays)`
+- `MatrixData(int xCount, int yCount, T[]? array = null)` — single-frame; optionally supply a preallocated array for the frame.
+- `MatrixData(int xCount, int yCount, int frameCount)` — allocate `frameCount` frames (new arrays).
+- `MatrixData(int xCount, int yCount, List<T[]> arrayList)` — use provided arrays (one per frame). Each array must have length `xCount*yCount`.
+- `MatrixData(int xCount, int yCount, List<T[]> arrayList, List<List<double>> minValueList, List<List<double>> maxValueList)` — provide structured per-frame min/max lists (useful for `Complex` and other structured types).
+- `MatrixData(int xCount, int yCount, List<T[]> arrayList, List<double> primitiveMinValueList, List<double> primitiveMaxValueList)` — provide scalar per-frame min/max values; converted internally to structured lists.
+- `MatrixData(Scale2D scale)` — create a single frame using `scale` for XY coordinates.
+- `MatrixData(Scale2D scale, params Axis[] axes)` — create with specified `scale` and frame `axes`; total frames = product of axis counts; constructor validates the resulting frame count.
+
+Notes:
+- All constructors validate plane size and initialize the internal arrays and `Dimensions` object.
+- Min/max statistics are cached per-array and computed on demand; if you provide min/max lists they are used as the initial cache. Otherwise the cache is empty and will be populated on first request.
 
 #### Data Access
 - `T GetValueAt(int ix, int iy, int frameIndex = -1)`
@@ -592,13 +759,15 @@ for (int level = 0; level < 5; level++)
 - `void Set(Func<int, int, double, double, T> func)`
 - `void Set(int frameIndex, Func<int, int, double, double, T> func)`
 
-#### Statistics
-- `(double Min, double Max) GetMinMaxValues()`
-- `(double Min, double Max) GetMinMaxValues(int frameIndex)`
-- `(double Min, double Max) GetGlobalMinMaxValues()`
+#### Statistics (updated)
+- `(double Min, double Max) GetValueRange()`
+- `(double Min, double Max) GetValueRange(int frameIndex)`
+- `(double Min, double Max) GetGlobalValueRange()`
 - `double GetMinValue()`
 - `double GetMaxValue()`
-- `void RefreshValueRange()`, `RefreshValueRange(int frameIndex)`
+- `void InvalidateValueRange()`
+- `void InvalidateValueRange(int frameIndex)`
+
 
 #### Scaling & Units
 - `void SetXYScale(double xmin, double xmax, double ymin, double ymax)`
@@ -675,136 +844,4 @@ for (int level = 0; level < 5; level++)
 
 ---
 
-## Best Practices
 
-### 1. Memory Management
-
-```csharp
-// ✅ Good: Reuse MatrixData instances
-var temp = new MatrixData<double>(512, 512, 100);
-for (int iteration = 0; iteration < 10; iteration++)
-{
-    // Process in-place when possible
-    ProcessData(temp);
-}
-
-// ❌ Bad: Creating new instances in loop
-for (int iteration = 0; iteration < 10; iteration++)
-{
-    var temp = new MatrixData<double>(512, 512, 100);  // Allocates every time!
-    ProcessData(temp);
-}
-```
-
-### 2. Pipeline Design
-
-```csharp
-// ✅ Good: Chain operations, minimize intermediate allocations
-var result = data
-    .CropCenter(256, 256)
-    .ExtractAlong("Z", indices)
-    .AsVolume()
-    .CreateProjection(ViewFrom.Z, ProjectionMode.Maximum);
-
-// ❌ Bad: Store every intermediate result
-var cropped = data.CropCenter(256, 256);
-var extracted = cropped.ExtractAlong("Z", indices);
-var volume = extracted.AsVolume();
-var result = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Maximum);
-```
-
-### 3. Parallel Processing
-
-```csharp
-// Use parallel processing for large frame counts
-var processed = largeData.Map<ushort, double>(
-    (value, x, y, frame) => ExpensiveProcessing(value),
-    useParallel: true  // ← Enable for >10 frames typically
-);
-
-// For small frame counts (<10), overhead outweighs benefit
-```
-
-### 4. Dimension Design
-
-```csharp
-// ✅ Good: Logical axis order (fast-varying first)
-data.DefineDimensions(
-    Axis.Z(10, ...),      // Varies fastest
-    Axis.Channel(3, ...),
-    Axis.Time(100, ...)   // Varies slowest
-);
-// Frame order: Z0C0T0, Z1C0T0, ..., Z9C0T0, Z0C1T0, ...
-
-// Convention: Inner (fast) → Outer (slow)
-```
-
----
-
-## Performance Characteristics
-
-| Operation | Complexity | Parallelizable | Memory |
-|-----------|-----------|----------------|--------|
-| `GetValueAt()` | O(1) | No | Minimal |
-| `Transpose()` | O(N×M×F) | Yes | Full copy |
-| `Crop()` | O(W×H×F) | Yes | Partial copy |
-| `Map()` | O(N×M×F) | Yes | Full copy |
-| `Reduce()` | O(N×M×F) | Yes | 1 frame |
-| `AsVolume()` | O(1) | No | Zero-copy view |
-| `CreateProjection()` | O(N×M×D) | Yes | 1 frame |
-| `Add()/Subtract()` | O(N×M×F) | Yes | Full copy |
-
-*N=XCount, M=YCount, F=FrameCount, D=Depth, W=CropWidth, H=CropHeight*
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Q: Why does `AsVolume()` throw exception for multi-axis data?**
-
-A: For multi-axis data, you must specify which axis represents the Z-direction:
-```csharp
-// ❌ Wrong
-var volume = multiAxisData.AsVolume();
-
-// ✅ Correct
-var volume = multiAxisData.AsVolume("Z");
-```
-
-**Q: Arithmetic operations fail with "Dimension mismatch"**
-
-A: Frame counts and dimension structures must match:
-```csharp
-// Dimensions must be compatible
-var a = new MatrixData<double>(100, 100, 10);
-a.DefineDimensions(Axis.Z(10, 0, 50, "µm"));
-
-var b = new MatrixData<double>(100, 100, 10);
-b.DefineDimensions(Axis.Time(10, 0, 5, "s"));  // ❌ Different structure!
-
-// var result = a.Add(b);  // Throws ArgumentException
-```
-
-**Q: Memory usage too high?**
-
-A: Consider:
-1. Use `deepCopy: false` when possible
-2. Process in chunks for very large datasets
-3. Use `ushort` or `float` instead of `double` if precision allows
-4. Enable compression for storage: `MatrixDataSerializer.Save(..., compress: true)`
-
----
-
-## See Also
-
-- [VolumeAccessor Guide](VolumeAccessor_Guide.md)
-- [Performance Reports](VolumeOperator_Performance_Report.md)
-- [API Reference](../README.md)
-
----
-
-**End of Guide**
-
-*Generated by GitHub Copilot --It may contain incorrect explanations.*

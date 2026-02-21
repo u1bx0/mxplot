@@ -3,6 +3,7 @@
 **MxPlot.Core 3D Volume Operations Reference**
 
 > Last Updated: 2026-02-08  
+> Version: 0.0.2
 
 ## 📚 Table of Contents
 

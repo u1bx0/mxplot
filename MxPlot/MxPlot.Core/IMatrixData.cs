@@ -19,12 +19,12 @@ namespace MxPlot.Core
         int XCount { get; }
 
         /// <summary>
-        ///  = (MaxX - MinX) / (NumX - 1)
+        ///  = (XMax - XMin) / (XCount - 1) = XRange / (XCount - 1)
         /// </summary>
         double XStep { get; }
 
         /// <summary>
-        ///  = MaxX - MinX
+        ///  = XMax - XMin
         /// </summary>
         double XRange { get; }
 
@@ -33,6 +33,10 @@ namespace MxPlot.Core
         double YMin { get; set; }
 
         int YCount{ get; }
+
+        /// <summary>
+        ///  = (YMax - YMin) / (YCount - 1) = YRange / (YCount - 1)
+        /// </summary>
 
         double YStep { get; }
 
@@ -142,31 +146,40 @@ namespace MxPlot.Core
         /// <seealso cref="DimensionStructure.this[string]"/>
         Axis? this [string axisName] { get; }
 
-
-
         /// <summary>
         /// Find and update max and min values in the specific frame. This is necessary when an array data is directly modified.
         /// </summary>
         /// <param name="frameIndex"></param>
-        void RefreshValueRange(int frameIndex);
+        //void RefreshValueRange(int frameIndex);
 
         /// <summary>
         /// Find and update max and min values in the active frame. This is necessary when an array data is directly modified.
         /// </summary>
-        void RefreshValueRange();
+        //void RefreshValueRange();
+
+        /// <summary>
+        /// Marks the current frame is modified and forces the system to recalculate the min and max values when needed.
+        /// </summary>
+        void Invalidate();
+
+        /// <summary>
+        /// Invalidates the specified frame, marking it for recalculation of min and max values when needed. This is necessary when an array is directly modified <b>AFTER</b> calling GetValueRange.
+        /// </summary>
+        /// <param name="frameIndex">The zero-based index of the frame to invalidate. Must be within the valid range of frames.</param>
+        void Invalidate(int frameIndex);
 
         /// <summary>
         /// Get the min and max values in the active frame as a tuple (min, max).
         /// </summary>
         /// <returns></returns>
-        (double Min, double Max) GetMinMaxValues();
+        (double Min, double Max) GetValueRange();
 
         /// <summary>
         /// Get the min and max values in the specific frame as a tuple (min, max).
         /// </summary>
         /// <param name="index"></param>
         /// <returns>double[]{min, max}</returns>
-        (double Min, double Max) GetMinMaxValues(int frameIndex);
+        (double Min, double Max) GetValueRange(int frameIndex);
 
         /// <summary>
         /// Retrieves the minimum and maximum values along the specified axis.
@@ -178,13 +191,13 @@ namespace MxPlot.Core
         /// The value for the <paramref name="targetAxis"/> index in this array is ignored.
         /// </param>
         /// <returns>A tuple containing the minimum and maximum values.</returns>
-        (double Min, double Max) GetMinMaxValues(Axis targetAxis, int[]? fixedCoordinates = null);
+        (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null);
 
         /// <summary>
         /// Get the min and max values found in all the frames as a tuple (min, max).
         /// </summary>
         /// <returns>double[]{min, max}</returns>
-        (double Min, double Max) GetGlobalMinMaxValues();
+        (double Min, double Max) GetGlobalValueRange();
 
         /// <summary>
         /// 
@@ -211,6 +224,18 @@ namespace MxPlot.Core
         /// <param name="iz">-1の場合は現在のActiveIndex</param>
         /// <returns></returns>
         double GetValueAt(int ix, int iy, int frameIndex = -1);
+
+        /// <summary>
+        /// Returns the value at the specified coordinates (x, y) as a double. 
+        /// If frameIndex is -1, the value from the current active frame is returned. 
+        /// If interpolate is true, the value is calculated using an interpolation algorithm based on the surrounding data points; otherwise, the value from the nearest data point is returned.
+        /// </summary>
+        /// <param name="x"></param>
+        /// <param name="y"></param>
+        /// <param name="frameIndex"></param>
+        /// <param name="interpolate"></param>
+        /// <returns></returns>
+        double GetValueAsDouble(double x, double y, int frameIndex = -1, bool interpolate = false);
 
         /// <summary>
         /// Returns a read-only span containing the raw byte data for the specified frame.

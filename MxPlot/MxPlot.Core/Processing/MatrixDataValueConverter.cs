@@ -36,7 +36,8 @@ namespace MxPlot.Core.Processing
                 T[] srcArray = src.GetArray(frameIndex);
                 double[] dstArray = dst.GetArray(frameIndex);
                 ToDoubleProc(srcArray, dstArray, converter, xnum, ynum, useParallel: false);
-                dst.RefreshValueRange(frameIndex);
+                //dst.RefreshValueRange(frameIndex);
+                dst.Invalidate(frameIndex);
             });
             return dst;
         }
@@ -55,7 +56,8 @@ namespace MxPlot.Core.Processing
 
             ToDoubleProc(srcArray, dstArray, converter, xnum, ynum, useParallel: true);
 
-            dst.RefreshValueRange();
+            //dst.RefreshValueRange();
+            dst.Invalidate();
             return dst;
         }
 
@@ -141,7 +143,7 @@ namespace MxPlot.Core.Processing
             ToDoubleFromComplexProc(srcArray, dstArray, mode, applyLog10, xnum, ynum, useParallel: true);
 
             // 4. 値の範囲更新
-            dst.RefreshValueRange();
+            dst.Invalidate();
             return dst;
         }
 
@@ -158,7 +160,7 @@ namespace MxPlot.Core.Processing
                 Complex[] srcArray = src.GetArray(frameIndex);
                 double[] dstArray = dst.GetArray(frameIndex);
                 ToDoubleFromComplexProc(srcArray, dstArray, mode, applyLog10, xnum, ynum, useParallel: false);
-                dst.RefreshValueRange(frameIndex);
+                dst.Invalidate(frameIndex);
             });
             return dst;
         }
