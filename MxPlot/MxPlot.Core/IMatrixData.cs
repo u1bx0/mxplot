@@ -181,6 +181,13 @@ namespace MxPlot.Core
         /// <returns>double[]{min, max}</returns>
         (double Min, double Max) GetValueRange(int frameIndex);
 
+
+        (double Min, double Max) GetValueRange(int frameIndex, int valueMode);
+
+
+        (List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex);
+
+
         /// <summary>
         /// Retrieves the minimum and maximum values along the specified axis.
         /// If <paramref name="fixedCoordinates"/> is not specified, the indices of the current active frame are used.
@@ -192,6 +199,9 @@ namespace MxPlot.Core
         /// </param>
         /// <returns>A tuple containing the minimum and maximum values.</returns>
         (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null);
+
+
+        (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null, int valueMode = 0);
 
         /// <summary>
         /// Get the min and max values found in all the frames as a tuple (min, max).

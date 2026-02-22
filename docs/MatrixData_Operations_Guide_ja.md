@@ -2,7 +2,7 @@
 
 **MxPlot.Core 総合リファレンス**
 
-> 最終更新日: 2026-02-21
+> 最終更新日: 2026-02-22
 
 *注意: このドキュメントは大部分がAIによって生成されたものであり、正確性の確認が必要です。ライブラリの変更に伴い、一部の記述が古い場合があります。*
 
@@ -309,7 +309,7 @@ double zpos = zaxis.ValueAt(2);         // インデックス 2 の物理値を�
 // 引き出すためにゼロコピーのメカニズムを利用しています。
 
 // スライシング: 特定の軸の値に基づいてサブデータセットを抽出します。
-var xytz = xyczt.SelectBy("Channel", 2);                 // "Channel" 軸を落とし、4Dデータを返す
+var xytz = xyczt.SelectBy("Channel", 1);                 // "Channel" 軸を落とし、4Dデータを返す
 var xyz = xyczt.ExtractAlong("Z", [1, 0, 2]);            // C=1, T=2 における3D Zスタックを抽出
 var xy = xyczt.SliceAt(("Channel", 0), ("Z", 1), ("Time", 2)); // 単一の2Dフレームを返す
 

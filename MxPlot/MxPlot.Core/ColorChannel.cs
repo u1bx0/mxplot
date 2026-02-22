@@ -6,101 +6,100 @@ using System.Text;
 namespace MxPlot.Core
 {
     /// <summary>
-    /// Reserved for future use to represent a channel-specific behavior. 
+    /// Represents a tag-based axis specialized for color channels.
     /// </summary>
-    public class ColorChannel : Axis
+    /// <remarks>
+    /// This axis uses the default name "Channel", and therefore cannot be used
+    /// together with <see cref="Axis.Channel"/> in the same dimension definition.
+    /// </remarks>
+    public class ColorChannel : TaggedAxis
     {
-        private string[] _chNames;
-
         private uint[]? _assignedColors;
-        
         private double[]? _wavelengths;
 
         /// <summary>
-        /// Example: var ch = new ColorChannel("Red", "Green", "Blue");
+        /// Occurs when assigned colors are modified.
         /// </summary>
-        public ColorChannel(params string[] chNames)
-            : base(chNames.Length, 0, chNames.Length - 1, "Channel", unit: "", isIndexBasedAxis: true)
-        {
-            if (chNames.Length == 0)
-                throw new ArgumentException("At least one channel name must be provided.");
+        public event EventHandler? ColorAssignChanged;
 
-            _chNames = new string[chNames.Length];
-            Array.Copy(chNames, _chNames, chNames.Length);
+        /// <summary>
+        /// Occurs when assigned wavelengths are modified.
+        /// </summary>
+        public event EventHandler? WavelengthAssignChanged;
+
+        /// <summary>
+        /// Initializes a new <see cref="ColorChannel"/> using the specified channel tags.
+        /// Example: <c>new ColorChannel("Red", "Green", "Blue")</c>.
+        /// </summary>
+        public ColorChannel(params string[] chTags)
+            : base(chTags)
+        {
+            Name = "Channel";
         }
 
         /// <summary>
-        /// Constructs a ColorChannel with default names ("Ch0", "Ch1", etc.) based on the specified count.
+        /// Initializes a new <see cref="ColorChannel"/> with default names
+        /// ("Ch0", "Ch1", …) based on the specified count.
         /// </summary>
         public ColorChannel(int count)
-            : base(count, 0, count - 1, "Channel", unit: "", isIndexBasedAxis: true)
+            : base(Enumerable.Range(0, count).Select(i => $"Ch{i}").ToArray())
         {
-            if (count <= 0)
-                throw new ArgumentException("Count must be greater than 0.");
-
-            _chNames = Enumerable.Range(0, count).Select(i => $"Ch{i}").ToArray();
+            Name = "Channel";
         }
-
-        // 内部用のプライベートコンストラクタ（Clone用）
-        private ColorChannel(int count, string[] names, uint[]? colors, double[]? wavelengths)
-             : base(count, 0, count - 1, "Channel", unit: "", isIndexBasedAxis: true)
-        {
-            _chNames = new string[count];
-            Array.Copy(names, _chNames, count);
-
-            if (colors != null)
-            {
-                _assignedColors = new uint[count];
-                Array.Copy(colors, _assignedColors, count);
-            }
-
-            if (wavelengths != null)
-            {
-                _wavelengths = new double[count];
-                Array.Copy(wavelengths, _wavelengths, count);
-            }
-        }
-
-        public int this[string chName] => Array.IndexOf(_chNames, chName);
 
         public bool HasAssignedColors => _assignedColors != null;
         public bool HasWavelengths => _wavelengths != null;
 
-        public string[] ChannelNames => _chNames.ToArray(); // 安全のためコピーを返す
+        /// <summary>
+        /// Gets the assigned colors, or <c>null</c> if no colors are assigned.
+        /// </summary>
+        public IReadOnlyList<uint>? AssignedColors => _assignedColors;
 
-        public void AssignChannelNames(string[] chNames)
+        /// <summary>
+        /// Gets the assigned wavelengths, or <c>null</c> if no wavelengths are assigned.
+        /// </summary>
+        public IReadOnlyList<double>? Wavelengths => _wavelengths;
+
+        /// <summary>
+        /// Assigns colors to each channel. The array length must match the number of tags.
+        /// Passing <c>null</c> removes any existing assignment.
+        /// </summary>
+        public void AssignColors(uint[]? colors)
         {
-            if (chNames.Length != _chNames.Length)
-                throw new ArgumentException($"Expected {_chNames.Length} names, but got {chNames.Length}.");
-
-            for (int i = 0; i < chNames.Length; i++)
+            if (colors is null)
             {
-                if (string.IsNullOrEmpty(chNames[i]))
-                    throw new ArgumentException($"Channel name at index {i} cannot be null/empty.");
-                _chNames[i] = chNames[i];
+                _assignedColors = null;
+                ColorAssignChanged?.Invoke(this, EventArgs.Empty);
+                return;
             }
+
+            if (colors.Length != Tags.Count)
+                throw new ArgumentException($"Expected {Tags.Count} colors, but got {colors.Length}.");
+
+            _assignedColors = colors.ToArray();
+            ColorAssignChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        public void AssignColors(uint[] colors)
-        {
-            if (colors.Length != _chNames.Length)
-                throw new ArgumentException($"Expected {_chNames.Length} colors, but got {colors.Length}.");
-
-            _assignedColors = new uint[colors.Length];
-            Array.Copy(colors, _assignedColors, colors.Length);
-        }
-
+        /// <summary>
+        /// Sets the color for the specified channel index.
+        /// </summary>
         public void SetColor(int index, uint argb)
         {
             EnsureColorsAssigned();
             ValidateIndex(index);
             _assignedColors![index] = argb;
+            ColorAssignChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        public void SetColor(string chName, uint argb)
+        /// <summary>
+        /// Sets the color for the specified channel tag.
+        /// </summary>
+        public void SetColor(string chTag, uint argb)
         {
-            int index = this[chName];
-            if (index == -1) throw new ArgumentException($"Channel '{chName}' not found.");
+            int index = this[chTag];
+            if (index == -1)
+                throw new ArgumentException($"Channel '{chTag}' not found.");
+
             SetColor(index, argb);
         }
 
@@ -111,20 +110,33 @@ namespace MxPlot.Core
             return _assignedColors![index];
         }
 
-        public uint GetColor(string chName)
+        public uint GetColor(string chTag)
         {
-            int index = this[chName];
-            if (index == -1) throw new ArgumentException($"Channel '{chName}' not found.");
+            int index = this[chTag];
+            if (index == -1)
+                throw new ArgumentException($"Channel '{chTag}' not found.");
+
             return GetColor(index);
         }
 
-        public void AssignWavelengths(double[] wavelengths)
+        /// <summary>
+        /// Assigns wavelengths to each channel. The array length must match the number of tags.
+        /// Passing <c>null</c> removes any existing assignment.
+        /// </summary>
+        public void AssignWavelengths(double[]? wavelengths)
         {
-            if (wavelengths.Length != _chNames.Length)
-                throw new ArgumentException($"Expected {_chNames.Length} wavelengths, but got {wavelengths.Length}.");
+            if (wavelengths is null)
+            {
+                _wavelengths = null;
+                WavelengthAssignChanged?.Invoke(this, EventArgs.Empty);
+                return;
+            }
 
-            _wavelengths = new double[wavelengths.Length];
-            Array.Copy(wavelengths, _wavelengths, wavelengths.Length);
+            if (wavelengths.Length != Tags.Count)
+                throw new ArgumentException($"Expected {Tags.Count} wavelengths, but got {wavelengths.Length}.");
+
+            _wavelengths = wavelengths.ToArray();
+            WavelengthAssignChanged?.Invoke(this, EventArgs.Empty);
         }
 
         public double GetWavelength(int index)
@@ -134,18 +146,31 @@ namespace MxPlot.Core
             return _wavelengths![index];
         }
 
+        /// <summary>
+        /// Sets the wavelength for the specified channel index.
+        /// </summary>
         public void SetWavelength(int index, double wavelength)
         {
             EnsureWavelengthsAssigned();
             ValidateIndex(index);
             _wavelengths![index] = wavelength;
+            WavelengthAssignChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        public void SetWavelength(string chTag, double wavelength)
+        {
+            int index = this[chTag];
+            if (index == -1)
+                throw new ArgumentException($"Channel '{chTag}' not found.");
+
+            SetWavelength(index, wavelength);
         }
 
         // --- Helper Methods ---
         private void ValidateIndex(int index)
         {
-            if (index < 0 || index >= _chNames.Length)
-                throw new ArgumentOutOfRangeException(nameof(index), $"Index must be 0 to {_chNames.Length - 1}.");
+            if (index < 0 || index >= Tags.Count)
+                throw new ArgumentOutOfRangeException(nameof(index), $"Index must be 0 to {Tags.Count - 1}.");
         }
 
         private void EnsureColorsAssigned()
@@ -160,19 +185,25 @@ namespace MxPlot.Core
                 throw new InvalidOperationException("Wavelengths not assigned. Call AssignWavelengths() first.");
         }
 
-        // ★重要: Cloneのオーバーライド
-        public override Axis Clone()
+        public ColorChannel CloneTyped()
         {
-            // 専用のprivateコンストラクタを使ってディープコピーを作成
-            var clone = new ColorChannel(this.Count, this._chNames, this._assignedColors, this._wavelengths);
+            var clone = new ColorChannel(Tags.ToArray())
+            {
+                Index = Index,
+                Name = Name,
+                Unit = Unit,
+            };
 
-            // Axis(基底クラス)のプロパティも忘れずコピー
-            clone.Index = this.Index;
-            clone.Name = this.Name;
-            clone.Unit = this.Unit;
-            // Min/Max/IsIndexBased はコンストラクタで設定済み
+            if (HasAssignedColors)
+                clone.AssignColors(_assignedColors!);
+
+            if (HasWavelengths)
+                clone.AssignWavelengths(_wavelengths!);
 
             return clone;
         }
+
+        public override ColorChannel Clone() => CloneTyped();
     }
+
 }

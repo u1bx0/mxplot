@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.0.4--alpha-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.0.5-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -88,18 +88,18 @@ This ecosystem is provided as several NuGet packages.
 
 - **MxPlot (Recommended)**: For most users. Includes core and library-dependent extensions.
 ```bash
-dotnet add package MxPlot --version 0.0.4-alpha
+dotnet add package MxPlot --version 0.0.5
 ```
 
 - **MxPlot.Core**: For developers building their own tools without extra dependencies.
 ```bash
-dotnet add package MxPlot.Core --version 0.0.4-alpha
+dotnet add package MxPlot.Core --version 0.0.5
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="MxPlot" Version="0.0.4-alpha" />
+<PackageReference Include="MxPlot" Version="0.0.5" />
 ```
 
 ### 🛠️ For Developers (Manual Setup)
@@ -447,7 +447,14 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 
 ## 📊 Version History
 
-**v0.0.5-alpha** (Current - Improving the internal logic with breaking changes)
+**v0.0.5** (Current - Stabilized core features and architectural refactoring)
+- 🏷️ New Axis & Channel Types: Introduced TaggedAxis and ColorChannel for enhanced dimension labeling and color data management.
+- 💾 Enhanced Serialization: Improved Save and Load capabilities for more robust data persistence.
+- 🛠️ Codebase Refactoring: Cleaned up the core architecture by splitting the monolithic MatrixData<T> into logically organized partial classes (Core, Constructors, Accessors, Statistics) to maximize maintainability.
+- ⚡ Internal Optimizations: Fine-tuned internal logic across various core methods for better performance and stability.
+- 📚 Documentation Updates: Expanded and polished technical guides, including English and Japanese translations.
+
+**v0.0.5-alpha** (Improving the internal logic with breaking changes)
 - 🧠 Frame Sharing & Memory Model: Refined the zero-cost O(1) frame reordering (Reorder) using underlying array reference sharing.
 - 🔄 Explicit Copy Semantics: Clarified mutation semantics and introduced explicit deep copying via Duplicate() and Clone().
 - ⚡ Lazy Min/Max Evaluation: Implemented lazy evaluation and caching for frame min/max values (GetValueRange), optimizing performance during bulk array mutations, which largely modified the internal logics of MatrixData.

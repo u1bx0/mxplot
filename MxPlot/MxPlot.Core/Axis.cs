@@ -2,18 +2,25 @@
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace MxPlot.Core
 {
+    /// <summary>
+    /// Represents an axis with defined minimum and maximum values, units, and a name, allowing for index-based or
+    /// value-based positioning.
+    /// </summary>
+    /// <remarks>The Axis class provides functionality to manage axis properties such as scaling, indexing,
+    /// and event notifications for changes in name, index, scale, and unit. It supports both index-based and
+    /// value-based axes, with automatic adjustments for index-based configurations. The axis can be used to map
+    /// positions or indices to values, and includes factory methods for common axis types such as 'Time', 'Channel',
+    /// and 'Frame'.</remarks>
+    [JsonDerivedType(typeof(Axis), "base")]
+    [JsonDerivedType(typeof(FovAxis), "fov")]
+    [JsonDerivedType(typeof(TaggedAxis), "tagged")]
+    [JsonDerivedType(typeof(ColorChannel), "colored")]
     public class Axis : ICloneable
     {
-       
-        /*
-      /// <summary>
-      /// 軸を持たないことを表すスタティックオブジェクト
-      /// </summary>
-      public static readonly Axis Unity = new Axis(1, 0, 0, "Unity");
-      */
 
         private double _min;
         private double _max;
@@ -294,7 +301,7 @@ namespace MxPlot.Core
 
         #endregion
 
-
+        
         /// <summary>
         /// 最小値・最大値をnumで分割した範囲を定義する
         /// 領域を変更することができない
@@ -304,23 +311,24 @@ namespace MxPlot.Core
         /// <param name="num"></param>
         /// <param name="name"></param>
         /// <param name="unit">軸の単位</param>
-        /// <param name="isIndexBasedAxis">インデックスベースの軸かどうか trueの場合はmin = 0, max = num - 1に固定される</param>
-        public Axis(int num, double min, double max, string name = "Series", string unit = "", bool isIndexBasedAxis = false)
+        /// <param name="isIndexBased">インデックスベースの軸かどうか trueの場合はmin = 0, max = num - 1に固定される</param>
+        [JsonConstructor]
+        public Axis(int count, double min, double max, string name = "Series", string unit = "", bool isIndexBased = false)
         {
-            this.Count = num;
+            this.Count = count;
             this.Name = name;
             this.Unit = unit;
 
-            this.IsIndexBased = isIndexBasedAxis; //trueの場合は自動的にmin, maxが設定される（コンストラクタなので、イベントは発生し得ない）
+            this.IsIndexBased = isIndexBased; //trueの場合は自動的にmin, maxが設定される（コンストラクタなので、イベントは発生し得ない）
             if (!IsIndexBased)
             {
                 _min = min;
                 _max = max;
             }
-            if (num <= 0)
-                throw new ArgumentException("Division number should be >= 1, num = " + num);
+            if (count <= 0)
+                throw new ArgumentException("Division number should be >= 1, num = " + count);
 
-            Step = num > 1 ? (max - min) / (num - 1) : 0;
+            Step = count > 1 ? (max - min) / (count - 1) : 0;
         }
 
         /// <summary>

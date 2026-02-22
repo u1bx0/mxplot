@@ -101,31 +101,46 @@ namespace MxPlot.Core
                 _strides = Array.Empty<int>();
         }
 
+        /// <summary>
+        /// Initializes a new <see cref="DimensionStructure"/> using the specified
+        /// matrix data and axis definitions.
+        /// </summary>
+        /// <param name="md">The matrix data object. Must not be null.</param>
+        /// <param name="axes">The axes that define the dimensional structure. Must not be null.</param>
+        /// <exception cref="ArgumentNullException">
+        /// Thrown when <paramref name="md"/> or <paramref name="axes"/> is null.
+        /// </exception>
+        /// <exception cref="ArgumentException">
+        /// Thrown when duplicate axis names are detected.
+        /// </exception>
         public DimensionStructure(IMatrixData md, params Axis[] axes)
         {
-            if (md is null || axes is null) //not null
+            if (md is null || axes is null)
                 throw new ArgumentNullException();
 
             _md = md;
             _md.ActiveIndexChanged += ActiveIndex_Changed;
-            //重複チェック：その場合は例外を投げる
-            //WhereでもどってくるのはGroupingオブジェクト
-            var duplicated = axes.GroupBy(axis => axis.Name)
-                .Where(name => name.Count() > 1).Select(grp => grp.Key)
+
+            // Check for duplicate axis names.
+            // Group by Name; any group with more than one element indicates duplication.
+            var duplicated = axes
+                .GroupBy(axis => axis.Name)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
                 .ToList();
+
             if (duplicated.Count > 0)
             {
-                var sb = new StringBuilder("Duplication of axis names: ");
+                var sb = new StringBuilder("Duplicate axis names detected: ");
                 foreach (var d in duplicated)
-                {
-                    sb.Append(d).Append(" ");
-                }
-                //Nameでグループ化したときに要素数が1より大きいと、重複があるということ
+                    sb.Append(d).Append(' ');
+
                 throw new ArgumentException(sb.ToString());
             }
 
             RegisterAxes(axes);
         }
+
 
         /// <summary>
         /// The reason for implementing IDisposable is to unregister event handlers to prevent memory leaks.

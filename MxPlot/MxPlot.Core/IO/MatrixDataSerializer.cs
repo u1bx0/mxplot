@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -15,215 +16,185 @@ namespace MxPlot.Core.IO
     /// </summary>
     public static class MatrixDataSerializer
     {
-        private const string MagicNumber = "MXDATA";
-        private const int CurrentVersion = 1;
+        /// <summary>
+        /// Magic Number: "MXDF" (Matrix Data File).
+        /// Using a 4-byte FourCC (Four Character Code) allows for efficient 32-bit integer comparison 
+        /// and ensures proper memory alignment during initial file validation.
+        /// </summary>
+        public readonly static string MagicNumber = "MXDF";
 
         /// <summary>
-        /// Saves a MatrixData object to a binary file with optional GZip compression.
+        /// Saves the specified matrix data to a file at the given path, with optional compression and optional progress reporting.
         /// </summary>
-        /// <typeparam name="T">The data type of matrix elements (must be a struct).</typeparam>
-        /// <param name="path">The file path where data will be saved.</param>
-        /// <param name="data">The MatrixData object to save.</param>
-        /// <param name="compress">If true, applies GZip compression to reduce file size (default: true).</param>
-        /// <exception cref="ArgumentNullException">Thrown if data or path is null.</exception>
-        /// <exception cref="IOException">Thrown if file write operation fails.</exception>
-        public static void Save<T>(string path, MatrixData<T> data, bool compress = true) where T : unmanaged
+        /// <remarks>Progress is reported before and after saving the data. If compression is enabled, the
+        /// data is written using GZip compression.</remarks>
+        /// <typeparam name="T">The type of elements in the matrix data. Must be an unmanaged type.</typeparam>
+        /// <param name="path">The file path where the matrix data will be saved.</param>
+        /// <param name="data">The matrix data to save.</param>
+        /// <param name="compress">A value indicating whether to compress the data before saving. The default is <see langword="true"/>.</param>
+        /// <param name="progress">An optional progress reporter that receives updates on the number of frames processed during the save
+        /// operation.</param>
+        public static void Save<T>(string path, MatrixData<T> data, bool compress = true, IProgress<int>? progress = null) where T : unmanaged
         {
-            if (string.IsNullOrEmpty(path)) throw new ArgumentNullException(nameof(path));
-            if (data == null) throw new ArgumentNullException(nameof(data));
-
             using var fs = File.Create(path);
-            using var compressionStream = compress ? new GZipStream(fs, CompressionLevel.Optimal) : null;
-            var targetStream = compress ? (Stream)compressionStream! : fs;
-            using var writer = new BinaryWriter(targetStream, Encoding.UTF8, leaveOpen: compress);
+            using var writer = new BinaryWriter(fs, Encoding.UTF8);
 
-            try
+            //Report progress (negative value indicates total frames to process)
+            progress?.Report(-data.FrameCount);
+
+            // 1. Magic Number
+            writer.Write(Encoding.ASCII.GetBytes(MagicNumber));
+
+            // 2. Prepare Header
+            var config = new MatrixDataConfig(data) with { IsCompressed = compress };
+            byte[] headerBytes = Encoding.UTF8.GetBytes(config.ToHeaderString());
+
+            // 3. Write Header Size & Content
+            writer.Write(headerBytes.Length);
+            writer.Write(headerBytes);
+
+            // 4. Binary Data Section
+            if (compress)
             {
-                // Write Header
-                WriteHeader(writer, data, compress);
-
-                // Write Dimensions
-                WriteDimensions(writer, data);
-
-                // Write Data Arrays (no statistics)
-                WriteDataArrays(writer, data);
-
-                // Write Metadata
-                WriteMetadata(writer, data);
+                using var gzs = new GZipStream(fs, CompressionLevel.Optimal, leaveOpen: true);
+                WriteDataToStream(gzs, data, progress);
             }
-            catch (Exception ex)
+            else
             {
-                throw new IOException($"Failed to save MatrixData to '{path}': {ex.Message}", ex);
+                WriteDataToStream(fs, data, progress);
+            }
+            progress?.Report(data.FrameCount);
+        }
+
+        private static void WriteDataToStream<T>(Stream stream, MatrixData<T> data, IProgress<int>? progress) where T : unmanaged
+        {
+            // BinaryWriter を一時的に作成（ストリームを閉じない設定で）
+            using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
+            for (int i = 0; i < data.FrameCount; i++)
+            {
+                ReadOnlySpan<byte> bytes = data.GetRawBytes(i);
+                writer.Write(bytes.Length);
+                writer.Write(bytes);
+                progress?.Report(i);
             }
         }
 
         /// <summary>
-        /// Loads a MatrixData object from a binary file.
-        /// Statistical values (min/max) are automatically recalculated after loading.
+        /// Read only the header metadata from a MxPlot data file, returning a MatrixDataConfig instance without loading the full matrix data.
         /// </summary>
-        /// <typeparam name="T">The expected data type of matrix elements.</typeparam>
-        /// <param name="path">The file path to load data from.</param>
-        /// <returns>A new MatrixData&lt;T&gt; instance loaded from the file.</returns>
-        /// <exception cref="ArgumentNullException">Thrown if path is null.</exception>
-        /// <exception cref="FileNotFoundException">Thrown if the file does not exist.</exception>
-        /// <exception cref="InvalidDataException">Thrown if file format is invalid or type mismatch occurs.</exception>
-        public static MatrixData<T> Load<T>(string path) where T : unmanaged
+        public static MatrixDataConfig ReadHeaderConfig(string path)
         {
-            if (string.IsNullOrEmpty(path)) throw new ArgumentNullException(nameof(path));
-            if (!File.Exists(path)) throw new FileNotFoundException($"File not found: {path}");
-
             using var fs = File.OpenRead(path);
-
-            // Detect compression by checking GZip magic bytes (0x1F 0x8B)
-            bool compressed = false;
-            var firstTwoBytes = new byte[2];
-            if (fs.Read(firstTwoBytes, 0, 2) == 2)
-            {
-                compressed = firstTwoBytes[0] == 0x1F && firstTwoBytes[1] == 0x8B;
-            }
-            fs.Seek(0, SeekOrigin.Begin);
-
-            // Decompress if needed
-            using var decompressionStream = compressed ? new GZipStream(fs, CompressionMode.Decompress) : null;
-            var sourceStream = compressed ? (Stream)decompressionStream! : fs;
-            using var reader = new BinaryReader(sourceStream, Encoding.UTF8, leaveOpen: compressed);
-
-            try
-            {
-                // Read and validate header
-                var magic = reader.ReadString();
-                if (magic != MagicNumber)
-                    throw new InvalidDataException($"Invalid file format. Expected '{MagicNumber}', got '{magic}'");
-
-                var version = reader.ReadInt32();
-                if (version != CurrentVersion)
-                    throw new InvalidDataException($"Unsupported version: {version}. Expected: {CurrentVersion}");
-
-                var typeName = reader.ReadString();
-                var compressedFlag = reader.ReadBoolean(); // Read but not used (already detected)
-
-                // Validate type
-                if (typeName != typeof(T).FullName)
-                    throw new InvalidDataException(
-                        $"Type mismatch: file contains '{typeName}', expected '{typeof(T).FullName}'");
-
-                // Read rest of header
-                var header = new HeaderInfo
-                {
-                    XCount = reader.ReadInt32(),
-                    YCount = reader.ReadInt32(),
-                    FrameCount = reader.ReadInt32(),
-                    XMin = reader.ReadDouble(),
-                    XMax = reader.ReadDouble(),
-                    YMin = reader.ReadDouble(),
-                    YMax = reader.ReadDouble(),
-                    XUnit = reader.ReadString(),
-                    YUnit = reader.ReadString()
-                };
-
-                // Read Dimensions
-                var axes = ReadDimensions(reader);
-
-                // Read Data Arrays
-                var arrays = ReadDataArrays<T>(reader, header.XCount, header.YCount, header.FrameCount);
-
-                // Create MatrixData (statistics will be auto-calculated)
-                var matrix = new MatrixData<T>(header.XCount, header.YCount, arrays, 
-                    minValueList: [], maxValueList: []); 
-                matrix.SetXYScale(header.XMin, header.XMax, header.YMin, header.YMax);
-                matrix.XUnit = header.XUnit;
-                matrix.YUnit = header.YUnit;
-
-                if (axes.Length > 0)
-                    matrix.DefineDimensions(axes);
-
-                // Read Metadata
-                ReadMetadata(reader, matrix);
-
-                return matrix;
-            }
-            catch (Exception ex) when (!(ex is InvalidDataException))
-            {
-                throw new InvalidDataException($"Failed to load MatrixData from '{path}': {ex.Message}", ex);
-            }
+            using var reader = new BinaryReader(fs, Encoding.UTF8);
+            return ReadHeaderInternal(reader); // 共通ロジックへ
         }
 
         /// <summary>
-        /// Reads file header information without loading the entire dataset.
-        /// Useful for file browsing and preview functionality.
+        /// Internal logic for reading the header metadata from a MxPlot data file. 
+        /// This method assumes that the reader is positioned at the beginning of the file 
+        /// and will read the magic number and header content, returning a MatrixDataConfig instance. 
+        /// The reader's position will be advanced to the end of the header, ready for subsequent reading of the matrix data if needed.
         /// </summary>
-        /// <param name="path">The file path to inspect.</param>
-        /// <returns>A FileInfo object containing header metadata.</returns>
-        /// <exception cref="ArgumentNullException">Thrown if path is null.</exception>
-        /// <exception cref="FileNotFoundException">Thrown if the file does not exist.</exception>
-        /// <exception cref="InvalidDataException">Thrown if file format is invalid.</exception>
-        public static MatrixDataFileInfo GetFileInfo(string path)
+        private static MatrixDataConfig ReadHeaderInternal(BinaryReader reader)
         {
-            if (string.IsNullOrEmpty(path)) throw new ArgumentNullException(nameof(path));
-            if (!File.Exists(path)) throw new FileNotFoundException($"File not found: {path}");
+            // 1. Check Magic Number
+            var magicBytes = reader.ReadBytes(4);
+            var magic = Encoding.ASCII.GetString(magicBytes);
+            if (magic != MagicNumber) throw new InvalidDataException("Not a valid MXDF data file.");
 
+            // 2. Read Header
+            int headerSize = reader.ReadInt32();
+            string json = Encoding.UTF8.GetString(reader.ReadBytes(headerSize));
+
+            return MatrixDataConfig.FromHeaderString(json)
+                   ?? throw new InvalidOperationException("Invalid header content.");
+        }
+
+        /// <summary>
+        /// Loads matrix data from a file in the MxPlot format and returns a new instance of the corresponding
+        /// MatrixData<T> type.
+        /// </summary>
+        /// <remarks>This method supports loading both compressed and uncompressed MxPlot files. If the
+        /// file is compressed, decompression is handled automatically. The caller must ensure that the type parameter T
+        /// matches the type of the data in the file; otherwise, an exception is thrown.</remarks>
+        /// <typeparam name="T">The type of the matrix elements to load. Must be an unmanaged type that matches the data stored in the file.</typeparam>
+        /// <param name="path">The path to the MxPlot data file to load. The file must exist and be in a valid MxPlot format.</param>
+        /// <param name="progress">An optional progress reporter that receives updates on the number of frames processed during loading. If
+        /// provided, negative values indicate progress before loading, and a positive value is reported upon
+        /// completion.</param>
+        /// <returns>A MatrixData<T> instance containing the matrix data loaded from the specified file.</returns>
+        /// <exception cref="InvalidDataException">Thrown if the file does not contain valid MxPlot data, as indicated by an incorrect magic number.</exception>
+        /// <exception cref="InvalidOperationException">Thrown if the file header is invalid or if the type parameter T does not match the type of data stored in
+        /// the file.</exception>
+        public static MatrixData<T> Load<T>(string path, IProgress<int>? progress = null) where T : unmanaged
+        {
             using var fs = File.OpenRead(path);
+            using var reader = new BinaryReader(fs, Encoding.UTF8, leaveOpen: true);
 
-            // Detect compression
-            bool compressed = false;
-            var firstTwoBytes = new byte[2];
-            if (fs.Read(firstTwoBytes, 0, 2) == 2)
+            // ★ここで共通化！ reader の位置は自動的にヘッダー終了直後（＝バイナリ開始位置）になる
+            var config = ReadHeaderInternal(reader);
+
+            // 型チェック（ガードレール）
+            if (config.ValueTypeName != typeof(T).FullName)
+                throw new InvalidDataException($"Type mismatch: File={config.ValueTypeAlias}, Requested={typeof(T).Name}");
+
+            progress?.Report(-config.FrameCount);
+
+            // 3. Read Body (Conditional Decompression)
+            List<T[]> frames;
+            if (config.IsCompressed) // Metadataから引くのではなくプロパティを直接参照
             {
-                compressed = firstTwoBytes[0] == 0x1F && firstTwoBytes[1] == 0x8B;
+                // GZipStreamを明示的に作成し、読み終わったら確実に閉じる
+                using var gzs = new GZipStream(fs, CompressionMode.Decompress);
+                using var buffered = new BufferedStream(gzs, 65536); // 64KBバッファ
+                frames = ReadDataFromStream<T>(buffered, config, progress);
             }
-            fs.Seek(0, SeekOrigin.Begin);
-
-            using var decompressionStream = compressed ? new GZipStream(fs, CompressionMode.Decompress) : null;
-            var sourceStream = compressed ? (Stream)decompressionStream! : fs;
-            using var reader = new BinaryReader(sourceStream, Encoding.UTF8, leaveOpen: compressed);
-
-            try
+            else
             {
-                var magic = reader.ReadString();
-                if (magic != MagicNumber)
-                    throw new InvalidDataException($"Invalid file format");
-
-                var version = reader.ReadInt32();
-                var typeName = reader.ReadString();
-                var compressedFlag = reader.ReadBoolean();
-
-                var fileInfo = new MatrixDataFileInfo
-                {
-                    FilePath = path,
-                    Version = version,
-                    DataTypeName = typeName,
-                    IsCompressed = compressed,
-                    XCount = reader.ReadInt32(),
-                    YCount = reader.ReadInt32(),
-                    FrameCount = reader.ReadInt32(),
-                    XMin = reader.ReadDouble(),
-                    XMax = reader.ReadDouble(),
-                    YMin = reader.ReadDouble(),
-                    YMax = reader.ReadDouble(),
-                    XUnit = reader.ReadString(),
-                    YUnit = reader.ReadString(),
-                    FileSize = new FileInfo(path).Length
-                };
-
-                // Read dimension info (but don't fully parse)
-                int axisCount = reader.ReadInt32();
-                var axisNames = new List<string>();
-                for (int i = 0; i < axisCount; i++)
-                {
-                    string name = reader.ReadString();
-                    reader.ReadInt32(); // count
-                    reader.ReadDouble(); // min
-                    reader.ReadDouble(); // max
-                    axisNames.Add(name);
-                }
-                fileInfo.DimensionNames = axisNames.ToArray();
-
-                return fileInfo;
+                frames = ReadDataFromStream<T>(fs, config, progress);
             }
-            catch (Exception ex)
+
+            var md = config.CreateNewInstance(frames);
+            progress?.Report(md.FrameCount);
+            return md;
+        }
+
+        private static List<T[]> ReadDataFromStream<T>(Stream sourceStream, MatrixDataConfig config, IProgress<int>? progress)
+           where T : unmanaged
+        {
+            // ここでは BinaryReader を使わず、直接 Stream から読むか、
+            // leaveOpen: true で reader を作る（sourceStreamを閉じないため）
+            using var reader = new BinaryReader(sourceStream, Encoding.UTF8, leaveOpen: true);
+
+            var arrays = new List<T[]>(config.FrameCount);
+            int expectedLength = config.XCount * config.YCount;
+
+            for (int i = 0; i < config.FrameCount; i++)
             {
-                throw new InvalidDataException($"Failed to read file info from '{path}': {ex.Message}", ex);
+                int byteLength = reader.ReadInt32();
+                var bytes = reader.ReadBytes(byteLength);
+
+                // キャストして配列化
+                var array = MemoryMarshal.Cast<byte, T>(bytes).ToArray();
+
+                if (array.Length != expectedLength)
+                    throw new InvalidDataException($"Frame {i} size mismatch.");
+
+                arrays.Add(array);
+                progress?.Report(i + 1); // 0-based index なので +1 して報告
             }
+
+            return arrays;
+        }
+
+        private static IMatrixData TryLoadCustomStruct(string typeName, string path, IProgress<int>? progress)
+        {
+            var type = Type.GetType(typeName);
+            if (type == null) throw new NotSupportedException($"Type {typeName} not found.");
+
+            // MatrixDataSerializer.Load<T> をリフレクションで叩く
+            var method = typeof(MatrixDataSerializer).GetMethod(nameof(Load))!.MakeGenericMethod(type);
+            return (IMatrixData)method.Invoke(null, [path, progress])!;
         }
 
         /// <summary>
@@ -236,265 +207,27 @@ namespace MxPlot.Core.IO
         /// <exception cref="FileNotFoundException">Thrown if the file does not exist.</exception>
         /// <exception cref="InvalidDataException">Thrown if file format is invalid.</exception>
         /// <exception cref="NotSupportedException">Thrown if the stored type is not supported.</exception>
-        public static IMatrixData LoadDynamic(string path)
+        public static IMatrixData LoadDynamic(string path, IProgress<int>? progress = null)
         {
-            var fileInfo = GetFileInfo(path);
-            
+            var conf = ReadHeaderConfig(path);
+
             // Map type name to appropriate Load<T> call
-            return fileInfo.DataTypeName switch
+            return conf.ValueTypeName switch
             {
-                "System.Double" => Load<double>(path),
-                "System.Single" => Load<float>(path),
-                "System.Int32" => Load<int>(path),
-                "System.Int64" => Load<long>(path),
-                "System.Int16" => Load<short>(path),
-                "System.Byte" => Load<byte>(path),
-                "System.UInt32" => Load<uint>(path),
-                "System.UInt64" => Load<ulong>(path),
-                "System.UInt16" => Load<ushort>(path),
-                "System.SByte" => Load<sbyte>(path),
-                "System.Numerics.Complex" => Load<System.Numerics.Complex>(path),
-                _ => throw new NotSupportedException(
-                    $"Unsupported data type: {fileInfo.DataTypeName}. " +
-                    $"Supported types: double, float, int, uint, long, ulong, short, ushort, byte, sbyte, Complex")
+                "System.Double" => Load<double>(path, progress),
+                "System.Single" => Load<float>(path, progress),
+                "System.Int32" => Load<int>(path, progress),
+                "System.Int64" => Load<long>(path, progress),
+                "System.Int16" => Load<short>(path, progress),
+                "System.Byte" => Load<byte>(path, progress),
+                "System.UInt32" => Load<uint>(path, progress),
+                "System.UInt64" => Load<ulong>(path, progress),
+                "System.UInt16" => Load<ushort>(path, progress),
+                "System.SByte" => Load<sbyte>(path, progress),
+                "System.Numerics.Complex" => Load<System.Numerics.Complex>(path, progress),
+                _ => TryLoadCustomStruct(conf.ValueTypeName, path, progress)
             };
         }
-
-        #region Write Methods
-
-        private static void WriteHeader<T>(BinaryWriter writer, MatrixData<T> data, bool compressed) where T : unmanaged
-        {
-            writer.Write(MagicNumber);
-            writer.Write(CurrentVersion);
-            writer.Write(typeof(T).FullName ?? string.Empty);
-            writer.Write(compressed);
-            writer.Write(data.XCount);
-            writer.Write(data.YCount);
-            writer.Write(data.FrameCount);
-            writer.Write(data.XMin);
-            writer.Write(data.XMax);
-            writer.Write(data.YMin);
-            writer.Write(data.YMax);
-            writer.Write(data.XUnit ?? string.Empty);
-            writer.Write(data.YUnit ?? string.Empty);
-        }
-
-        private static void WriteDimensions<T>(BinaryWriter writer, MatrixData<T> data) where T : unmanaged
-        {
-            var axes = data.Dimensions?.Axes?.ToArray() ?? Array.Empty<Axis>();
-            writer.Write(axes.Length);
-
-            foreach (var axis in axes)
-            {
-                writer.Write(axis.Name ?? string.Empty);
-                writer.Write(axis.Count);
-                writer.Write(axis.Min);
-                writer.Write(axis.Max);
-                writer.Write(axis.Unit ?? string.Empty);
-            }
-        }
-
-        private static void WriteDataArrays<T>(BinaryWriter writer, MatrixData<T> data) where T : unmanaged
-        {
-            for (int i = 0; i < data.FrameCount; i++)
-            {
-                var bytes = data.GetRawBytes(i);
-                writer.Write(bytes.Length);
-                writer.Write(bytes);
-            }
-        }
-
-        private static void WriteMetadata<T>(BinaryWriter writer, MatrixData<T> data) where T : unmanaged
-        {
-            var metadata = data.Metadata;
-            writer.Write(metadata?.Count ?? 0);
-
-            if (metadata != null)
-            {
-                foreach (var kvp in metadata)
-                {
-                    writer.Write(kvp.Key);
-                    writer.Write(kvp.Value ?? string.Empty);
-                }
-            }
-        }
-
-        #endregion
-
-        #region Read Methods
-
-        private static Axis[] ReadDimensions(BinaryReader reader)
-        {
-            int axisCount = reader.ReadInt32();
-            var axes = new Axis[axisCount];
-
-            for (int i = 0; i < axisCount; i++)
-            {
-                string name = reader.ReadString();
-                int count = reader.ReadInt32();
-                double min = reader.ReadDouble();
-                double max = reader.ReadDouble();
-                string unit = reader.ReadString();
-                axes[i] = new Axis(count, min, max, name, unit);
-            }
-
-            return axes;
-        }
-
-        private static List<T[]> ReadDataArrays<T>(BinaryReader reader, int xCount, int yCount, int frameCount) 
-            where T : unmanaged
-        {
-            var arrays = new List<T[]>(frameCount);
-            int expectedLength = xCount * yCount;
-
-            for (int i = 0; i < frameCount; i++)
-            {
-                int byteLength = reader.ReadInt32();
-                var bytes = reader.ReadBytes(byteLength);
-                
-                var array = MemoryMarshal.Cast<byte, T>(bytes).ToArray();
-                
-                if (array.Length != expectedLength)
-                    throw new InvalidDataException(
-                        $"Frame {i} has incorrect size: {array.Length}, expected: {expectedLength}");
-
-                arrays.Add(array);
-            }
-
-            return arrays;
-        }
-
-        private static void ReadMetadata<T>(BinaryReader reader, MatrixData<T> matrix) where T : unmanaged
-        {
-            int metadataCount = reader.ReadInt32();
-
-            for (int i = 0; i < metadataCount; i++)
-            {
-                string key = reader.ReadString();
-                string value = reader.ReadString();
-                matrix.Metadata[key] = value;
-            }
-        }
-
-        #endregion
-
-        #region Helper Classes
-
-        /// <summary>
-        /// Contains metadata information about a MatrixData file without loading the full dataset.
-        /// Useful for file browsing, preview, and validation.
-        /// </summary>
-        public class MatrixDataFileInfo
-        {
-            /// <summary>Full path to the file.</summary>
-            public string FilePath { get; set; } = string.Empty;
-
-            /// <summary>File format version.</summary>
-            public int Version { get; set; }
-
-            /// <summary>Full type name of the stored data (e.g., "System.Double").</summary>
-            public string DataTypeName { get; set; } = string.Empty;
-
-            /// <summary>Short type name (e.g., "double").</summary>
-            public string DataType => DataTypeName switch
-            {
-                "System.Double" => "double",
-                "System.Single" => "float",
-                "System.Int32" => "int",
-                "System.Int64" => "long",
-                "System.Int16" => "short",
-                "System.Byte" => "byte",
-                "System.UInt32" => "uint",
-                "System.UInt64" => "ulong",
-                "System.UInt16" => "ushort",
-                "System.SByte" => "sbyte",
-                "System.Numerics.Complex" => "Complex",
-                _ => DataTypeName
-            };
-
-            /// <summary>Whether the file uses GZip compression.</summary>
-            public bool IsCompressed { get; set; }
-
-            /// <summary>Number of pixels in X direction.</summary>
-            public int XCount { get; set; }
-
-            /// <summary>Number of pixels in Y direction.</summary>
-            public int YCount { get; set; }
-
-            /// <summary>Number of frames/layers.</summary>
-            public int FrameCount { get; set; }
-
-            /// <summary>Minimum X coordinate value.</summary>
-            public double XMin { get; set; }
-
-            /// <summary>Maximum X coordinate value.</summary>
-            public double XMax { get; set; }
-
-            /// <summary>Minimum Y coordinate value.</summary>
-            public double YMin { get; set; }
-
-            /// <summary>Maximum Y coordinate value.</summary>
-            public double YMax { get; set; }
-
-            /// <summary>Physical unit of X axis (e.g., "mm").</summary>
-            public string XUnit { get; set; } = string.Empty;
-
-            /// <summary>Physical unit of Y axis (e.g., "mm").</summary>
-            public string YUnit { get; set; } = string.Empty;
-
-            /// <summary>Names of dimension axes (e.g., ["Time", "Z"]).</summary>
-            public string[] DimensionNames { get; set; } = Array.Empty<string>();
-
-            /// <summary>File size in bytes.</summary>
-            public long FileSize { get; set; }
-
-            /// <summary>Human-readable file size string.</summary>
-            public string FileSizeString
-            {
-                get
-                {
-                    string[] sizes = { "B", "KB", "MB", "GB" };
-                    double len = FileSize;
-                    int order = 0;
-                    while (len >= 1024 && order < sizes.Length - 1)
-                    {
-                        order++;
-                        len /= 1024;
-                    }
-                    return $"{len:F2} {sizes[order]}";
-                }
-            }
-
-            /// <summary>Total number of data elements.</summary>
-            public long TotalElements => (long)XCount * YCount * FrameCount;
-
-            /// <summary>String representation of matrix dimensions.</summary>
-            public string DimensionsString => $"{XCount}×{YCount}×{FrameCount}";
-
-            public override string ToString()
-            {
-                return $"{DataType} [{DimensionsString}] - {FileSizeString}";
-            }
-        }
-
-        private class HeaderInfo
-        {
-            public string Magic { get; set; } = string.Empty;
-            public int Version { get; set; }
-            public string TypeName { get; set; } = string.Empty;
-            public bool Compressed { get; set; }
-            public int XCount { get; set; }
-            public int YCount { get; set; }
-            public int FrameCount { get; set; }
-            public double XMin { get; set; }
-            public double XMax { get; set; }
-            public double YMin { get; set; }
-            public double YMax { get; set; }
-            public string XUnit { get; set; } = string.Empty;
-            public string YUnit { get; set; } = string.Empty;
-        }
-
-        #endregion
     }
 
     /// <summary>
@@ -520,17 +253,18 @@ namespace MxPlot.Core.IO
     public class MxBinaryFormat: IMatrixDataWriter, IMatrixDataReader
     {
         public bool Compress { get; set; } = true;
+        public IProgress<int>? ProgressReporter { get; set; } = null;
         public void Write<T>(string filePath, MatrixData<T> data) where T : unmanaged
         {
-            MatrixDataSerializer.Save(filePath, data, Compress);
+            MatrixDataSerializer.Save(filePath, data, Compress, ProgressReporter);
         }
         public MatrixData<T> Read<T>(string filePath) where T : unmanaged
         {
-            return MatrixDataSerializer.Load<T>(filePath);
+            return MatrixDataSerializer.Load<T>(filePath, ProgressReporter);
         }
         public IMatrixData Read(string path)
         {
-            return MatrixDataSerializer.LoadDynamic(path);
+            return MatrixDataSerializer.LoadDynamic(path, ProgressReporter);
         }
     }
 }

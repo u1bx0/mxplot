@@ -3,8 +3,8 @@
 	<!-- Common properties for MxPlot projects -->
 
 	<PropertyGroup>
-		<Version>0.0.5-alpha</Version>
-		<PackageVersion>0.0.5-alpha</PackageVersion>
+		<Version>0.0.5</Version>
+		<PackageVersion>0.0.5</PackageVersion>
 		<Authors>u1bx0</Authors>
 		<Description>MxPlot: Multi-Axis Matrix Visualization Library for .NET. This project is currently under active development.</Description>
 

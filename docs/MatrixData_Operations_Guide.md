@@ -2,7 +2,7 @@
 
 **MxPlot.Core Comprehensive Reference**
 
-> Last Updated: 2026-02-21
+> Last Updated: 2026-02-22
 
 
 *Note: This document is largely based on AI-generated content and requires further review for accuracy. Some descriptions may be outdated due to changes to the library.*
@@ -292,7 +292,7 @@ double zpos = zaxis.ValueAt(2);         // Returns the physical value at index 2
 // mechanics for maximum performance.
 
 // Slicing: Extract sub-datasets based on specific axis values.
-var xytz = xyczt.SelectBy("Channel", 2);                 // Drops "Channel" axis, returns 4D data
+var xytz = xyczt.SelectBy("Channel", 1);                 // Drops "Channel" axis, returns 4D data
 var xyz = xyczt.ExtractAlong("Z", [1, 0, 2]);            // Extracts a 3D Z-stack at C=1, T=2
 var xy = xyczt.SliceAt(("Channel", 0), ("Z", 1), ("Time", 2)); // Returns a single 2D frame
 
