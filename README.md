@@ -505,7 +505,7 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 - Dimensional & cross-sectional operators
 - Arithmetic operations with SIMD optimization
 - OME-TIFF and ImageJ-compatible TIFF support via MxPlot.Extensions.Tiff packages (will be provided separately)
-- DHF5 support via MxPlot.Extensions.HDF5 package (will be provided separately)
+- HDF5 support via MxPlot.Extensions.HDF5 package (will be provided separately)
 
 ---
 > **🚧 Disclaimer (IMPORTANT)🚧**
