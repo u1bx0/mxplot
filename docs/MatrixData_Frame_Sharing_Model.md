@@ -124,17 +124,71 @@ This avoids unnecessary computation when performing bulk updates.
 ⚠️ **Important**: After calling `GetValueRange()`, any further manual modifications to the raw `T[]` returned by `GetArray()` will not be detected automatically; you must call `Invalidate()` again to refresh the cached min/max values.
 
 
+## 4.1 Cross‑Instance ValueRange Synchronization
+
+When `Reorder(deepCopy: false)` creates a shallow copy, not only are the `T[]` frame buffers shared — the **`List<double>` instances** inside each `ValueRange` entry are also shared by reference.
+
+### Internal structure
+
+```
+_valueRangeMap (Dictionary<T[], ValueRange>)
+  key = T[] reference
+  value = ValueRange { MinValues: List<double>, MaxValues: List<double> }
+```
+
+### How sharing works
+
+```
+src:    _valueRangeMap[arrA] = ValueRange(listMin_A, listMax_A)
+linked: _valueRangeMap[arrA] = ValueRange(listMin_A, listMax_A)  ← same List<double> instances
+```
+
+Because `Invalidate()` calls `List<double>.Clear()` on the shared list, the invalidation propagates to **all** `MatrixData` instances that hold the same `T[]` key:
+
+```csharp
+var md = new MatrixData<float>(5, 5, 3);
+// ... fill data ...
+var range = md.GetValueRange(0);     // populate cache: min=0, max=0
+
+var linked = md.Reorder([0, 1, 2]); // shallow copy — List<double> refs shared
+
+linked.SetValueAt(0, 0, 0, -99f);   // modifies arrA → linked.Invalidate(0)
+                                      // → listMin_A.Clear() — affects BOTH instances
+
+md.GetValueRange(0);                 // listMin_A.Count == 0 → IsValid = false
+                                      // → RefreshValueRange → scans arrA → min = -99  ✅
+```
+
+### Why this matters
+
+Without reference sharing (e.g., if `new List<double>(vmins)` were used to create value copies), `md.GetValueRange(0)` would return the **stale** cached value `(0, 0)` instead of the correct `(-99, 0)`.
+
+### Deep copy behavior
+
+`Reorder(deepCopy: true)` creates new empty `List<double>` instances for each frame. No cache state is shared with the original.
+
+### Virtual (MMF‑backed) data
+
+For `MatrixData` backed by `VirtualFrames<T>`, the same sharing model applies:
+- `RoutedFrames<T>` routes logical indices to physical frames in the underlying `IFrameKeyProvider<T>`
+- `GetFrameKey()` returns the same `T[]` reference for the same physical frame
+- `ValueRange` entries are keyed by this shared `T[]`, ensuring cross‑instance synchronization
 
 
 ---
 
-# 5. Deep Copy via Duplicate()
+# 5. Deep Copy via `Duplicate()` / `Clone()`
 
-`Duplicate()` (or `Clone()`) creates a **full deep copy**:
+`Duplicate()` (an extension method that calls `Clone()`) creates a **full deep copy**:
 
-- All frame arrays are duplicated
-- No references are shared
-- Subsequent mutations are isolated
+- All frame arrays are duplicated — no references are shared with the original
+- Subsequent mutations are completely isolated
+- `Clone()` automatically selects the appropriate copy strategy based on `IsVirtual`:
+
+| Source | Clone strategy |
+|---|---|
+| In-memory | Conventional in-memory deep copy |
+| Virtual (MMF-backed) | Frames are streamed one at a time to a temporary `.mxd` file — peak memory is proportional to a single frame, avoiding OOM for large datasets |
 
 ### Example
 
@@ -226,13 +280,13 @@ Only md3.F0 changes; all others remain intact.
 
 # 7. Summary Table
 
-| Operation | Copies Arrays? | Shares References? | Mutations Propagate? | Complexity |
-|----------|-----------------|---------------------|-----------------------|------------|
-| `Reorder()` | No | Yes | Yes | **O(1)** |
-| `GetArray()` | No | Yes | Yes | O(1) |
-| `SetValueAt()` | No | Yes | Yes | O(1) |
-| `Duplicate()` | **Yes** | No | No | **O(N)** |
-| `Clone()` | Yes | No | No | O(N) |
+| Operation | Copies Arrays? | Shares References? | Shares ValueRange? | Mutations Propagate? | Complexity |
+|----------|-----------------|---------------------|---------------------|----------------------|------------|
+| `Reorder()` | No | Yes | Yes | Yes | **O(1)** |
+| `GetArray()` | No | Yes | — | Yes | O(1) |
+| `SetValueAt()` | No | Yes | — | Yes | O(1) |
+| `Duplicate()` | **Yes** | No | No | No | **O(N)** |
+| `Clone()` | Yes | No | No | No | O(N) |
 
 ---
 

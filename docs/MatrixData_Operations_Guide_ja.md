@@ -2,30 +2,24 @@
 
 **MxPlot.Core 総合リファレンス**
 
-> 最終更新日: 2026-02-22
+> 最終更新日: 2026-04-24
 
 *注意: このドキュメントは大部分がAIによって生成されたものであり、正確性の確認が必要です。ライブラリの変更に伴い、一部の記述が古い場合があります。*
 
 ## 📚 目次
 
-1. [はじめに (Introduction)](https://www.google.com/search?q=%23introduction)
-2. [コアコンセプト (Core Concepts)](https://www.google.com/search?q=%23core-concepts)
-3. [単一フレーム MatrixData<T> チュートリアル](https://www.google.com/search?q=%23tutorial-single-frame)
-4. [多次元データ チュートリアル](https://www.google.com/search?q=%23tutorial-multi-dimensional)
-5. [次元操作 (Dimensional Operations)](https://www.google.com/search?q=%23dimensional-operations)
-* *Transpose, Crop, Slice, Extract, Select, Map & Reduce, Reorder*
-
-
-6. [ボリューム操作 (Volume Operations)](https://www.google.com/search?q=%23volume-operations)
-* *VolumeAccessor, Projections (MIP/MinIP/AIP), Manipulation*
-
-
-7. [算術演算 (Arithmetic Operations)](https://www.google.com/search?q=%23arithmetic-operations)
-* *行列間演算, スカラー演算, ブロードキャスト*
-
-
-8. [パイプライン処理の実例 (Pipeline Examples)](https://www.google.com/search?q=%23pipeline-examples)
-9. [極端な例 (Extreme Examples)](https://www.google.com/search?q=%23extreme-examples)
+1. [はじめに (Introduction)](#introduction)
+2. [コアコンセプト (Core Concepts)](#core-concepts)
+3. [単一フレーム MatrixData<T> チュートリアル](#tutorial-single-frame)
+4. [多次元データ チュートリアル](#tutorial-multi-dimensional)
+5. [次元操作 (Dimensional Operations)](#dimensional-operations)
+   - *Transpose, Crop, Slice, Extract, Select, Map & Reduce, Reorder*
+6. [ボリューム操作 (Volume Operations)](#volume-operations)
+   - *VolumeAccessor, Projections (MIP/MinIP/AIP), Manipulation*
+7. [算術演算 (Arithmetic Operations)](#arithmetic-operations)
+   - *行列間演算, スカラー演算, ブロードキャスト*
+8. [パイプライン処理の実例 (Pipeline Examples)](#pipeline-examples)
+9. [実例集 (Some Examples)](#some-examples)
 
 ---
 
@@ -414,7 +408,7 @@ var maxProjection = stack.Reduce((x, y, values) => values.Max());
 ### 並べ替え (Reorder)
 
 ```csharp
-// カスタム順序でフレームを並べ替え
+// カスタム順序でフレームを並べ替え（シャローコピー — T[] 参照を共有）
 var reordered = matrix.Reorder([2, 0, 4, 1, 3]);
 
 // 用途: メタデータの取得時間順にフレームをソートする
@@ -426,7 +420,23 @@ var sorted = matrix.Reorder(sortedIndices);
 // データをコピーせず各フレームへの参照を作成するため、同じフレームを繰り返すことも可能
 var repeated = matrix.Reorder([0, 0, 1, 1, 2, 2]);
 
+// ディープコピー: 完全に独立した配列を作成（状態の共有なし）
+var independent = matrix.Reorder([0, 1, 2], deepCopy: true);
 ```
+
+> **シャローコピー（デフォルト）:** 返される `MatrixData` は、元のインスタンスと `T[]` フレームバッファ
+> および `ValueRange` の `List<double>` 参照を共有します。ピクセルデータの変更や
+> `Invalidate()` 呼び出しは、同じ `T[]` キーを共有するすべてのインスタンスに伝搬します。
+> Virtual（MMF ベース）データの場合、`RoutedFrames<T>` ラッパーが論理インデックスを
+> 物理フレームにルーティングします。
+>
+> **ディープコピー:** すべてのバッファが複製され、結果は完全に独立します。
+>
+> **注意:** Dimension 情報と Metadata は結果に**コピーされません**。
+>
+> 詳細は [Frame Sharing Model](MatrixData_Frame_Sharing_Model.md) §2 および §4.1 を参照。
+
+
 
 ---
 
@@ -623,11 +633,11 @@ var avgAcrossWavelength = hyperData.Reduce((x, y, values) =>
 
 ---
 
-<a id="extreme-examples"></a>
+<a id="some-examples"></a>
 
-## 極端な例 (Extreme Examples)
+## 実例集 (Some Examples)
 
-### 🎪 実用的な多次元パイプライン
+### 実用的な多次元パイプライン
 
 ```csharp
 // 6Dデータ: X, Y, Z, Time, Channel, FOV (顕微鏡画像で一般的)
@@ -657,30 +667,60 @@ MatrixDataSerializer.Save("processed.mxd", result, compress: true);
 
 ```
 
-### 🚀 さらに極端な例: 9次元の気象データ（果たして可能か？）
+### より複雑な実例: 9次元の気象データ
 
 ```csharp
-var bigData = new MatrixData<float>(
-    Scale2D.Pixels(32, 32),
-    [
-        new Axis(12, 0, 11, "Month"),             // 月
-        new Axis(24, 0, 23, "Hour"),              // 時間
-        new Axis(10, 0, 10000, "Altitude", "m"),  // 標高 (高度)
-        new Axis(7, 0, 6, "DayOfWeek"),           // 曜日
-        new Axis(4, 0, 3, "Humidity"),            // 湿度レベル
-        new Axis(3, 0, 2, "Pressure"),            // 気圧レベル
-        new Axis(5, 0, 4, "Sensor")               // センサー種別
-    ]  // 合計: 12×24×10×7×4×3×5 = 1,209,600 フレーム！ => (PCのメモリ不足 / OOMに注意)
-);
+// 合計: 12×24×10×7×4×3×5 = 1,209,600 フレーム × 32×32 float ≈ 4.95 GB
+// このスケールでのインメモリ割り当ては Virtual の約10～20倍遅く、OutOfMemoryException のリスクもあります。
+// 代わりに Virtual（MMF）を使用してください — 初期化時間は総フレーム数に依存せず、
+// MxBinaryFormat による SaveAs は OS レベルのファイル移動（ピクセルコピーなし）です。
+var axes = new Axis[]
+{
+    new Axis(12, 0, 11, "Month"),
+    new Axis(24, 0, 23, "Hour"),
+    new Axis(10, 0, 10000, "Altitude", "m"),
+    new Axis(7, 0, 6, "DayOfWeek"),
+    new Axis(4, 0, 3, "Humidity"),
+    new Axis(3, 0, 2, "Pressure"),
+    new Axis(5, 0, 4, "Sensor"),
+};
+int frameCount = axes.Aggregate(1, (acc, a) => acc * a.Count); // 1,209,600
+
+// MMF-backed の書き込み可能 MatrixData を作成 — ピーク RAM は1フレーム分程度
+var builder = MxBinaryFormat.AsVirtualBuilder(32, 32, frameCount);
+var bigData = builder.CreateWritable<float>("weather.mxd");
+bigData.DefineDimensions(axes);
+bigData.SetXYScale(0, 31, 0, 31);
 
 // SQLライクなクエリによる操作と処理
 var result = bigData
-    .SelectBy("DayOfWeek", 1)                                   // 月曜日のみ
-    .SelectBy("Humidity", 0)                                    // 乾燥条件のみ
-    .SelectBy("Pressure", 1)                                    // 中間気圧のみ
-    .ExtractAlong("Altitude", new[] { 1, 6, 0, 1 });            // 1月の午前6時におけるセンサー1の高度スタック
+    .SelectBy("DayOfWeek", 1)       // 月曜日のみ
+    .SelectBy("Humidity", 0)        // 乾燥条件のみ
+    .SelectBy("Pressure", 1)        // 中間気圧のみ
+    .ExtractAlong("Altitude", new[] { 1, 6, 0, 1 }); // 1月の午前6時におけるセンサー1の高度スタック
 
+// ピクセルデータをコピーせずに保存（高速パス: ファイル移動 + トレーラー書き込み）
+// ⚠️ MxBinaryFormat のデフォルトは CompressionInWrite = false で、これは
+//    高速パス SaveAs と LoadVirtual の両方に必要です。
+//    virtual アクセスが不要な場合のみ CompressionInWrite = true を使用してください。
+bigData.SaveAs("weather_final.mxd", new MxBinaryFormat());
+
+// virtual としてリロード — RAM にデータを読み込まずに MMF をマウント
+var loaded = MatrixDataSerializer.LoadVirtual<float>("weather_final.mxd");
 ```
+
+> **実測ベンチマーク** (Core i9-14900KF、64 GB DDR5-4800、Releaseビルド — `VirtualMultiAxisLargeScaleTest`):
+>
+> | ステップ | Virtual（MMF-backed） | InMemory |
+> |---|---|---|
+> | 作成 / アロケーション（4,725 MB） | 764 ms | 2,706 ms |
+> | SelectBy + ExtractAlong | 79 ms | 72 ms |
+> | ディスク保存（4,725 MB） | **61 ms**（高速パス：ファイル移動） | 45,857 ms（全ピクセルコピー） |
+> | 保存後の LoadVirtual | 644 ms | 1,043 ms |
+> | コールドリードバック（散在20フレーム） | 1 ms | 0 ms |
+> | **テスト合計時間** | **約3秒** | **約50秒** |
+>
+> Virtual パスの `SaveAs` は OS レベルのファイル移動＋トレーラー書き込みであり、ファイルサイズに関わらずピクセルデータのコピーは発生しません（事実上 O(1)）。
 
 ---
 
@@ -800,20 +840,25 @@ Notes:
 - `void Set(Func<int, int, double, double, T> func)`
 - `void Set(int frameIndex, Func<int, int, double, double, T> func)`
 
-#### Statistics (updated)
+#### Statistics
 - `(double Min, double Max) GetValueRange()`
 - `(double Min, double Max) GetValueRange(int frameIndex)`
+- `(double Min, double Max) GetValueRange(int frameIndex, int valueMode)`
+- `(List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex)`
 - `(double Min, double Max) GetGlobalValueRange()`
+- `(double Min, double Max) GetGlobalValueRange(out List<int> invalids, bool forceRefresh)`
+- `(double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null)`
 - `double GetMinValue()`
 - `double GetMaxValue()`
-- `void InvalidateValueRange()`
-- `void InvalidateValueRange(int frameIndex)`
+- `void Invalidate()` — アクティブフレームのキャッシュされた min/max を無効化
+- `void Invalidate(int frameIndex)` — 指定フレームのキャッシュされた min/max を無効化
+- `void InvalidateAllFrames()` — 全フレームを無効化
 
 
 #### Scaling & Units
 - `void SetXYScale(double xmin, double xmax, double ymin, double ymax)`
 - `Scale2D GetScale()`
-- `double XAt(int ix)`, `double YAt(int iy)`
+- `double XValue(int ix)`, `double YValue(int iy)`
 - `int XIndexOf(double x, bool extendRange = false)`
 - `int YIndexOf(double y, bool extendRange = false)`
 
@@ -830,8 +875,10 @@ Notes:
 - `MatrixData<T> CropCenter<T>(int width, int height)`
 
 #### Slicing & Extraction
-- `MatrixData<T> SliceAt<T>(string axisName, int indexInAxis)`
-- `MatrixData<T> ExtractAlong<T>(string axisName, int[] baseIndices, bool deepCopy = false)`
+- `MatrixData<T> SliceAt<T>(int frameIndex, bool deepCopy = false)` — 単一フレームの抽出
+- `MatrixData<T> SliceAt<T>(params (string AxisName, int AxisIndex)[] coords)` — 軸座標によるスライス
+- `MatrixData<T> SelectBy<T>(string axisName, int indexInAxis, bool deepCopy = false)` — 1軸を固定して次元を削減
+- `MatrixData<T> ExtractAlong<T>(string axisName, int[] baseIndices, bool deepCopy = false)` — 1軸に沿って抽出
 
 #### Mapping & Reduction
 - `MatrixData<TDst> Map<TSrc, TDst>(Func<TSrc, double, double, int, TDst> func, bool useParallel = false)`
@@ -839,7 +886,8 @@ Notes:
 - `void ForEach<T>(Action<int, T[]> action, bool useParallel = true)`
 
 #### Reordering
-- `MatrixData<T> Reorder<T>(IEnumerable<int> order, bool deepCopy = false)`
+- `MatrixData<T> Reorder(List<int> order, bool deepCopy = false)` — インスタンスメソッド; シャローコピーは `T[]` と `ValueRange` 参照を共有
+- `MatrixData<T> Reorder(string[] newAxisOrder, bool deepCopy = false)` — 軸名による並べ替え（拡張メソッド）
 
 ### VolumeAccessor<T> Methods
 
@@ -875,7 +923,7 @@ Notes:
 
 #### MatrixDataSerializer
 - `void Save<T>(string filename, MatrixData<T> data, bool compress = false)`
-- `MatrixData<T> Load<T>(string filename)`
+- `MatrixData<T> LoadTyped<T>(string filename)` — load with known type
 - `IMatrixData LoadDynamic(string filename)`
 - `FileInfo GetFileInfo(string filename)`
 

@@ -2,7 +2,7 @@
 
 **MxPlot.Core Comprehensive Reference**
 
-> Last Updated: 2026-02-22
+> Last Updated: 2026-04-24
 
 
 *Note: This document is largely based on AI-generated content and requires further review for accuracy. Some descriptions may be outdated due to changes to the library.*
@@ -20,7 +20,7 @@
 7. [Arithmetic Operations](#arithmetic-operations)
    - *Matrix-to-Matrix, Scalar Operations, Broadcasting*
 8. [Pipeline Examples](#pipeline-examples)
-9. [Extreme Examples](#extreme-examples)
+9. [Some Examples](#some-examples)
 
 ---
 
@@ -392,7 +392,7 @@ var maxProjection = stack.Reduce((x, y, values) => values.Max());
 ### Reorder
 
 ```csharp
-// Reorder frames by custom order
+// Reorder frames by custom order (shallow copy — shares T[] references)
 var reordered = matrix.Reorder([2, 0, 4, 1, 3]);
 
 // Use case: Sort frames by acquisition time from metadata
@@ -403,7 +403,22 @@ var sorted = matrix.Reorder(sortedIndices);
 
 // You can repeat the same frame because it creates the reference to each frame without copying data
 var repeated = matrix.Reorder([0, 0, 1, 1, 2, 2]);
+
+// Deep copy: creates fully independent arrays (no shared state)
+var independent = matrix.Reorder([0, 1, 2], deepCopy: true);
 ```
+
+> **Shallow copy (default):** The returned `MatrixData` shares both the `T[]` frame buffers
+> and the `ValueRange` `List<double>` references with the original. Pixel mutations and
+> `Invalidate()` calls propagate across all instances sharing the same `T[]` key.
+> For Virtual (MMF-backed) data, a `RoutedFrames<T>` wrapper routes logical indices
+> to physical frames.
+>
+> **Deep copy:** All buffers are duplicated; the result is fully independent.
+>
+> **Note:** Dimension information and Metadata are **not** copied to the result.
+>
+> See [Frame Sharing Model](MatrixData_Frame_Sharing_Model.md) §2 and §4.1 for details.
 
 ---
 
@@ -587,9 +602,9 @@ var avgAcrossWavelength = hyperData.Reduce((x, y, values) =>
 
 ---
 
-## Extreme Examples
+## Some Examples
 
-### 🎪 Practical Multi-Dimensional Pipeline
+### Practical Multi-Dimensional Pipeline
 
 ```csharp
 // 6D data: X, Y, Z, Time, Channel, FOV (common in microscopy)
@@ -618,33 +633,63 @@ var result = multiModal
 MatrixDataSerializer.Save("processed.mxd", result, compress: true);
 ```
 
-### 🚀 A more extreme example: 9-dimensional weather data (is this even possible?)
+### A More Complex Example: 9-Dimensional Weather Data
 
 ```csharp
-var bigData = new MatrixData<float>(
-    Scale2D.Pixels(32, 32),
-    [
-        new Axis(12, 0, 11, "Month"),           // Month
-        new Axis(24, 0, 23, "Hour"),            // Hour
-        new Axis(10, 0, 10000, "Altitude", "m"),  // Altitude
-        new Axis(7, 0, 6, "DayOfWeek"),         // Day of week
-        new Axis(4, 0, 3, "Humidity"),            // Humidity level
-        new Axis(3, 0, 2, "Pressure"),          // Pressure level
-        new Axis(5, 0, 4, "Sensor")             // Sensor type
-    ]  // Total: 12×24×10×7×4×3×5 = 1,209,600 frames! => (Be aware of OutOfMemory on your PCs)
-);
+// Total: 12×24×10×7×4×3×5 = 1,209,600 frames × 32×32 float ≈ 4.95 GB
+// InMemory allocation at this scale is ~10–20× slower than virtual and risks OutOfMemoryException.
+// Use virtual-backed (MMF) instead — initialization time is independent of total frame count,
+// and SaveAs via MxBinaryFormat is an OS-level file-move (no pixel copy).
+var axes = new Axis[]
+{
+    new Axis(12, 0, 11, "Month"),
+    new Axis(24, 0, 23, "Hour"),
+    new Axis(10, 0, 10000, "Altitude", "m"),
+    new Axis(7, 0, 6, "DayOfWeek"),
+    new Axis(4, 0, 3, "Humidity"),
+    new Axis(3, 0, 2, "Pressure"),
+    new Axis(5, 0, 4, "Sensor"),
+};
+int frameCount = axes.Aggregate(1, (acc, a) => acc * a.Count); // 1,209,600
+
+// Create an MMF-backed writable MatrixData — peak RAM stays near one frame
+var builder = MxBinaryFormat.AsVirtualBuilder(32, 32, frameCount);
+var bigData = builder.CreateWritable<float>("weather.mxd"); // null for temp file
+bigData.DefineDimensions(axes);
+bigData.SetXYScale(0, 31, 0, 31);
 
 // Manipulation and processing as SQL-like queries
 var result = bigData
-    .SelectBy("DayOfWeek", 1)        // Mondays only
-    .SelectBy("Humidity", 0)     // Dry conditions only
-    .SelectBy("Pressure", 1)      // Mid-pressure only
-    .ExtractAlong("Altitude", new[] { 1, 6, 0, 1 });  // Altitude stack of sensor 1 on 6 AM in January
+    .SelectBy("DayOfWeek", 1)       // Mondays only
+    .SelectBy("Humidity", 0)        // Dry conditions only
+    .SelectBy("Pressure", 1)        // Mid-pressure only
+    .ExtractAlong("Altitude", new[] { 1, 6, 0, 1 }); // Altitude stack, sensor=1, 6AM, January
 
+// Persist without copying pixel data (fast-path: file-move + trailer write)
+// ⚠️ MxBinaryFormat defaults to CompressionInWrite = false, which is required for
+//    both the fast-path SaveAs and subsequent LoadVirtual.
+//    Use CompressionInWrite = true only when virtual access is not needed.
+bigData.SaveAs("weather_final.mxd", new MxBinaryFormat());
+
+// Reload as virtual — mounts the MMF without loading data into RAM
+var loaded = MatrixDataSerializer.LoadVirtual<float>("weather_final.mxd");
 ```
 
+**Measured benchmark** (Core i9-14900KF, 64 GB DDR5-4800, Release build — `VirtualMultiAxisLargeScaleTest`):
 
-### 🎨 Creative Use Cases? 
+| Step | Virtual (MMF-backed) | InMemory |
+|---|---|---|
+| Create / allocate (4,725 MB) | 764 ms | 2,706 ms |
+| SelectBy + ExtractAlong | 79 ms | 72 ms |
+| Save to disk (4,725 MB file) | **61 ms** (fast-path file-move) | 45,857 ms (full pixel copy) |
+| LoadVirtual after save | 644 ms | 1,043 ms |
+| Read back 20 scattered frames (cold) | 1 ms | 0 ms |
+| **Total test duration** | **~3 s** | **~50 s** |
+
+The virtual path's `SaveAs` is an OS-level file-move with trailer finalization — it does not copy pixel data regardless of file size, making it effectively O(1) in terms of data volume.
+
+
+### Creative Use Cases
 
 #### 1. Fractal Generation Across Dimensions
 
@@ -759,20 +804,25 @@ Notes:
 - `void Set(Func<int, int, double, double, T> func)`
 - `void Set(int frameIndex, Func<int, int, double, double, T> func)`
 
-#### Statistics (updated)
+#### Statistics
 - `(double Min, double Max) GetValueRange()`
 - `(double Min, double Max) GetValueRange(int frameIndex)`
+- `(double Min, double Max) GetValueRange(int frameIndex, int valueMode)`
+- `(List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex)`
 - `(double Min, double Max) GetGlobalValueRange()`
+- `(double Min, double Max) GetGlobalValueRange(out List<int> invalids, bool forceRefresh)`
+- `(double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null)`
 - `double GetMinValue()`
 - `double GetMaxValue()`
-- `void InvalidateValueRange()`
-- `void InvalidateValueRange(int frameIndex)`
+- `void Invalidate()` — invalidates the active frame's cached min/max
+- `void Invalidate(int frameIndex)` — invalidates a specific frame's cached min/max
+- `void InvalidateAllFrames()` — invalidates all frames
 
 
 #### Scaling & Units
 - `void SetXYScale(double xmin, double xmax, double ymin, double ymax)`
 - `Scale2D GetScale()`
-- `double XAt(int ix)`, `double YAt(int iy)`
+- `double XValue(int ix)`, `double YValue(int iy)`
 - `int XIndexOf(double x, bool extendRange = false)`
 - `int YIndexOf(double y, bool extendRange = false)`
 
@@ -789,8 +839,10 @@ Notes:
 - `MatrixData<T> CropCenter<T>(int width, int height)`
 
 #### Slicing & Extraction
-- `MatrixData<T> SliceAt<T>(string axisName, int indexInAxis)`
-- `MatrixData<T> ExtractAlong<T>(string axisName, int[] baseIndices, bool deepCopy = false)`
+- `MatrixData<T> SliceAt<T>(int frameIndex, bool deepCopy = false)` — extract single frame
+- `MatrixData<T> SliceAt<T>(params (string AxisName, int AxisIndex)[] coords)` — extract by axis coordinates
+- `MatrixData<T> SelectBy<T>(string axisName, int indexInAxis, bool deepCopy = false)` — remove one axis dimension
+- `MatrixData<T> ExtractAlong<T>(string axisName, int[] baseIndices, bool deepCopy = false)` — extract along one axis
 
 #### Mapping & Reduction
 - `MatrixData<TDst> Map<TSrc, TDst>(Func<TSrc, double, double, int, TDst> func, bool useParallel = false)`
@@ -798,7 +850,8 @@ Notes:
 - `void ForEach<T>(Action<int, T[]> action, bool useParallel = true)`
 
 #### Reordering
-- `MatrixData<T> Reorder<T>(IEnumerable<int> order, bool deepCopy = false)`
+- `MatrixData<T> Reorder(List<int> order, bool deepCopy = false)` — instance method; shallow copy shares `T[]` and `ValueRange` references
+- `MatrixData<T> Reorder(string[] newAxisOrder, bool deepCopy = false)` — reorder by axis names (extension method)
 
 ### VolumeAccessor<T> Methods
 
@@ -834,8 +887,8 @@ Notes:
 
 #### MatrixDataSerializer
 - `void Save<T>(string filename, MatrixData<T> data, bool compress = false)`
-- `MatrixData<T> Load<T>(string filename)`
-- `IMatrixData LoadDynamic(string filename)`
+- `MatrixData<T> LoadTyped<T>(string filename)` — load with known type
+- `IMatrixData LoadDynamic(string filename)` — load without knowing the type at compile time
 - `FileInfo GetFileInfo(string filename)`
 
 #### CSV Handler
