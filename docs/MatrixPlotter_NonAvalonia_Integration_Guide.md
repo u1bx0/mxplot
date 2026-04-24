@@ -6,11 +6,11 @@
 ---
 
 > **📌 Scope of this guide**  
-> This guide covers calling `MatrixPlotter` (an Avalonia-based **standalone window**) from WinForms or WPF.  
-> Embedding `MxView` directly inside a WinForms panel or WPF window requires  
-> `Avalonia.Win32.Interoperability` (`AvaloniaControlHost` / `AvaloniaHost`), which is  
-> **only officially provided in Avalonia 12 and later**.  
-> Embedding is not supported in the current version (Avalonia 11.3.x).
+> This guide primarily covers calling `MatrixPlotter` (an Avalonia-based **standalone window**) from WinForms or WPF.  
+> Embedding `MxView` directly inside a WinForms panel or WPF window is also possible using  
+> `Avalonia.Win32.Interoperability` (`WinFormsAvaloniaControlHost`),  
+> which is **available from Avalonia 11.3.x** (stable).  
+> See [Section 9](#9-direct-mxview-embedding-winforms--wpf) for details.
 
 ---
 
@@ -472,6 +472,192 @@ void OnNewSample(int ix, int iy, float value)
 | DPI (WinForms) | Always set `Application.SetHighDpiMode(HighDpiMode.SystemAware)` |
 | Version pinning | `Avalonia.Win32` / `Avalonia.Skia` must match the Avalonia version used by `MxPlot.UI.Avalonia` |
 | `Avalonia.Desktop` | **Do not use** (introduces `Tmds.DBus.Protocol` vulnerability GHSA-xrw6-gwf8-vvr9) |
+
+---
+
+## 9. Direct MxView Embedding (WinForms / WPF)
+
+Instead of opening `MatrixPlotter` as a standalone window, you can embed `MxView` directly
+inside a WinForms `Panel` or a WPF window using `WinFormsAvaloniaControlHost` from
+`Avalonia.Win32.Interoperability`. This package is available as a **stable release from
+Avalonia 11.3.x**.
+
+### Additional package reference
+
+Add the following to your `.csproj`:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Avalonia.Win32" Version="11.3.14" />
+  <PackageReference Include="Avalonia.Skia" Version="11.3.14" />
+  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.14" />
+</ItemGroup>
+```
+
+> Version must exactly match the Avalonia version used by `MxPlot.UI.Avalonia`.
+
+---
+
+### 9-A. WinForms
+
+```csharp
+// Form1.cs
+using Avalonia;
+using Avalonia.Win32.Interoperability;
+using MxPlot.Core;
+using MxPlot.Core.Imaging;
+using MxPlot.UI.Avalonia;
+using MxPlot.UI.Avalonia.Controls;
+
+public partial class Form1 : Form
+{
+    private WinFormsAvaloniaControlHost _avaloniaHost = null!;
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
+
+        var data = new MatrixData<float>(256, 256);
+        data.Set((ix, iy, x, y) => (float)(Math.Sin(x * 0.05) * Math.Cos(y * 0.05)));
+
+        var mxView = new MxView
+        {
+            MatrixData = data,
+            Lut = ColorThemes.Get("Jet"),
+        };
+
+        _avaloniaHost = new WinFormsAvaloniaControlHost
+        {
+            Content = mxView,
+            Dock = DockStyle.Fill,
+        };
+        panel1.Controls.Add(_avaloniaHost);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            _avaloniaHost?.Dispose();
+        if (disposing && components != null)
+            components.Dispose();
+        base.Dispose(disposing);
+    }
+}
+```
+
+---
+
+### 9-B. WPF
+
+Avalonia 11.3.x does not provide `WpfAvaloniaHost`. The only approach is a **3-layer stack**:  
+`WPF Window` → `WindowsFormsHost` → `WinFormsAvaloniaControlHost` → `MxView`
+
+**`.csproj` — enable both WPF and WinForms**
+
+```xml
+<PropertyGroup>
+  <UseWPF>true</UseWPF>
+  <UseWindowsForms>true</UseWindowsForms>  <!-- required for WindowsFormsHost -->
+</PropertyGroup>
+```
+
+**`App.xaml.cs` — namespace collision workaround**
+
+```csharp
+using Avalonia;
+using MxPlot.UI.Avalonia;
+
+namespace MxPlotWPFEmbedTest;
+
+public partial class App : System.Windows.Application
+{
+    protected override void OnStartup(System.Windows.StartupEventArgs e)
+    {
+        // Initialize Avalonia once, before any Avalonia control is created.
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
+
+        base.OnStartup(e);
+    }
+}
+```
+
+> **`using System.Windows;` causes CS0104**  
+> `Avalonia.Application` and `System.Windows.Application` collide.  
+> Omit `using System.Windows;` and use fully-qualified names instead
+> (`System.Windows.Application`, `System.Windows.StartupEventArgs`).
+
+**`MainWindow.xaml` — declare `WindowsFormsHost` in XAML**
+
+```xml
+<Window x:Class="MxPlotWPFEmbedTest.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wfi="clr-namespace:System.Windows.Forms.Integration;assembly=WindowsFormsIntegration"
+        Title="WPF Embed Test" Height="450" Width="800">
+  <Grid>
+    <wfi:WindowsFormsHost x:Name="wfHost" />
+  </Grid>
+</Window>
+```
+
+**`MainWindow.xaml.cs`**
+
+```csharp
+using Avalonia.Win32.Interoperability;
+using MxPlot.Core;
+using MxPlot.Core.Imaging;
+using MxPlot.UI.Avalonia.Controls;
+using System.Windows;
+
+namespace MxPlotWPFEmbedTest;
+
+public partial class MainWindow : Window
+{
+    private WinFormsAvaloniaControlHost _avaloniaHost = null!;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        var data = new MatrixData<float>(256, 256);
+        data.Set((ix, iy, x, y) => (float)(Math.Sin(x * 0.05) * Math.Cos(y * 0.05)));
+
+        var mxView = new MxView
+        {
+            MatrixData = data,
+            Lut = ColorThemes.Get("Jet"),
+        };
+
+        _avaloniaHost = new WinFormsAvaloniaControlHost
+        {
+            Content = mxView,
+            Dock = System.Windows.Forms.DockStyle.Fill,
+        };
+        wfHost.Child = _avaloniaHost;
+    }
+}
+```
+
+---
+
+### Known limitation: ContextMenu items have no effect
+
+`MxView` displays a right-click context menu (Crop, Export, etc.), but in direct embedding mode
+the handlers that `MatrixPlotter` normally provides (e.g., `CropRequested`) are not wired up.
+Menu items appear but do nothing. This is a known limitation of the current version.
+
+| Scenario | ContextMenu behavior |
+|---|---|
+| `MatrixPlotter` standalone window | Fully functional (Crop, Export, etc.) |
+| Direct embedding via `WinFormsAvaloniaControlHost` | Menu visible, handlers not connected — **no effect** |
 
 ---
 
