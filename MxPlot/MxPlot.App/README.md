@@ -97,16 +97,18 @@ Grab the latest archive from the [Releases page](https://github.com/u1bx0/mxplot
 
 | Platform | File |
 |---|---|
-| Windows x64 | `MxPlot-win-x64.zip` |
-| macOS Apple Silicon | `MxPlot-osx-arm64.tar.gz` |
+| Windows x64 | `MxPlot_vX_Y_Z_win-x64.zip` |
+| macOS Apple Silicon | `MxPlot_vX_Y_Z_osx-arm64.zip` |
 
 **Windows:** Extract and double-click `MxPlot.exe`.
 
 **macOS:** Extract, then run from Terminal:
 
 ```sh
-xattr -rd com.apple.quarantine MxPlot-osx-arm64/
-MxPlot-osx-arm64/run.sh
+# Fix permissions and bypass Gatekeeper for all files
+chmod +x run.sh && xattr -rc .
+
+./run.sh
 ```
 
 > The macOS binary is unsigned. `xattr` removes the Gatekeeper quarantine flag.
