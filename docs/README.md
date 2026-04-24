@@ -25,7 +25,7 @@ Detailed guides and technical references for the MxPlot library stack.
 - **[VirtualFrames Guide](./VirtualFrames_Guide.md)**  
   Architecture overview of MMF-backed Virtual storage: backend classes (`VirtualStrippedFrames`, `WritableVirtualStrippedFrames`), the `AsVirtualBuilder` creation path, `LoadVirtual`, the SaveAs fast-path, Clone behavior, and `VirtualPolicy` thresholds. Includes known limitations and planned work (`IVesselCreatable`).
 
-- **[MatrixData Method Call Map](./MatrixData_MethodCallMap.md)**
+- **[MatrixData Method Call Map](./MatrixData_MethodCallMap.md)** ([日本語](./MatrixData_MethodCallMap_ja.md))  
   Comprehensive reference mapping the call relationships, dependencies, and zero-copy strategies of all `MatrixData<T>` operation methods across `MxPlot.Core` and `MxPlot.Core.Processing`.
 
 - **[VolumeAccessor Guide](./VolumeAccessor_Guide.md)** ([日本語](./VolumeAccessor_Guide_ja.md))  
@@ -47,7 +47,7 @@ Detailed guides and technical references for the MxPlot library stack.
 - **[MatrixPlotter Metadata Format Guide](./MatrixPlotter_MetadataFormat_Guide.md)** ([日本語](./MatrixPlotter_MetadataFormat_Guide_ja.md))  
   Metadata key conventions used by `MatrixPlotter` for persisting view settings (`mxplot.vr.*`, etc.).
 
-- **[WinForms / WPF Integration Guide](./MatrixPlotter_NonAvalonia_Integration_Guide.md)**  
+- **[WinForms / WPF Integration Guide](./MatrixPlotter_NonAvalonia_Integration_Guide.md)** ([日本語](./MatrixPlotter_NonAvalonia_Integration_Guide_ja.md))  
   Step-by-step guide for hosting `MatrixPlotter` inside a WinForms or WPF application. Covers `AppBuilder` setup, data refresh API, thread safety, and high-frequency update patterns.
 
 ---
