@@ -2,7 +2,10 @@
 using MxPlot.Core;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MxPlot.Extensions.Tiff;
 
@@ -22,7 +25,7 @@ public static class ImageJTiffHandler
     /// <exception cref="NotSupportedException">サポートされていないデータ型</exception>
     /// <exception cref="FileNotFoundException">ファイルが見つからない</exception>
     /// <exception cref="IOException">TIFF読み込みエラー</exception>
-    public static MatrixData<T> Load<T>(string filename, IProgress<int>? progress = null)
+    public static MatrixData<T> Load<T>(string filename, IProgress<int>? progress = null, CancellationToken ct = default, int maxParallelDegree = -1)
         where T : unmanaged
     {
         ValidateDataType<T>();
@@ -34,7 +37,7 @@ public static class ImageJTiffHandler
         if (tiff == null)
             throw new IOException($"Failed to open TIFF file: {filename}");
 
-        return LoadInternal<T>(tiff, progress);
+        return LoadInternal<T>(tiff, filename, maxParallelDegree, progress, ct);
     }
 
     /// <summary>
@@ -58,14 +61,14 @@ public static class ImageJTiffHandler
                 "Data contains unsupported axes. Only Channel, Z, and Time/Timelapse are supported for ImageJ Hyperstack.");
         }
 
-        // ディレクトリが存在しない場合は作成
+        // Create the output directory if it does not exist
         string? directory = Path.GetDirectoryName(filename);
         if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
         {
             Directory.CreateDirectory(directory);
         }
 
-        // LibTiff.NET のエラーハンドラー設定
+        // Set the LibTiff.NET error handler
         BitMiracle.LibTiff.Classic.Tiff.SetErrorHandler(new LibTiffErrorHandler());
         
         using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "w");
@@ -78,7 +81,7 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// LibTiff.NET のエラーハンドラー
+    /// Custom error handler for LibTiff.NET.
     /// </summary>
     private class LibTiffErrorHandler : BitMiracle.LibTiff.Classic.TiffErrorHandler
     {
@@ -98,38 +101,30 @@ public static class ImageJTiffHandler
 
     #region Load Implementation
 
-    private static MatrixData<T> LoadInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, IProgress<int>? progress)
+    private static MatrixData<T> LoadInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int maxParallelDegree, IProgress<int>? progress, CancellationToken ct = default)
         where T : unmanaged
     {
-        // --- 追加：ファイル側の型を確認 ---
+        // 1. Validate pixel type (read from frame 0, the initial directory)
         short bitsPerSample = tiff.GetField(TiffTag.BITSPERSAMPLE)[0].ToShort();
         int expectedBytes = (typeof(T) == typeof(byte)) ? 8 : 16;
-
         if (bitsPerSample != expectedBytes)
-        {
-            // ここでエラーにするか、あるいは自動変換ロジックに分岐させる必要がある
             throw new InvalidDataException($"File is {bitsPerSample}bit, but {expectedBytes}bit was requested.");
-        }
-        // ------------------------------
-        
 
-        // 1. 基本情報の読み込み
-        int width = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
-        int height = tiff.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
+        // 2. Basic dimensions
+        int width          = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
+        int height         = tiff.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
         int directoryCount = tiff.NumberOfDirectories();
 
-        progress?.Report(-directoryCount); // 処理開始
-
-        // 2. ImageJ メタデータの読み込み
+        // 3. ImageJ metadata (from frame 0)
         var ijMetadata = ReadImageJMetadata(tiff);
 
-        // 3. Resolution 情報の読み込み
+        // 4. Resolution (from frame 0)
         var (xResolution, yResolution) = ReadResolution(tiff);
 
-        // 4. MatrixData の作成
+        // 5. Create MatrixData
         var data = new MatrixData<T>(width, height, directoryCount);
 
-        // 5. スケール設定
+        // 6. Scale
         if (ijMetadata != null)
         {
             double xPitch = 1.0 / xResolution;
@@ -143,27 +138,50 @@ public static class ImageJTiffHandler
             data.YUnit = ijMetadata.YUnit ?? ijMetadata!.Unit ?? "";
         }
 
-        // 6. 全フレームを読み込み
-        for (int i = 0; i < directoryCount; i++)
-        {
-            tiff.SetDirectory((short)i);
-            T[] frameData = ReadFrameData<T>(tiff, width, height);
-            data.SetArray(frameData, i);
-
-            progress?.Report(i);
-        }
-
-        // 7. Dimension 設定
-        if (ijMetadata != null && ijMetadata.Hyperstack)
-        {
-            SetDimensionsFromImageJ(data, ijMetadata);
-        }
-
-        // 8. Metadata の読み込み
+        // 7. Custom metadata (read from frame 0, before the frame loop)
         ReadCustomMetadata(tiff, data);
 
-        progress?.Report(directoryCount); // 完了
+        // 7b. Store the raw IMAGEDESCRIPTION as a read-only format-header entry so it
+        //     is visible in the metadata panel but excluded from re-export.
+        StoreImageDescription(tiff, data);
 
+        // 8. Compression detection: parallel is effective only for CPU-bound codecs
+        int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
+        bool isCpuBound = compression == (int)Compression.LZW
+                       || compression == (int)Compression.DEFLATE
+                       || compression == (int)Compression.ADOBE_DEFLATE;
+        bool useParallel = isCpuBound && (maxParallelDegree < 0 || maxParallelDegree > 1) && directoryCount > 1;
+
+        // 9. Load all frames
+        if (useParallel)
+        {
+            Debug.WriteLine($"Using parallel loading with {maxParallelDegree} threads for {directoryCount} frames (compression={compression}).");
+            // Parallel: ReadFrameDataStripped concurrently, then SetArray sequentially
+            LoadFramesParallel<T>(filename, data, width, height, directoryCount, maxParallelDegree, progress, ct);
+        }
+        else
+        {
+            Debug.WriteLine($"Using sequential loading for {directoryCount} frames (compression={compression}).");
+            // Sequential: O(N) IFD traversal via SetDirectory(0) + ReadDirectory() increments
+            progress?.Report(-directoryCount);
+            tiff.SetDirectory(0);
+            for (int i = 0; i < directoryCount; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                T[] frameData = ReadFrameDataStripped<T>(tiff, width, height);
+                data.SetArray(frameData, i);
+                progress?.Report(i);
+
+                if (i < directoryCount - 1 && !tiff.ReadDirectory())
+                    throw new InvalidDataException($"Could not advance to directory {i + 1}");
+            }
+        }
+
+        // 10. Dimension layout
+        if (ijMetadata != null && ijMetadata.Hyperstack)
+            SetDimensionsFromImageJ(data, ijMetadata);
+
+        progress?.Report(directoryCount);
         return data;
     }
 
@@ -175,6 +193,22 @@ public static class ImageJTiffHandler
 
         string description = imageDesc[0].ToString();
         return ImageJMetadata.Parse(description);
+    }
+
+    /// <summary>
+    /// Stores the raw TIFF IMAGEDESCRIPTION tag value in <paramref name="data"/>.Metadata
+    /// under the key <c>"ImageDescription"</c> and marks it as a format-header entry
+    /// (read-only; excluded from re-export).
+    /// Does nothing when the tag is absent or empty.
+    /// </summary>
+    private static void StoreImageDescription(BitMiracle.LibTiff.Classic.Tiff tiff, IMatrixData data)
+    {
+        var imageDesc = tiff.GetField(TiffTag.IMAGEDESCRIPTION);
+        if (imageDesc == null || imageDesc.Length == 0) return;
+        string description = imageDesc[0].ToString()?.Trim() ?? string.Empty;
+        if (string.IsNullOrEmpty(description)) return;
+        data.Metadata["ImageDescription"] = description;
+        data.MarkAsFormatHeader("ImageDescription");
     }
 
     private static (double xResolution, double yResolution) ReadResolution(BitMiracle.LibTiff.Classic.Tiff tiff)
@@ -189,38 +223,128 @@ public static class ImageJTiffHandler
             return (xResolution, yResolution);
         }
 
-        return (1.0, 1.0); // デフォルト
+        return (1.0, 1.0); // default
     }
 
     private static T[] ReadFrameData<T>(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
         where T : unmanaged
     {
-        int bytesPerPixel = GetBytesPerPixel<T>();
-        var imageData = new T[width * height];
-        var buffer = new byte[width * height * bytesPerPixel];
+        int bytesPerPixel   = GetBytesPerPixel<T>();
+        int scanlineSize    = tiff.ScanlineSize();       // actual bytes per row as stored in the file
+        int filePixelStride = scanlineSize / width;      // bytes per pixel in the file (≥ bytesPerPixel for multi-sample)
+        var buffer          = new byte[scanlineSize * height];
 
-        int stride = width * bytesPerPixel;
         for (int row = 0; row < height; row++)
         {
-            if (!tiff.ReadScanline(buffer, row * stride, row, 0))
-            {
+            if (!tiff.ReadScanline(buffer, row * scanlineSize, row, 0))
                 throw new IOException($"Failed to read scanline at row {row}");
-            }
         }
 
-        // Y軸反転: TIFF (左上原点) → MatrixData (左下原点)
+        // Y-flip: TIFF (top-left origin) → MatrixData (bottom-left origin)
         var flipped = new T[width * height];
         for (int row = 0; row < height; row++)
         {
             for (int col = 0; col < width; col++)
             {
-                int srcIndex = row * width + col;
-                int dstIndex = (height - 1 - row) * width + col;
-                flipped[dstIndex] = GetValue<T>(buffer, srcIndex * bytesPerPixel);
+                int srcOffset = row * scanlineSize + col * filePixelStride;
+                int dstIndex  = (height - 1 - row) * width + col;
+                flipped[dstIndex] = GetValue<T>(buffer, srcOffset);
             }
         }
 
         return flipped;
+    }
+
+    /// <summary>
+    /// Reads one frame using <c>ReadEncodedStrip</c> — one API call per strip instead of one per row.
+    /// Applies the TIFF (top-left origin) → MatrixData (bottom-left origin) Y-flip.
+    /// Handles multi-sample files via <c>filePixelStride</c>.
+    /// </summary>
+    private static T[] ReadFrameDataStripped<T>(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
+        where T : unmanaged
+    {
+        int bytesPerPixel   = GetBytesPerPixel<T>();
+        int scanlineSize    = tiff.ScanlineSize();
+        int filePixelStride = scanlineSize / width;
+
+        int rowsPerStrip  = tiff.GetField(TiffTag.ROWSPERSTRIP)?[0].ToInt() ?? height;
+        int numStrips     = tiff.NumberOfStrips();
+        int maxStripBytes = tiff.StripSize();
+        var stripBuf      = new byte[maxStripBytes];
+
+        var result = new T[width * height];
+
+        for (int strip = 0; strip < numStrips; strip++)
+        {
+            int bytesRead = tiff.ReadEncodedStrip(strip, stripBuf, 0, maxStripBytes);
+            if (bytesRead < 0)
+                throw new IOException($"ReadEncodedStrip failed: strip={strip}");
+
+            int startRow   = strip * rowsPerStrip;
+            int actualRows = Math.Min(rowsPerStrip, height - startRow);
+
+            for (int r = 0; r < actualRows; r++)
+            {
+                int dstRow  = height - 1 - (startRow + r);  // Y-flip
+                int srcBase = r * scanlineSize;
+                int dstBase = dstRow * width;
+
+                for (int col = 0; col < width; col++)
+                    result[dstBase + col] = GetValue<T>(stripBuf, srcBase + col * filePixelStride);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Parallel frame loader. Opens one <c>Tiff</c> handle per thread and advances each
+    /// via sequential <c>ReadDirectory</c> hops — O(start) per thread, O(N) total.
+    /// Only called for LZW/Deflate-compressed files where decompression is CPU-bound.
+    /// Frames are decoded concurrently into a staging array, then written via <c>SetArray</c> sequentially.
+    /// </summary>
+    private static void LoadFramesParallel<T>(
+        string filePath, MatrixData<T> data, int width, int height, int frameCount,
+        int maxParallelDegree, IProgress<int>? progress, CancellationToken ct)
+        where T : unmanaged
+    {
+        int degree  = maxParallelDegree <= 0 ? Environment.ProcessorCount : maxParallelDegree;
+        int threads = Math.Min(degree, frameCount);
+        int chunk   = (frameCount + threads - 1) / threads;
+
+        var frames   = new T[frameCount][];
+        int reported = 0;
+
+        progress?.Report(-frameCount);
+
+        Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads, CancellationToken = ct }, t =>
+        {
+            int start = t * chunk;
+            int end   = Math.Min(start + chunk, frameCount);
+            if (start >= frameCount) return;
+
+            using var localTiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
+            if (localTiff == null)
+                throw new IOException($"Thread {t}: failed to open TIFF file for parallel read.");
+
+            // Advance to this thread's starting IFD via O(start) sequential hops
+            localTiff.SetDirectory(0);
+            for (int i = 0; i < start; i++) localTiff.ReadDirectory();
+
+            for (int f = start; f < end; f++)
+            {
+                ct.ThrowIfCancellationRequested();
+                frames[f] = ReadFrameDataStripped<T>(localTiff, width, height);
+                progress?.Report(Interlocked.Increment(ref reported) - 1);
+
+                if (f < end - 1 && !localTiff.ReadDirectory())
+                    throw new InvalidDataException($"Thread {t}: could not advance to frame {f + 1}");
+            }
+        });
+
+        // Write decoded frames sequentially to avoid shared-state races in SetArray
+        for (int f = 0; f < frameCount; f++)
+            data.SetArray(frames[f], f);
     }
 
     private static void SetDimensionsFromImageJ(IMatrixData data, ImageJMetadata metadata)
@@ -255,23 +379,23 @@ public static class ImageJTiffHandler
         where T : unmanaged
     {
         int frameCount = data.FrameCount;
-        progress?.Report(-frameCount); // 処理開始
+        progress?.Report(-frameCount); // signal start
 
-        // ImageJ メタデータの生成
+        // Generate ImageJ metadata
         var ijMetadata = ImageJMetadata.FromMatrixData(data);
 
-        // フレーム順序の計算 (ImageJ は C-Z-T 順に並び替え)
+        // Compute frame order (ImageJ uses C-Z-T order)
         int[] frameOrder = CalculateFrameOrder(data, ijMetadata);
 
-        // 各フレームを順に書き込み
+        // Write frames in order
         for (int i = 0; i < frameCount; i++)
         {
             int frameIndex = frameOrder[i];
 
-            // 基本タグの設定
+            // Set basic TIFF tags
             SetBasicTiffTags(tiff, data.XCount, data.YCount, typeof(T));
 
-            // 最初のフレームのみ追加情報を書き込み
+            // Write additional metadata to the first frame only
             if (i == 0)
             {
                 WriteImageJMetadata(tiff, ijMetadata);
@@ -279,7 +403,7 @@ public static class ImageJTiffHandler
                 WriteCustomMetadata(tiff, data);
             }
 
-            // 画像データの書き込み
+            // Write pixel data
             T[] frameData = data.GetArray(frameIndex);
             WriteFrameData(tiff, frameData, data.XCount, data.YCount);
 
@@ -289,7 +413,7 @@ public static class ImageJTiffHandler
             progress?.Report(i);
         }
 
-        progress?.Report(frameCount); // 完了
+        progress?.Report(frameCount); // signal completion
     }
 
     private static void SetBasicTiffTags(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height, Type dataType)
@@ -311,25 +435,35 @@ public static class ImageJTiffHandler
             tiff.SetField(TiffTag.SAMPLEFORMAT, SampleFormat.UINT);
         }
 
-        // 圧縮設定 (LZW 圧縮)
+        // Compression (LZW without horizontal-differencing predictor).
+        // Predictor.HORIZONTAL (tag 317 = 2) triggers FluoRender's DecodeAcc16,
+        // which has a bug that causes a SIGSEGV on ARM64 macOS regardless of strip
+        // layout.  Predictor.NONE avoids the call entirely with minimal size impact.
         tiff.SetField(TiffTag.COMPRESSION, Compression.LZW);
-        tiff.SetField(TiffTag.PREDICTOR, Predictor.HORIZONTAL);
+        tiff.SetField(TiffTag.PREDICTOR, Predictor.NONE);
+        //tiff.SetField(TiffTag.PREDICTOR, Predictor.HORIZONTAL);
 
-        // RowsPerStrip の設定
-        int rowsPerStrip = CalculateOptimalRowsPerStrip(width, dataType);
+        // Set RowsPerStrip
+        int rowsPerStrip = CalculateOptimalRowsPerStrip(width, height, dataType);
         tiff.SetField(TiffTag.ROWSPERSTRIP, rowsPerStrip);
     }
 
-    private static int CalculateOptimalRowsPerStrip(int width, Type dataType)
+    private static int CalculateOptimalRowsPerStrip(int width, int height, Type dataType)
     {
-        int bytesPerPixel = dataType == typeof(byte) ? 1 : 2;
-        int bytesPerRow = width * bytesPerPixel;
-
-        // 目標: 1ストリップあたり64KB
-        const int targetStripSize = 64 * 1024;
-        int optimalRows = Math.Max(1, targetStripSize / bytesPerRow);
-
-        return optimalRows;
+        // Use a single strip per frame (rowsPerStrip = height).
+        //
+        // Some readers (e.g. FluoRender) have a bug in their horizontal-predictor
+        // undo pass where they iterate rowsPerStrip rows unconditionally, even on the
+        // last strip which may contain fewer rows.  With a single strip there is no
+        // partial last strip, so the bug is never triggered.
+        //
+        // The 64 KB target heuristic is kept as a comment for reference:
+        //   int bytesPerPixel = dataType == typeof(byte) ? 1 : 2;
+        //   int bytesPerRow = width * bytesPerPixel;
+        //   const int targetStripSize = 64 * 1024;
+        //   int optimalRows = Math.Max(1, targetStripSize / bytesPerRow);
+        //   return Math.Min(optimalRows, height);
+        return height;
     }
 
     private static void WriteImageJMetadata(BitMiracle.LibTiff.Classic.Tiff tiff, ImageJMetadata metadata)
@@ -355,7 +489,7 @@ public static class ImageJTiffHandler
         int bytesPerPixel = GetBytesPerPixel<T>();
         var buffer = new byte[width * height * bytesPerPixel];
 
-        // Y軸反転: MatrixData (左下原点) → TIFF (左上原点)
+        // Y-flip: MatrixData (bottom-left origin) → TIFF (top-left origin)
         for (int row = 0; row < height; row++)
         {
             for (int col = 0; col < width; col++)
@@ -366,7 +500,7 @@ public static class ImageJTiffHandler
             }
         }
 
-        // 行ごとに書き込み
+        // Write row by row
         int stride = width * bytesPerPixel;
         for (int row = 0; row < height; row++)
         {
@@ -381,7 +515,7 @@ public static class ImageJTiffHandler
     {
         int[] order = new int[data.FrameCount];
 
-        // ImageJ の順序: XYCZT (C が最も早く変化)
+        // ImageJ order: XYCZT (C varies fastest)
         int index = 0;
         for (int t = 0; t < metadata.Frames; t++)
         {
@@ -436,37 +570,37 @@ public static class ImageJTiffHandler
     #region Metadata Support
 
     /// <summary>
-    /// ImageJ用のMetadataタグ (50839)
+    /// ImageJ metadata tag (50839).
     /// </summary>
     private const int TiffTagIJMetadata = 50839;
 
     /// <summary>
-    /// IJMetadataのバイト数を記録するタグ (50838)
+    /// Tag that records the byte counts for IJMetadata (50838).
     /// </summary>
     private const int TiffTagIJMetadataByteCounts = 50838;
 
     private static void ReadCustomMetadata(BitMiracle.LibTiff.Classic.Tiff tiff, IMatrixData data)
     {
-        // IJMetadata (50839, 50838) の読み込み
+        // Read IJMetadata tags (50839, 50838)
         var ijMeta = tiff.GetField((TiffTag)TiffTagIJMetadata);
         var ijMetaBC = tiff.GetField((TiffTag)TiffTagIJMetadataByteCounts);
 
         if (ijMeta != null && ijMetaBC != null && ijMeta.Length > 0 && ijMetaBC.Length > 0)
         {
             byte[]? metaBytes = ijMeta[0].ToByteArray();
-            
+
             if (metaBytes != null && metaBytes.Length > 0)
             {
-                // ByteCounts を uint[] に変換
+                // Convert ByteCounts to uint[]
                 uint[] byteCounts = ConvertToUIntArray(ijMetaBC[0]);
-                
+
                 if (byteCounts != null && byteCounts.Length > 0)
                 {
                     string info = AnalyzeIJMetadata(metaBytes, byteCounts);
-                    
+
                     if (!string.IsNullOrEmpty(info))
                     {
-                        // "key=value" 形式でパース
+                        // Parse "key=value" lines
                         ParseMetadataString(info, data.Metadata);
                     }
                 }
@@ -479,13 +613,13 @@ public static class ImageJTiffHandler
         if (data.Metadata.Count == 0)
             return;
 
-        // Metadata を "key=value\nkey=value\n..." 形式に変換
+        // Serialize metadata to "key=value\nkey=value\n..." format
         var sb = new System.Text.StringBuilder();
         foreach (var kvp in data.Metadata)
         {
             if (kvp.Key == "ImageDescription")
                 continue;
-            
+
             sb.AppendLine($"{kvp.Key}={kvp.Value}");
         }
 
@@ -493,25 +627,25 @@ public static class ImageJTiffHandler
         if (string.IsNullOrEmpty(info))
             return;
 
-        // IJMetadata 形式に変換
+        // Convert to IJMetadata format
         ConvertToIJMetadata(info, out uint[] byteCounts, out byte[] metaData);
 
-        // TIFF タグとして書き込み
+        // Write as TIFF tags
         tiff.SetField((TiffTag)TiffTagIJMetadataByteCounts, byteCounts.Length, byteCounts);
         tiff.SetField((TiffTag)TiffTagIJMetadata, metaData.Length, metaData);
     }
 
     /// <summary>
-    /// 文字列をIJMetadataのinfo形式に変換
+    /// Converts a string to the IJMetadata info-section binary format.
     /// </summary>
     private static void ConvertToIJMetadata(string info, out uint[] byteCounts, out byte[] data)
     {
-        bool isBE = !BitConverter.IsLittleEndian; // C# は基本的にリトルエンディアン
+        bool isBE = !BitConverter.IsLittleEndian;
 
         var byteCountList = new List<uint>();
         var dataList = new List<byte>();
 
-        // Header部分: "IJIJ" (Little-Endian) or "JIJI" (Big-Endian)
+        // Header: "IJIJ" (little-endian) or "JIJI" (big-endian)
         byte[] bom = BitConverter.GetBytes(0x494a494a); // IJIJ
         dataList.AddRange(bom);
 
@@ -521,15 +655,15 @@ public static class ImageJTiffHandler
 
         // Count: 1
         dataList.AddRange(BitConverter.GetBytes(isBE ? ReverseBytes((uint)1) : (uint)1));
-        
+
         uint headerCount = (uint)dataList.Count;
         byteCountList.Add(headerCount);
 
-        // Body部分: Unicode string
+        // Body: Unicode string
         byte[] body = isBE 
             ? System.Text.Encoding.BigEndianUnicode.GetBytes(info) 
             : System.Text.Encoding.Unicode.GetBytes(info);
-        
+
         dataList.AddRange(body);
         byteCountList.Add((uint)body.Length);
 
@@ -538,7 +672,7 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// IJMetadata生データから、infoデータのみを抽出
+    /// Extracts only the "info" section from raw IJMetadata bytes.
     /// </summary>
     private static string AnalyzeIJMetadata(byte[] meta, uint[] byteCounts)
     {
@@ -548,19 +682,19 @@ public static class ImageJTiffHandler
                 return string.Empty;
 
             uint headerBytes = byteCounts[0];
-            
+
             if (meta.Length < headerBytes)
                 return string.Empty;
 
             byte[] header = new byte[headerBytes];
             byte[] body = new byte[meta.Length - headerBytes];
-            
+
             Array.Copy(meta, 0, header, 0, headerBytes);
             Array.Copy(meta, headerBytes, body, 0, body.Length);
 
-            // BOM チェック: "IJIJ" (LE) or "JIJI" (BE)
+            // BOM check: "IJIJ" = big-endian (bytes are stored reversed), "JIJI" = little-endian
             var bom = System.Text.Encoding.ASCII.GetString(header, 0, 4);
-            bool isBE = bom == "IJIJ"; // IJIJがビッグエンディアン（反転しているため逆に格納）
+            bool isBE = bom == "IJIJ";
 
             int tagNum = byteCounts.Length - 1;
             int headerPos = 4;
@@ -605,7 +739,7 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// "key=value\nkey=value\n..." 形式の文字列をパース
+    /// Parses a "key=value\nkey=value\n..." formatted string into a metadata dictionary.
     /// </summary>
     private static void ParseMetadataString(string text, IDictionary<string, string> metadata)
     {
@@ -628,22 +762,22 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// FieldValue を uint[] に変換
+    /// Converts a <see cref="FieldValue"/> to a <c>uint[]</c>.
     /// </summary>
     private static uint[] ConvertToUIntArray(FieldValue fieldValue)
     {
-        // FieldValue から配列として取得
+        // Try to get the value as an array directly
         var valueArray = fieldValue.ToUIntArray();
-        
+
         if (valueArray != null && valueArray.Length > 0)
             return valueArray;
-        
-        // フォールバック: 単一値を配列化
+
+        // Fallback: wrap the single value in an array
         return new uint[] { fieldValue.ToUInt() };
     }
 
     /// <summary>
-    /// uint のバイトオーダーを反転
+    /// Reverses the byte order of a uint value.
     /// </summary>
     private static uint ReverseBytes(uint value)
     {

@@ -111,15 +111,24 @@ namespace MxPlot.Core
         /// Thrown when <paramref name="md"/> or <paramref name="axes"/> is null.
         /// </exception>
         /// <exception cref="ArgumentException">
-        /// Thrown when duplicate axis names are detected.
+        /// thrown when any axis name in <paramref name="axes"/> is "X" or "Y" (case-insensitive) to avoid confusion with frame dimensions.
+        /// Or when there are duplicate axis names in <paramref name="axes"/>.
+        /// Or when the product of axis counts does not match the frame count of <paramref name="md"/>.
         /// </exception>
         public DimensionStructure(IMatrixData md, params Axis[] axes)
         {
             if (md is null || axes is null)
                 throw new ArgumentNullException();
 
-            _md = md;
-            _md.ActiveIndexChanged += ActiveIndex_Changed;
+            /*
+            if (axes.Any(a => //"X" and "Y" are not allowed as axis names to avoid confusion with frame dimensions.
+                a.Name.Equals("X", StringComparison.OrdinalIgnoreCase) ||
+                a.Name.Equals("Y", StringComparison.OrdinalIgnoreCase))
+                )
+            {
+                throw new ArgumentException("Axis names cannot be 'X' or 'Y' as they are reserved for the frame dimensions.");
+            }
+            */
 
             // Check for duplicate axis names.
             // Group by Name; any group with more than one element indicates duplication.
@@ -138,7 +147,12 @@ namespace MxPlot.Core
                 throw new ArgumentException(sb.ToString());
             }
 
+            _md = md;
+            _md.ActiveIndexChanged += ActiveIndex_Changed;
+
             RegisterAxes(axes);
+
+
         }
 
 
@@ -150,7 +164,7 @@ namespace MxPlot.Core
             _md.ActiveIndexChanged -= ActiveIndex_Changed;
             foreach (var axis in _axisList)
             {
-                axis.IndexChanged -= AxisIndex_Changed;
+                axis.IndexChanged -= AxisIndexChanged;
             }
             _axisList.Clear();
         }
@@ -161,22 +175,22 @@ namespace MxPlot.Core
             
             _axisList.Clear();
 
-            // ストライド配列を確保
+            // Allocate stride array
             _strides = new int[axes.Length];
-            
-            
+
+
             int currentStride = 1;
 
-            // ※重要: 提示コードの論理だと axis[0] が最も頻繁に変わる(Innermost)軸です。
-            // その順序に合わせてストライドを計算します。
+            // Important: In the logic of this code, axis[0] is the innermost (most frequently changing) axis.
+            // Calculate the strides according to that order.
             for (int i = 0; i < axes.Length; i++)
             {
                 var axis = axes[i];
 
                 _axisList.Add(axis);
-                _strides[i] = currentStride; // ストライドをキャッシュ
+                _strides[i] = currentStride; // Cache the stride for this axis  
 
-                axis.IndexChanged += AxisIndex_Changed;
+                axis.IndexChanged += AxisIndexChanged;
 
                 currentStride *= axis.Count;
             }
@@ -188,29 +202,29 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// MatrixDataのActiveIndexが変化した->各軸のIndexを更新する必要がある
+        /// MatrixData's ActiveIndex has changed -> Need to update the Index of each axis
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
         private void ActiveIndex_Changed(object? sender, EventArgs e)
         {
-            if (_isUpdating == 1 || _axisList.Count == 0) //自分自身がMatrixDataのAcitveIndexを更新している場合はスキップ
+            if (_isUpdating == 1 || _axisList.Count == 0) // Skip if we are updating MatrixData's ActiveIndex ourselves
                 return;
 
             UpdateAxisIndicesFromFrameIndex(_md.ActiveIndex);
         }
         /// <summary>
-        /// どれかのAxisのIndexが変化した -> MatrixDataのActiveIndexを更新する必要がある
+        /// One of the Axis indices has changed -> Need to update MatrixData's ActiveIndex
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
-        private void AxisIndex_Changed(object? sender, EventArgs e)
+        private void AxisIndexChanged(object? sender, EventArgs e)
         {
             if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0 
                 || _axisList.Count == 0)
-                return;//自分自身がAxisのIndexを更新している場合はスキップ
-            
-            //Here: _isUpdating = 1;
+                return;// Skip if we are updating Axis indices ourselves
+
+            // Here: _isUpdating = 1;
 
             try
             {
@@ -224,21 +238,21 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// MatrixDataのActiveIndexが変化に同期して、各軸のactiveなIndexを更新する
+        /// Update the active index of each axis in sync with changes to MatrixData's ActiveIndex
         /// </summary>
         internal void UpdateAxisIndicesFromFrameIndex(int frameIndex)
         {
             if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0
                || _axisList.Count == 0)
-                return;//自分自身がAxisのIndexを更新している場合はスキップ
+                return;// Skip if we are updating Axis indices ourselves
 
-            //Here: _isUpdating = 1;
+            // Here: _isUpdating = 1;
             try
             {
                 var indices = GetAxisIndices(frameIndex);
                 for (int i = 0; i < indices.Length; i++)
                 {
-                    //各軸のActiveなIndexを更新->イベント通知されるがスキップ
+                    // Update active Index of each axis -> Event notifications occur but will be skipped
                     _axisList[i].Index = indices[i];
                 }
             }
@@ -249,7 +263,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// indexの配列を指定してActiveなindexを直接変更する
+        /// Directly change the active index by specifying an array of indices
         /// </summary>
         /// <param name="indices"></param>
         public void SetActiveIndices(params int[] indices)
@@ -267,9 +281,9 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// 現在のSeries axis位置に対して，指定したAxisをindexにした場合のseries indexを返す
+        /// Returns the series index when the specified Axis is set to the given index, relative to the current Series axis position
         /// </summary>
-        /// <param name="axis">このSeriesに登録されているAxisオブジェクト</param>
+        /// <param name="axis">The Axis object registered in this Series</param>
         /// <param name="index"></param>
         /// <returns></returns>
         public int GetFrameIndexFor(Axis axis, int index)
@@ -294,7 +308,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// キー文字列を持つ軸がindexの場合のseries indexを返す
+        /// Returns the series index when the axis with the specified key string is at the given index
         /// </summary>
         /// <param name="axisKey"></param>
         /// <param name="index"></param>
@@ -309,8 +323,8 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// 指定した軸がSeries軸の何番目かを返す = axisList.IndexOf(axis)
-        /// Axis[0] が最初の軸
+        /// Returns the position of the specified axis in the Series axes = axisList.IndexOf(axis)
+        /// Axis[0] is the first axis
         /// </summary>
         /// <param name="axis"></param>
         /// <returns></returns>
@@ -319,6 +333,14 @@ namespace MxPlot.Core
             return _axisList.IndexOf(axis);
         }
 
+        /// <summary>
+        /// Retrieves the zero-based order of the specified axis by its name.
+        /// </summary>
+        /// <remarks>Use this method to determine the relative position of an axis, which can be important
+        /// when working with multi-dimensional data structures where axis order affects data interpretation.</remarks>
+        /// <param name="axisName">The name of the axis whose order is to be retrieved. This value must correspond to an existing axis.</param>
+        /// <returns>The zero-based order of the specified axis as an integer, representing its position in the axis arrangement.</returns>
+        /// <exception cref="ArgumentException">Thrown if the specified axis name does not exist.</exception>
         public int GetAxisOrder(string axisName)
         {
             if(!Contains(axisName))
@@ -467,25 +489,34 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Gets the axis indices for the specified frame as an AxisIndices structure.
+        /// Gets the axis indices for the specified frame as an <see cref="AxisIndices"/> structure
+        /// that supports tuple-like deconstruction.
         /// </summary>
         /// <remarks>
-        /// The returned structure supports tuple-like deconstruction for convenience.
+        /// The deconstruction order matches the axis registration order passed to
+        /// <c>DefineDimensions</c> (or the <see cref="DimensionStructure"/> constructor).
+        /// The first variable corresponds to <c>Axes[0]</c> (innermost / fastest-varying),
+        /// the second to <c>Axes[1]</c>, and so on.
         /// <code>
-        /// // Example usage:
-        /// var (iz, it) = matrix.GetAxisIndiciesStruct(i); //iz and it are the indices for Z and T axes 
-        /// var (it, ic, iz) = matrix.GetAxisIndicesStruct(i);
+        /// // Given: md.DefineDimensions(new ColorChannel(...), Axis.Z(...), Axis.Time(...))
+        /// //   Axes[0] = C  (stride 1, fastest)
+        /// //   Axes[1] = Z
+        /// //   Axes[2] = T  (stride C×Z, slowest)
+        /// var (ic, iz, it) = md.Dimensions.GetAxisIndicesStruct(frame);
+        ///
+        /// // Given: md.DefineDimensions(Axis.Z(...), Axis.Time(...))
+        /// var (iz, it) = md.Dimensions.GetAxisIndicesStruct(frame);
         /// </code>
         /// <para>
-        /// <b>Limitation:</b> Deconstruction is supported for a maximum of <b>4 variables</b>. 
+        /// <b>Limitation:</b> Deconstruction is supported for a maximum of <b>4 variables</b>.
         /// To access more axes, use <see cref="GetAxisIndices(int)"/>.
         /// </para>
         /// </remarks>
-        /// <param name="frameIndex">The zero-based index of the frame for which to retrieve axis indices. Specify -1 to use the current frame.</param>
-        /// <returns>An AxisIndices structure containing the axis indices for the specified frame.</returns>
+        /// <param name="frameIndex">The zero-based frame index. Specify -1 to use the current active frame.</param>
+        /// <returns>An <see cref="AxisIndices"/> structure containing the per-axis indices for the specified frame.</returns>
         public AxisIndices GetAxisIndicesStruct(int frameIndex = -1)
         {
-            // 配列版を呼んでラップする
+            // Wrap GetAxisIndices 
             return new AxisIndices(GetAxisIndices(frameIndex));
         }
 
@@ -552,7 +583,7 @@ namespace MxPlot.Core
             }
 
             Span<int> pos = stackalloc int[AxisCount];
-            //Index array pointing to ActiveIndex in the entire frames.
+            // Index array pointing to ActiveIndex in the entire frames.
             CopyAxisIndicesTo(pos, _md.ActiveIndex);
 
             foreach (var item in coords)
@@ -565,7 +596,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// index配列で指定したindexからシリーズ中のIndexに変換する
+        /// Convert from indices specified by an index array to the frame Index in the series
         /// </summary>
         /// <param name="indices"></param>
         /// <returns></returns>
@@ -578,12 +609,12 @@ namespace MxPlot.Core
                 throw new ArgumentException("Invalid lenght of indices!");
 
             int newIndex = 0;
-            // ループ内で掛け算を累積するのではなく、事前計算済みのStrideと内積をとる
+            // Instead of accumulating multiplications in the loop, compute the dot product with pre-calculated Strides
             for (int i = 0; i < _axisList.Count; ++i)
             {
                 newIndex += indices[i] * _strides[i];
             }
-            //newIndex = indices[0] * _strides[0] + indices[1] * _strides[1] + ... + indices[n-1] * _strides[n-1]
+            // newIndex = indices[0] * _strides[0] + indices[1] * _strides[1] + ... + indices[n-1] * _strides[n-1]
             return newIndex;
         }
 
@@ -596,7 +627,7 @@ namespace MxPlot.Core
                 throw new ArgumentException("Invalid lenght of indices!");
 
             int newIndex = 0;
-            // ループ内で掛け算を累積するのではなく、事前計算済みのStrideと内積をとる
+            // Instead of accumulating multiplications in the loop, compute the dot product with pre-calculated Strides
             for (int i = 0; i < _axisList.Count; ++i)
             {
                 newIndex += indices[i] * _strides[i];
@@ -653,15 +684,15 @@ namespace MxPlot.Core
 
             var indices = new List<int>();
 
-            // バッファ再利用（GC抑制）
+            // Buffer reuse (GC suppression)
             int[] buffer = new int[AxisCount];
 
             for (int i = 0; i < totalFrames; i++)
             {
-                // 高速なインデックス分解
+                // Fast index decomposition
                 CopyAxisIndicesTo(buffer, i);
 
-                // 指定軸の値が合致するものだけをピックアップ
+                // Pick up only those where the specified axis value matches
                 if (buffer[axisOrder] == fixedIndex)
                 {
                     indices.Add(i);
@@ -717,21 +748,21 @@ namespace MxPlot.Core
         /// <returns></returns>
         public Axis[] CreateAxesWithout(string axisNameToRemove)
         {
-            // 指定軸以外を抽出
+            // Extract all axes except the specified one
             var newAxes = _axisList
                 .Where(a => !string.Equals(a.Name, axisNameToRemove, StringComparison.OrdinalIgnoreCase))
-                .Select(a => a.Clone()) // Indexはリセット
+                .Select(a => a.Clone()) // Index is reset
                 .ToArray();
 
-            // ※もし「軸が1つもなくなる（0次元スカラーになる）」場合は
-            // 空配列を返すか、エラーにするか仕様を決める必要があります。
-            // ここでは空配列（長さ0）を許容します。
+            // Note: If "all axes are removed (becomes a 0-dimensional scalar)"
+            // we need to decide whether to return an empty array or throw an error.
+            // Here, we allow an empty array (length 0).
 
             return newAxes;
         }
 
         /// <summary>
-        /// 現在のAxis配列からシリーズ中のindexに変換する
+        /// Convert from the current Axis array to the index in the series
         /// </summary>
         /// <returns></returns>
         private int ToFrameIndex()

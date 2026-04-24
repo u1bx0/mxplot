@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace MxPlot.Core
 {
@@ -19,6 +20,18 @@ namespace MxPlot.Core
         /// Occurs when a tag value is modified via <see cref="SetTag"/>.
         /// </summary>
         public event EventHandler? TagNameChanged;
+
+        /// <summary>
+        /// JSON deserialization constructor. Protected so that <see cref="ColorChannel"/> can chain to it.
+        /// Only <c>tags</c> is required — <c>Count</c>, <c>Min</c>, <c>Max</c> are derived,
+        /// and <c>Name</c>, <c>Unit</c>, <c>IsIndexBased</c> are restored via their setters.
+        /// </summary>
+        [JsonConstructor]
+        protected TaggedAxis(IReadOnlyList<string> tags)
+            : base(tags?.Count ?? 0, 0, (tags?.Count ?? 1) - 1, "Tag", "", isIndexBased: true)
+        {
+            _tags = tags as string[] ?? tags?.ToArray() ?? Array.Empty<string>();
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="TaggedAxis"/> class with the specified tags and axis name.

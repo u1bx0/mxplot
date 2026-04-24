@@ -21,8 +21,7 @@ namespace MxPlot.Core
         public string YUnit { get; }
 
         // --- Pre-calculated Fields (Cached) ---
-        // これらは計算プロパティ(=>)ではなく、フィールドとして保持するため、
-        // ループ内で何度アクセスしてもコストはゼロです。
+        // These fields are calculated once in the constructor and stored for fast access, avoiding redundant calculations during iteration.
         public double XRange { get; }
         public double YRange { get; }
         public double XStep { get; }
@@ -93,14 +92,14 @@ namespace MxPlot.Core
         public static bool operator !=(Scale2D left, Scale2D right) => !(left == right);
 
         /// <summary>
-        /// Simple factory method to create a Scale2D instance with specified number of points in X and Y dimensions,
+        /// Simple factory method to create a Scale2D instance with specified number of points in X and Y dimensions as <c> => new Scale2D(xnum, 0, xnum - 1, ynum, 0, ynum - 1);</c>
         /// </summary>
         /// <param name="xnum"></param>
         /// <param name="ynum"></param>
         /// <returns></returns>
         public static Scale2D Pixels(int xnum, int ynum) => new Scale2D(xnum, 0, xnum - 1, ynum, 0, ynum - 1);
         /// <summary>
-        /// Simple factory method to create a Scale2D instance with specified number of points in X and Y dimensions and size,
+        /// Simple factory method to create a Scale2D instance with specified number of points in X and Y dimensions and size as <c> => new Scale2D(xnum, -width * 0.5, width * 0.5, ynum, -height * 0.5, height * 0.5);</c>
         /// </summary>
         /// <param name="xnum"></param>
         /// <param name="ynum"></param>

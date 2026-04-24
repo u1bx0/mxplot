@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.0.5-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.1.0--beta-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -18,8 +18,16 @@
 </p>
 </div>
 
-**MxPlot** is a modular library designed for high-performance data management and visualization. 
-It enables efficient handling of multi-dimensional datasets—XY matrices extended by Time, Z-Space, Channel, Wavelength, FOV (field of view), and more—with a focus on high throughput, physical coordinate integrity, and seamless UI binding.
+**MxPlot** is a modular ecosystem for high-performance scientific data management and visualization.
+It covers the full stack — from a dependency-free data engine (`MatrixData<T>`) to a cross-platform interactive viewer (`MxPlot.UI.Avalonia`, `MxPlot.App`) — enabling efficient handling of multi-dimensional datasets: XY matrices extended by Time, Z-Space, Channel, Wavelength, FOV, and more, with a focus on high throughput, physical coordinate integrity, and seamless UI binding.
+
+<div align="center">
+  <img src="docs/images/mp1.png" height="200" alt="Single view"> 
+  <img src="docs/images/mp2.png" height="200" alt="Orthogonal view"> 
+  <img src="docs/images/mp3.png" height="200" alt="Analysis">
+</div>
+
+
 
 ## 🚀 Just a Quick Look at the Code
 ```csharp
@@ -39,21 +47,21 @@ More details are provided below.
 
 ## 🏗️ Repository Structure
 
-This repository hosts the **MxPlot ecosystem**, organized into the following library suite (including modules currently under active development):
+This repository hosts the **MxPlot ecosystem**, organized into the following library suite:
 
-- **MxPlot (Metapackage)**: A convenient entry point that bundles the core and common extensions.
+- **MxPlot (Metapackage)**: A convenient entry point that bundles the core, UI layer, and common extensions.
 - **MxPlot.Core**: The foundational, dependency-free data engine (`MatrixData<T>`).
+- **MxPlot.UI.Avalonia**: Cross-platform visualization library built on [Avalonia UI](https://avaloniaui.net/). Runs on Windows, macOS, and Linux. Embeddable from WinForms or WPF via `MxPlotHostApplication`.
 - **MxPlot.Extensions.Tiff / .Hdf5**: Specialized high-performance file I/O packages.
 - **MxPlot.Extensions.Fft**: FFT processing utilities.
 - **MxPlot.Extensions.Images**: Image loading utilities.
-- **MxPlot.Wpf / .WinForms**: Native UI controls for visualization (In Development).
+- **MxPlot.App** *(included in this repository)*:
 
-At its heart, **MatrixData\<T\>** serves as the central engine, engineered to maximize data throughput. 
-While the visualization layer (**MxPlot.WinForms** or **MxPlot.Wpf**) is currently under development, this core package is deliberately decoupled from any UI dependencies. 
-This makes it a versatile solution for high-performance matrix manipulation and analysis. 
+At its heart, **MatrixData\<T\>** serves as the central engine, engineered to maximize data throughput.
+The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from the core to keep `MxPlot.Core` dependency-free, while still providing a rich, ready-to-use UI for immediate data exploration.
 I hope this package serves as a robust foundation for your own novel applications!
 
-> 💡 **This project fully leverages up-to-date AI tools, including GitHub Copilot (Claude Sonnet 4.5) and Gemini 3 pro, for coding, optimization, testing, and documentation.**
+> 💡 Modern AI-assisted development tools—such as GitHub Copilot with selectable models and other AI assistants—are used throughout this project as part of the standard workflow.
 
 
 ## 🎯 What is Multi-Axis Data?
@@ -69,51 +77,67 @@ MxPlot.Core handles arbitrary axis combinations while maintaining physical coord
 
 ## ✨ Features
 
+### MxPlot.Core
 - 🎯 **Multi-Axis Management**: Flexible dimension definition with physical coordinates and units
-- 🔐 **Type Safety**: Full support for all numeric types including `Complex` and user-defined structures.
+- 🔐 **Type Safety**: Full support for all numeric types including `Complex` and user-defined structures
 - 📊 **Dimensional Operators**: Transpose, map, reduce, slice at frame, extract along axis, select by axis
-- 🧊 **Volumetric Manipulation**: 3D volume access with projections and restacking along x, y, and z axes
+- 🧊 **Volumetric Manipulation**: 3D volume access with projections (Max/Min/Mean) and restacking along x, y, and z axes
 - 🚀 **High Performance**: Parallel and SIMD optimization, as well as Generic Math (.NET 10)
-- 🧪 **Scientific-Friendly Format**: Hyperstacks as bio-format (OME-TIFF), ImageJ-hyperstack TIFF, and HDF5
-- 📂 **Efficient Storage**: Direct binary serialization/deserialization (.mxd) with compression
-- 🧮 **Arithmetic Operations**: Element-wise operations (add, subtract, multiply, divide)
+- 💾 **Virtual Frame Streaming**: MMF-backed on-demand loading for large files (>2 GB) — peak memory stays near one frame regardless of total size
+- 🧪 **Scientific-Friendly Formats**: OME-TIFF, ImageJ-hyperstack TIFF, HDF5, FITS, CSV, and native `.mxd`
+- 📂 **Format Plugin Registry**: Auto-discovers `MxPlot.Extensions.*.dll` at startup — no explicit registration required
+- 🔬 **Spatial Filtering**: Median, Gaussian, and Mean kernels via the `IFilterKernel` plugin interface
+- 📏 **Line Profile Extraction**: Arbitrary-angle intensity profiles with bilinear interpolation
+- 🧮 **Arithmetic Operations**: Element-wise add, subtract, multiply, divide
 
-**Coming Soon:**
-- 📏 **Line Profile Extraction**: Extract intensity profiles along arbitrary lines *(To be implemented)*
-- 🔬 **Filtering**: Gaussian, Median, and custom convolution filters *(To be implemented)*
+### MxPlot.UI.Avalonia
+- 🖥️ **Cross-Platform Viewer**: Runs on Windows, macOS, and Linux via **Avalonia UI 11.3** (Avalonia 11 / 12 have breaking API differences; the current release targets Avalonia 11.3.14)
+- 🔭 **MatrixPlotter**: Full-featured standalone window — LUT selector, value-range bar, overlay manager, axis trackers, orthogonal views, profile plot, crop/sync/export
+- 🖼️ **MxView**: Low-level Avalonia image surface — pan, zoom, SkiaSharp bitmap rendering
+- 🔗 **WinForms / WPF Embedding**: `MxPlotHostApplication` lets you open `MatrixPlotter` windows from an existing WinForms or WPF app with minimal setup
+- ✏️ **Interactive Overlays**: Line, Rectangle, Oval, Targeting, and Text shapes — drawn via right-click menu or API, with live statistics and profile plots
+
+**Coming in next release:**
+- 🎨 **Composite Rendering**: Multi-channel display with per-channel LUT — assign independent colors to each channel frame and composite them into a single view, as commonly used in fluorescence microscopy
 
 ## 📦 Installation
 
 This ecosystem is provided as several NuGet packages.
 
-- **MxPlot (Recommended)**: For most users. Includes core and library-dependent extensions.
+- **MxPlot (Recommended)**: For most users. Includes the core engine, UI layer, and common extensions.
 ```bash
-dotnet add package MxPlot --version 0.0.5
+dotnet add package MxPlot --version 0.1.0-beta
 ```
 
 - **MxPlot.Core**: For developers building their own tools without extra dependencies.
 ```bash
-dotnet add package MxPlot.Core --version 0.0.5
+dotnet add package MxPlot.Core --version 0.1.0-beta
+```
+
+- **MxPlot.UI.Avalonia**: If you only need the visualization layer (e.g., for WinForms/WPF host apps).
+```bash
+dotnet add package MxPlot.UI.Avalonia --version 0.1.0-beta
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="MxPlot" Version="0.0.5" />
+<PackageReference Include="MxPlot" Version="0.1.0-beta" />
 ```
 
 ### 🛠️ For Developers (Manual Setup)
 
-If you want to modify the source code, clone the repository and reference the project directly:
+If you want to modify the source code, clone the repository and reference the projects directly:
 
 ```Bash
 git clone https://github.com/u1bx0/MxPlot.git
 ```
-Then add a project reference to MxPlot.Core.csproj in your solution.
+Then add project references to `MxPlot.Core.csproj` and `MxPlot.UI.Avalonia.csproj` in your solution.
 
 ### **Requirements**
 
 - .NET 10.0 or .NET 8.0
+- `MxPlot.UI.Avalonia` requires **Avalonia 11.3.x** (host projects must pin `Avalonia.Win32` / `Avalonia.Skia` to the same version)
 
 
 ## 🗿 Design Concepts and Philosophy
@@ -123,8 +147,9 @@ Then add a project reference to MxPlot.Core.csproj in your solution.
 - **Pixel-Centered Coordinates**: Physical scaling measured on pixel centers (i.e. pixel size (or step) = (x<sub>max</sub> - x<sub>min</sub>) / (num - 1)).
 - **Left-Bottom Origin**: Coordinate origin is at the left-bottom corner (Y increases upwards).
 - **Immutable Matrix Size**: Matrix dimensions are fixed after creation for performance.
-- **Backing 1D-Array List**: Uses `List<T[]>` for frame storage to allow efficient memory pinning.
+- **Backing IList<T[]>**: Uses `IList<T[]>` for frame storage, allowing both in-memory arrays and MMF-backed virtual frames behind a unified interface.
 - **Reactive Cache Synchronization**: Statistics (min/max) are synchronized via shared list references across shallow copies, ensuring data integrity without redundant calculations.
+- **Transparent Virtual Access**: Frames may live in RAM, on disk (MMF), or anywhere else — the API never changes.
 
 ## 🚀 Quick Start
 
@@ -178,6 +203,35 @@ MatrixDataSerializer.Save("data.mxd", data, compress: true);
 // Load without knowing the type
 IMatrixData loaded = MatrixDataSerializer.LoadDynamic("data.mxd");
 ```
+
+### Visualize in One Line (MxPlot.UI.Avalonia)
+
+```csharp
+using MxPlot.Core;
+using MxPlot.UI.Avalonia.Views;
+
+// Open a standalone MatrixPlotter window — works from console, WinForms, or WPF
+MatrixPlotter.Create(data, title: "My Data").Show();
+```
+
+For **WinForms / WPF** host applications, initialize Avalonia once at startup and then call `MatrixPlotter.Create` from anywhere:
+
+```csharp
+// Program.cs (WinForms) — add Avalonia.Win32 + Avalonia.Skia NuGet packages to the host project
+// ⚠️ These packages must match the Avalonia version used by MxPlot.UI.Avalonia (11.3.14).
+//    A version mismatch causes a hard crash before Main() is reached.
+AppBuilder.Configure<MxPlotHostApplication>()
+    .UseWin32().UseSkia()
+    .SetupWithoutStarting();
+
+// Then, from any button click or event handler:
+MatrixPlotter.Create(myData, title: "Result").Show();
+```
+
+> **Note on Avalonia versions**: `MxPlot.UI.Avalonia` currently targets **Avalonia 11.3.14**.
+> Avalonia 11 and Avalonia 12 have significant breaking API changes.
+> When adding `Avalonia.Win32` / `Avalonia.Skia` to a host project, always pin them to the same minor version (`11.3.x`).
+> Avalonia 12 support is planned for a future release.
 
 ## 🎯 Key Features
 
@@ -304,32 +358,33 @@ MxPlot handles multi-dimensional data with a flexible, format-agnostic API. By a
 
 ```csharp
 using MxPlot.Core;
+using MxPlot.Core.IO;
 using MxPlot.Extensions.Tiff;  // For OME-TIFF
-using MxPlot.Extensions.Hdf5;  // For HDF5
 
-// --- Saving: Choose your format strategy ---
-var matrix = new MatrixData<float>(512, 512, 3, 10); // XY + 3 Channels + 10 Timepoints
+// --- Saving: Choose your format ---
+var matrix = new MatrixData<float>(
+        Scale2D.Centered(512,512,2,2), 
+        Axis.Channel(3), 
+        Axis.Time(10, 0, 1, "s")); // XY + 3 Channels + 10 Timepoints
 
-// 1. Native format (Fast, compact)
-matrix.Save("data.mxd", new MxBinaryFormat()); 
+// Native format (fast, compact, supports virtual MMF loading)
+matrix.SaveAs("data.mxd", new MxBinaryFormat());
 
-// 2. Scientific formats (Requires Extension packages)
-matrix.Save("result.ome.tif", new OmeTiffFormat()); // For Fiji/ImageJ
-matrix.Save("archive.h5", new Hdf5Format());      // For HDFView/Python
+// OME-TIFF (compatible with Fiji/ImageJ and bio-imaging software)
+matrix.SaveAs("result.ome.tif", new OmeTiffFormat());
 
+// --- Virtual loading: open a 15 GB file without loading it into RAM ---
+var format = new OmeTiffFormat { LoadingMode = LoadingMode.Virtual };
+var big = MatrixData<ushort>.Load("big_stack.ome.tif", format);
+// big.IsVirtual == true: frames are decoded from MMF only on access
 
-// --- Loading: Dynamic and Type-Safe ---
-// MxPlot automatically detects the format and returns the best-fit MatrixData.
-IMatrixData data = MatrixData.Load("unknown_file.ome.tif", new OmeTiffFormat());
-
+// --- Loading: Dynamic and type-safe ---
+IMatrixData data = MatrixDataSerializer.LoadDynamic("data.mxd");
 Console.WriteLine($"Dimensions: {data.Dimensions}"); // e.g., "512x512, C:3, T:10"
-Console.WriteLine($"Physical Size: {data.XAxis.Range} {data.XUnit}");
 
-// Pattern matching for type-specific processing
 if (data is MatrixData<float> floatData)
 {
-    // High-performance access to float pixels
-    float val = floatData[0, 0]; 
+    float val = floatData.GetValueAt(0, 0);
 }
 ```
 
@@ -354,7 +409,7 @@ var physicalCrop = matrix.CropByCoordinates(xMin: -5, xMax: 5, yMin: -5, yMax: 5
 var centered = matrix.CropCenter(width: 50, height: 50);
 
 // Slice at the specific indices (params of tuple: (axisName, index))
-var timeSlice = data.SliceAt(("Time", 10)); //2D image from XYT
+var timeSlice = data.SliceAt(("Time", 10)); // 2D image from XYT
 
 // Extract data along specific axis (creates new MatrixData with a single axis)
 var zStackAtTime5 = data.ExtractAlong("Z", new[] { 0, 5 }); // Extract Z-stack (3D) at Time=5
@@ -363,12 +418,10 @@ var zStackAtTime5 = data.ExtractAlong("Z", new[] { 0, 5 }); // Extract Z-stack (
 var snapShot = data.SnapTo("Z", 2); // Extract hyperstack at Z=2 (N-1D)
 
 // Map: Apply function to each pixel across all frames
-var normalized = matrix.Map<double, double>((value, x, y, frame) => 
-    value / 255.0
-);
+var normalized = matrix.Map<double, double>((value, x, y, frame) => value / 255.0);
 
 // Reduce: Aggregate across frame axis
-var averaged = timeSeries.Reduce((x, y, values) => 
+var averaged = timeSeries.Reduce((x, y, values) =>
 {
     double sum = 0;
     foreach (var v in values) sum += v;
@@ -377,82 +430,74 @@ var averaged = timeSeries.Reduce((x, y, values) =>
 
 // === VolumeAccessor: 3D volume operations and projections ===
 
-// Convert MatrixData to 3D volume (requires single axis or axis name for multi-axis)
-var volume = data.AsVolume("Z"); // Create volume along Z axis
+var volume = data.AsVolume("Z");
 
 // Create orthogonal projections
-var projMaxZ = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Maximum);  // Maximum intensity projection
-var projMinZ = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Minimum); // Minimum intensity projection
-var projAvgZ = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Average);   // Average intensity projection
+var projMaxZ = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Maximum); // MIP along Z
+var projMaxX = volume.CreateProjection(ViewFrom.X, ProjectionMode.Maximum); // YZ plane
+var projMaxY = volume.CreateProjection(ViewFrom.Y, ProjectionMode.Maximum); // XZ plane
 
-// Project from different viewing directions
-var projMaxX = volume.CreateProjection(ViewFrom.X, ProjectionMode.Maximum);  // YZ plane
-var projMaxY = volume.CreateProjection(ViewFrom.Y, ProjectionMode.Maximum);  // XZ plane
+// Simultaneous XZ + YZ extraction in one memory pass (zero-allocation buffer reuse)
+var (xzPlane, yzPlane) = data.Apply(new SliceOrthogonalOperation(X: 128, Y: 128));
 
 // Restack volume for different viewing axes
-var restackedX = volume.Restack(ViewFrom.X); // Reorganize for X-axis viewing
-var restackedY = volume.Restack(ViewFrom.Y); // Reorganize for Y-axis viewing
-
-// Extract 2D slice from volume at specific depth
-var sliceAtZ5 = volume.SliceAt(ViewFrom.Z, 5); // Extract XY plane at Z=5
-
-// Reduce volume along axis with custom function
-var maxProjection = volume.ReduceZ((x, y, values) => values.Max());
-var customReduction = volume.ReduceZ((x, y, values) => 
-{
-    // Custom reduction logic (e.g., median, percentile, etc.)
-    return values.OrderBy(v => v).Skip(values.Length / 2).First();
-});
+var restackedX = volume.Restack(ViewFrom.X);
 
 // Direct voxel access (no bounds checking for performance)
 double voxelValue = volume[x: 10, y: 20, z: 5];
 
-// === LineProfileExtractor: Extract profiles along arbitrary lines ===
-// ⚠️ To be implemented in future release
+// === LineProfileExtractor: Extract intensity profiles along arbitrary lines ===
 
-// Extract profile along a line
-// var lineProfile = matrix.ExtractLineProfile(
-//     startX: 10.5, startY: 20.3,
-//     endX: 80.7, endY: 90.2,
-//     numPoints: 100,
-//     useInterpolation: true  // Bilinear interpolation
-// );
+var profile = matrix.Apply(new LineProfileOperation(
+    startX: 10.5, startY: 20.3,
+    endX: 80.7, endY: 90.2,
+    numPoints: 100)); // Bilinear interpolation included
 
-// === MatrixDataFilter: Spatial filtering ===
-// ⚠️ To be implemented in future release
+// === SpatialFilterOperation: Apply spatial filters ===
 
-// Apply Gaussian filter
-// var gaussianFiltered = matrix.ApplyGaussianFilter(sigma: 2.0);
+// Median filter 3×3
+var medianFiltered = matrix.Apply(new SpatialFilterOperation(new MedianKernel(radius: 1)));
 
-// Apply median filter (noise reduction)
-// var medianFiltered = matrix.ApplyMedianFilter(kernelSize: 3);
-
-// Apply custom convolution filter
-// double[,] customKernel = {
-//     { -1, -1, -1 },
-//     { -1,  8, -1 },
-//     { -1, -1, -1 }
-// };
-// var edgeDetected = matrix.ApplyConvolution(customKernel);
+// Gaussian filter (radius=2, sigma=1.5)
+var gaussFiltered = matrix.Apply(new SpatialFilterOperation(new GaussianKernel(radius: 2, sigma: 1.5)));
 ```
 
 ## 📖 More Detailed Information and Performance Reports
 
-The detailed documentaions and performance benchmark reports may be prepared separately.
+The detailed documentation and performance benchmark reports are available in the repository.
 
 *However, it may be better to consult your AI agent to understand the usage and the ideas behind the implementation.*
 
 > Hey, could you please tell me the details of the following library? - http://github.com/u1bx0/mxplot
 
 
+## 🖥️ MxPlot.App — Standalone Scientific Viewer
+
+**MxPlot.App** is a standalone data viewer application built on top of `MxPlot.UI.Avalonia`.
+It provides a plug-in-driven open dialog, a multi-window dashboard, metadata editing, ROI statistics, line profile plots, and spatial filters — all without writing any code.
+
+> 📦 **Pre-built binaries** (Windows x64 / macOS Apple Silicon) are available on the [Releases page](https://github.com/u1bx0/mxplot/releases).
+> Source code is included in this repository under `MxPlot.App/
+
+MxPlot.App also serves as a reference implementation showing how to build a full application on the MxPlot ecosystem.
+
+
 ## 📊 Version History
 
-**v0.0.5** (Current - Stabilized core features and architectural refactoring)
-- 🏷️ New Axis & Channel Types: Introduced TaggedAxis and ColorChannel for enhanced dimension labeling and color data management.
-- 💾 Enhanced Serialization: Improved Save and Load capabilities for more robust data persistence.
-- 🛠️ Codebase Refactoring: Cleaned up the core architecture by splitting the monolithic MatrixData<T> into logically organized partial classes (Core, Constructors, Accessors, Statistics) to maximize maintainability.
-- ⚡ Internal Optimizations: Fine-tuned internal logic across various core methods for better performance and stability.
-- 📚 Documentation Updates: Expanded and polished technical guides, including English and Japanese translations.
+**v0.1.0-beta** (Major feature release — Virtual frames, plugin I/O, cross-platform UI, and standalone app)
+- 💾 **Virtual Frame Streaming**: Introduced `VirtualFrames<T>` — MMF-backed on-demand frame loading for large files (>2 GB default threshold). Peak memory stays near one frame. Pluggable prefetch strategies keep navigation smooth.
+- 🔌 **Format Plugin Registry**: `FormatRegistry` auto-discovers `MxPlot.Extensions.*.dll` at startup. Built-in formats (`MxBinaryFormat`, `CsvFormat`, `FitsFormat`) are always available; third-party formats are picked up with no explicit registration call.
+- 📐 **New I/O Capability Interfaces**: `IProgressReportable`, `IVirtualLoadable`, `ICompressible` — format handlers declare their capabilities explicitly, enabling generic UI wiring (e.g. attaching a progress bar) without format-specific knowledge.
+- ⚙️ **`LoadingMode` & `VirtualPolicy`**: `Auto / InMemory / Virtual` loading mode selection. `VirtualPolicy.ThresholdBytes` (default 2 GB) resolves `Auto` based on file size at runtime.
+- 🗂️ **`.mxd` Format Overhaul**: Clarified binary layout, enabled direct MMF mount on uncompressed files, and added `CreateVessel<T>` factory + fast-path `SaveAs` (file-move + trailer rewrite, zero re-encode).
+- 🧩 **`MatrixData<T>` Refactored into Partials**: Split into `Constructors`, `DataAccessors`, `Statistics`, and `Static` files. `_valueRangeMap` reference-sharing model ensures `Invalidate()` propagates correctly across shallow copies.
+- 🎨 **Imaging Subsystem in Core**: `LookupTable` and `ColorThemes` (Grayscale, Hot, Cold, Spectrum, HiLo, and more) moved to `MxPlot.Core.Imaging` — no UI dependency needed for colormap access.
+- 🔬 **Spatial Filters**: `MedianKernel`, `GaussianKernel`, `MeanKernel` via the `IFilterKernel` interface. Progress and cancellation supported.
+- 📊 **Orthogonal Slice & Projection**: `SliceOrthogonalOperation` and `OrthogonalProjectionsOperation` — both XZ and YZ planes computed in a single memory pass, with zero-allocation buffer-reuse parameters.
+- 🔭 **FITS Format**: New `FitsHandler` — standard FITS read/write with multi-HDU support and cancellation.
+- 🖥️ **MxPlot.UI.Avalonia (New Package)**: Cross-platform visualization library on Avalonia 11. Includes `MxView` (pan/zoom image control), `MatrixPlotter` (full-featured plotter window), and `MxPlotHostApplication` for WinForms/WPF embedding.
+- 📱 **MxPlot.App (New — included in this repository)**: Standalone scientific viewer with plugin-driven file open, multi-window dashboard, metadata editor, ROI statistics, and extensible analysis UI.
+- ⚠️ **Breaking Changes**: `IOperation` → `IOperation<out TResult>` (generic `Apply<TResult>`); `Axis.MinMax` → `Axis.Range`; `OnDemand` terminology → `Virtual`; `IMatrixData.ValueType` removed.
 
 **v0.0.5-alpha** (Improving the internal logic with breaking changes)
 - 🧠 Frame Sharing & Memory Model: Refined the zero-cost O(1) frame reordering (Reorder) using underlying array reference sharing.
@@ -460,52 +505,36 @@ The detailed documentaions and performance benchmark reports may be prepared sep
 - ⚡ Lazy Min/Max Evaluation: Implemented lazy evaluation and caching for frame min/max values (GetValueRange), optimizing performance during bulk array mutations, which largely modified the internal logics of MatrixData.
 - 📚 Comprehensive Documentation: Added and updated extensive Markdown guides for Core Operations, Frame Sharing Model, Volume Accessor, and Dimension Structure.
 
-**v0.0.4-alpha** (added new packages and  introduced breaking changes)
-- 🔌 Generic Bridge: Enabled non-generic layers (UI/ViewModels) to invoke strongly-typed image processing operations without compile-time knowledge of generic type <T>.
-- 🛠 Visitor Pattern: Introduced IMatrixData.Apply(IOperation) as a unified dispatch entry point to dynamically resolve and execute Volume, Filter, and Dimensional operations. 
+**v0.0.4-alpha** (Added new packages and introduced breaking changes)
+- 🔌 Generic Bridge: Enabled non-generic layers (UI/ViewModels) to invoke strongly-typed image processing operations without compile-time knowledge of generic type `<T>`.
+- 🛠 Visitor Pattern: Introduced `IMatrixData.Apply(IOperation)` as a unified dispatch entry point to dynamically resolve and execute Volume, Filter, and Dimensional operations.
 - ➕ Added MxPlot.Extensions.Images package for useful image loading via SkiaSharp (PNG, JPEG, BMP, TIFF).
 - ➕ Added MxPlot.Extensions.Fft package for 2D FFT processing via MathNet.Numerics.
-- 🔄 Method Renaming (Breaking): Renamed At to GetFrameIndexAt in DimensionStructure.
-- 🔄 Method Renaming (Breaking): Renamed all GetFrameIndexFrom methods to GetFrameIndexAt in DimensionStructure to unify the coordinate-based API.
-
+- 🔄 Method Renaming (Breaking): Renamed `At` to `GetFrameIndexAt` in DimensionStructure.
 
 **v0.0.3-alpha** (Some modifications and reorganization of packages)
 - 🏗️ **Metapackage Structure**: Reorganized as a metapackage `MxPlot` bundling `MxPlot.Core` and common extensions for easier installation and management.
--  🔄 **Method Renaming**: Renamed `XAt`/`YAt` to **`XValue`/`YValue`** for better clarity and naming consistency.
- - ➕ Added MxPlot.Extensions.Tiff and MxPlot.Extensions.HDF5 packages for specialized file I/O 
+- 🔄 **Method Renaming**: Renamed `XAt`/`YAt` to **`XValue`/`YValue`** for better clarity and naming consistency.
+- ➕ Added MxPlot.Extensions.Tiff and MxPlot.Extensions.HDF5 packages for specialized file I/O.
 - 🏗️ **Type Optimization**: Changed `Scale2D` from `record struct` to **`readonly struct`** to ensure immutability and improve performance.
 - ➕ **Added `GetAxisValues` / `GetAxisValuesStruct`**: Now supports deconstruction for more intuitive axis value retrieval.
-- ➕ **Added `GetAxisIndicesStruct`**: Introduced struct-based deconstruction support for axis indices to improve performance and readability.
 - 🏗️ **Enhanced `IMatrixData`**: Implemented Facade pattern methods for `DimensionStructure`, simplifying the interface for complex data navigation.
-- 📖 Updated README and installation guides.
-- 🎯 Minor bug fixes in the core data processing engine.
-  
-**v0.0.2-alpha** (First core implementation )
-- ✨ **NEW**: `VolumeAccessor<T>` - High-performance 3D volume operations with readonly struct
-  - `AsVolume()` method for MatrixData with multi-axis support
-  - Projections with maximum, minimum, and average intensity from X, Y, Z viewing directions
-  - `Restack()` for efficient axis reorganization
-  - Direct voxel access with `[ix, iy, iz]` indexer (no bounds checking for performance)
-- ⚡ **NEW**: `VolumeOperator` - Optimized volume projections with tiled memory access
-  - 2-3.4x speedup with tiling optimization for Z-axis projections
-  - Cross-platform performance optimization (Intel AVX-512 & Apple ARM64)
-- 🎯 **ENHANCED**: `DimensionalOperator.ExtractAlong()` - Extract data along specific axis
-  - Support for multi-axis data with base indices
-  - ActiveIndex-based extraction
-- 📈 **IMPROVED**: Performance benchmarks and documentation
-- ⚠️ **PLANNED**: `LineProfileExtractor` and `MatrixDataFilter` (to be implemented in future releases)
+
+**v0.0.2-alpha** (First core implementation)
+- ✨ **NEW**: `VolumeAccessor<T>` — High-performance 3D volume operations with readonly struct.
+- ⚡ **NEW**: `VolumeOperator` — Optimized volume projections with tiled memory access (2–3.4× speedup).
+- 🎯 **ENHANCED**: `DimensionalOperator.ExtractAlong()` — Extract data along specific axis with multi-axis and ActiveIndex support.
 
 **v0.0.1-alpha** (Package name reservation)
-- Package name reserved on NuGet
-- No implementation (placeholder only)
+- Package name reserved on NuGet. No implementation (placeholder only).
 
 **Initial Development (Pre-release)**
 - Core multi-axis container with dimension management
 - Binary I/O (.mxd) with compression
 - Dimensional & cross-sectional operators
 - Arithmetic operations with SIMD optimization
-- OME-TIFF and ImageJ-compatible TIFF support via MxPlot.Extensions.Tiff packages (will be provided separately)
-- HDF5 support via MxPlot.Extensions.HDF5 package (will be provided separately)
+- OME-TIFF and ImageJ-compatible TIFF support via MxPlot.Extensions.Tiff packages
+- HDF5 support via MxPlot.Extensions.HDF5 package
 
 ---
 > **🚧 Disclaimer (IMPORTANT)🚧**

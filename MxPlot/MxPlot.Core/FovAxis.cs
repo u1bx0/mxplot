@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace MxPlot.Core
 {
@@ -396,13 +397,25 @@ namespace MxPlot.Core
                     Console.WriteLine($"Error at Tile {bad.TileIndex}: OverlapX is {bad.OverlapX}");
                 }
              * 
-             */
-        }
+                   */
+             }
 
-        /// <summary>
-        /// FOVの要素数で初期化、Originはすべて(0,0,0)⇒後で設定する必要がある
-        /// </summary>
-        /// <param name="num"></param>
+             /// <summary>
+             /// JSON deserialization constructor. Only <c>origins</c> and <c>tileLayout</c> are required —
+             /// <c>Count</c>, <c>Min</c>, <c>Max</c> are derived, and <c>Name</c>/<c>Unit</c> are restored via setters.
+             /// </summary>
+             [JsonConstructor]
+             private FovAxis(GlobalPoint[] origins, (int X, int Y, int Z) tileLayout)
+                 : base(origins?.Length ?? 0, 0, (origins?.Length ?? 1) - 1, "FOV", "", isIndexBased: true)
+             {
+                 _origins = origins ?? Array.Empty<GlobalPoint>();
+                 TileLayout = tileLayout;
+             }
+
+             /// <summary>
+             /// FOVの要素数で初期化、Originはすべて(0,0,0)⇒後で設定する必要がある
+             /// </summary>
+             /// <param name="num"></param>
         public FovAxis(int xNum, int yNum, int zNum = 1)
             : base(xNum * yNum * zNum, 0, xNum * yNum * zNum - 1, "FOV", "", true)
         {

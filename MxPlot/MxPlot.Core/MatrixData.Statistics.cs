@@ -1,5 +1,7 @@
-﻿using System;
+﻿using MxPlot.Core.IO;
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 
 namespace MxPlot.Core
@@ -8,6 +10,105 @@ namespace MxPlot.Core
     
     public partial class MatrixData<T> : IMatrixData where T : unmanaged
     {
+
+        /// <summary>
+        /// A stateful container that manages statistical cache via shared list instances.
+        /// </summary>
+        /// <remarks>
+        /// The essential point of this class is that it holds references to <see cref="List{Double}"/> 
+        /// instances rather than cloning their values. When multiple <see cref="ValueRange"/> 
+        /// instances share the same list references, calling <see cref="Invalidate"/> (which clears the lists) 
+        /// synchronizes the invalidation state across all associated objects.
+        /// </remarks>
+        internal readonly struct ValueRange
+        {
+            /// <summary> Gets the list of minimum values for each value mode. </summary>
+            public List<double> MinValues { get; }
+
+            /// <summary> Gets the list of maximum values for each value mode. </summary>
+            public List<double> MaxValues { get; }
+
+            /// <summary>
+            /// Gets a value indicating whether the current statistics are valid (calculated).
+            /// </summary>
+            public bool IsValid => MinValues != null && MaxValues != null
+                                && MinValues.Count > 0
+                                && MinValues.Count == MaxValues.Count;
+
+            /// <summary>
+            /// Clears the cached statistics and marks the state as invalid (<see cref="IsValid"/> = false).
+            /// </summary>
+            public void Invalidate()
+            {
+                MinValues.Clear(); 
+                MaxValues.Clear();
+            }
+
+            public ValueRange()
+            {
+                MinValues = new List<double>();
+                MaxValues = new List<double>();
+            }
+
+            /// <summary>
+            /// Initializes a new instance of the <see cref="ValueRange"/> class 
+            /// by wrapping existing list instances to enable shared synchronization.
+            /// </summary>
+            /// <param name="minValues">The shared list instance for minimum values.</param>
+            /// <param name="maxValues">The shared list instance for maximum values.</param>
+            public ValueRange(List<double> minValues, List<double> maxValues)
+            {
+                // Critical Logic: Capture the references of the lists to maintain 
+                // synchronization across different ValueRange containers.
+                MinValues = minValues;
+                MaxValues = maxValues;
+            }
+
+            public void Set(IEnumerable<double> minValues, IEnumerable<double> maxValues)
+            {
+                if (MinValues == null || MaxValues == null)
+                    throw new InvalidOperationException("Uninitialized ValueRange cannot be set.");
+
+                MinValues.Clear();
+                MaxValues.Clear();
+                using (var minEnum = minValues.GetEnumerator())
+                using (var maxEnum = maxValues.GetEnumerator())
+                {
+                    while (true)
+                    {
+                        bool hasMin = minEnum.MoveNext();
+                        bool hasMax = maxEnum.MoveNext();
+                        if (hasMin != hasMax)
+                        {
+                            throw new ArgumentException("Enumerables must have the same number of elements.");
+                        }
+                        if (!hasMin) break; // No elements anymore
+                        MinValues.Add(minEnum.Current);
+                        MaxValues.Add(maxEnum.Current);
+                    }
+                }
+            }
+        }
+
+
+        /// <summary>
+        /// Retrieves the array of keys associated with the specified frame index.
+        /// </summary>
+        /// <remarks>If the underlying data structure is a VirtualFrameList, this method returns a dummy
+        /// key array without performing disk access. Otherwise, it returns a reference to the actual key array from the
+        /// standard list.</remarks>
+        /// <param name="frameIndex">The zero-based index of the frame for which to retrieve the key array. Must be within the valid range of the
+        /// underlying data structure.</param>
+        /// <returns>An array of type T containing the keys for the specified frame index.</returns>
+        private T[] GetFrameKey(int frameIndex)
+        {
+            if (_arrayList is IFrameKeyProvider<T> fkp)
+            {
+                return fkp.GetKey(frameIndex);
+            }
+
+            return _arrayList[frameIndex]; //InMemory
+        }
 
         /// <summary>
         /// Returns the minimum and maximum values for the currently active data set.
@@ -53,10 +154,42 @@ namespace MxPlot.Core
         /// exists.</returns>
         public (List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex)
         {
-            if (RefreshValueRangeRequired(frameIndex))
-                return RefreshValueRange(frameIndex);
-            if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+            return GetValueRangeList(frameIndex, false);
+        }
+
+        /// <summary>
+        /// Retrieves the minimum and maximum value lists for the specified frame index.
+        /// </summary>
+        /// <remarks>
+        /// This method returns all available min/max values for the structured value type 
+        /// (e.g., [Magnitude, Real, Imaginary, Phase, Power] for Complex data).
+        /// </remarks>
+        /// <param name="frameIndex">The zero-based index of the frame.</param>
+        /// <param name="skipRefresh">
+        /// If <c>true</c>, skips the full-pixel scan (<c>RefreshValueRange</c>) even if the current 
+        /// cache is invalid or missing. 
+        /// <para>
+        /// <strong>Crucial for Performance:</strong> In high-throughput scenarios like 
+        /// real-time slicing of large volumes (e.g., 2048x2048), setting this to <c>true</c> 
+        /// prevents blocking the UI thread or render loop with O(N) operations, 
+        /// ensuring sub-millisecond execution by returning cached or <c>NaN</c> values.
+        /// </para>
+        /// </param>
+        /// <returns>
+        /// A tuple of two lists containing min and max values. 
+        /// Returns <c>double.NaN</c> elements if <paramref name="skipRefresh"/> is <c>true</c> 
+        /// and no valid cache exists.
+        /// </returns>
+        public (List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex, bool skipRefresh)
+        {
+            if (!skipRefresh && RefreshValueRangeRequired(frameIndex))
             {
+                //Debug.WriteLine($"[MatrixData.GetValueRangeList] Refresh value range for {frameIndex}");
+                return RefreshValueRange(frameIndex);
+            }
+            if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
+            {
+                //Debug.WriteLine($"[MatrixData.GetValueRangeList] Use cached value range for {frameIndex}");
                 return (range.MinValues, range.MaxValues);
             }
             return ([double.NaN], [double.NaN]);
@@ -142,7 +275,7 @@ namespace MxPlot.Core
 
                     if (RefreshValueRangeRequired(frameIndex))
                         RefreshValueRange(frameIndex);
-                    if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+                    if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
                     {
                         double vmin = range.MinValues[valueMode];
                         double vmax = range.MaxValues[valueMode];
@@ -169,7 +302,7 @@ namespace MxPlot.Core
                     if (RefreshValueRangeRequired(frameIndex))
                         RefreshValueRange(frameIndex);
 
-                    if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+                    if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
                     {
                         double vmin = range.MinValues[valueMode];
                         double vmax = range.MaxValues[valueMode];
@@ -189,40 +322,80 @@ namespace MxPlot.Core
         /// second item is the maximum value.</returns>
         public (double Min, double Max) GetGlobalValueRange()
         {
-            return GetGlobalValueRange(0);
+            return GetGlobalValueRange(0, out _);
+        }
+
+        public (double Min, double Max) GetGlobalValueRange(out List<int> invlids, bool forceRefresh)
+        {
+            return GetGlobalValueRange(0, out invlids, forceRefresh);
         }
 
         /// <summary>
-        /// Calculates the global minimum and maximum values across all frames using the specified value mode.
+        /// Calculates the global minimum and maximum values across all cached data, identifying any uncomputed frames.
         /// </summary>
-        /// <param name="valueMode">An integer that specifies the value mode to use when determining the minimum and maximum values for each
-        /// frame.</param>
-        /// <returns>A tuple containing the minimum and maximum values found across all frames. The first element is the global
-        /// minimum; the second element is the global maximum.</returns>
-        /// <exception cref="InvalidOperationException">Thrown if there are no frames available to calculate the global minimum and maximum values.</exception>
-        public (double Min, double Max) GetGlobalValueRange(int valueMode)
+        /// <param name="valueMode">The index of the value mode (e.g., Magnitude, Phase) to evaluate.</param>
+        /// <param name="invalids">
+        /// When this method returns, contains a <see cref="List{Int32}"/> of representative frame indices that are currently uncalculated (invalid).
+        /// <para>
+        /// <strong>Optimization Note:</strong> If multiple frames share the same data reference (and thus the same cache), 
+        /// only one representative index is added to this list to prevent redundant background calculations.
+        /// </para>
+        /// </param>
+        /// <param name="forceRefresh">
+        /// If <c>true</c>, forces an immediate full-pixel scan for all invalid frames before returning. 
+        /// Set to <c>false</c> to maintain UI responsiveness by retrieving only currently available data.
+        /// </param>
+        /// <returns>
+        /// A tuple containing the global minimum and maximum values. 
+        /// Returns <c>(NaN, NaN)</c> if no frames are calculated and <paramref name="forceRefresh"/> is <c>false</c>.
+        /// </returns>
+        /// <remarks>
+        /// This method iterates through the internal <c>_valueRangeMap</c> rather than the frame list. 
+        /// This is significantly more efficient when many frames share the same physical data (e.g., Virtual Data or shallow copies), 
+        /// as it processes each unique data source only once.
+        /// </remarks>
+        public (double Min, double Max) GetGlobalValueRange(int valueMode, out List<int> invalids, bool forceRefresh = false)
         {
             if (FrameCount == 0) throw new InvalidOperationException("No frames available to calculate global min/max.");
 
             double min = double.PositiveInfinity;
             double max = double.NegativeInfinity;
 
-            //Evaluate min/max throughout the map;
-            //This is more efficient if _arrayList contains many shallow copies of the same array reference, which refer to the same _valueRangeMap value;
-            foreach (var range in _valueRangeMap.Values)
+            invalids = [];
+            // Iterating the map (not the frame list) is efficient when many frames share
+            // the same T[] reference (Virtual / shallow-copy Reorder), since each unique
+            // data source is processed only once.
+            foreach (var key in _valueRangeMap.Keys)
             {
+                var range = _valueRangeMap[key];
                 if (!range.IsValid)
                 {
-                    RefreshValueRange(_arrayList.IndexOf(_valueRangeMap.First(kvp => kvp.Value == range).Key));
+                    int index = _arrayList.IndexOf(key);
+                    if (index >= 0)
+                    {
+                        if (forceRefresh)
+                            RefreshValueRange(index); // after this the shared List<double> is populated → range.IsValid becomes true
+                        else
+                            invalids.Add(index);      // still invalid; caller may schedule a background scan
+                    }
                 }
-                var vmin = range.MinValues[valueMode];
-                var vmax = range.MaxValues[valueMode];
-                if (vmin < min) min = vmin;
-                if (vmax > max) max = vmax;
+
+                // Catches both originally-valid frames AND frames that were just refreshed above.
+                if (range.IsValid)
+                {
+                    var vmin = range.MinValues[valueMode];
+                    var vmax = range.MaxValues[valueMode];
+                    if (vmin < min) min = vmin;
+                    if (vmax > max) max = vmax;
+                }
             }
 
+            if(double.IsPositiveInfinity(min) || double.IsNegativeInfinity(max))
+            {
+                // This can happen if all frames are invalid and forceRefresh is false
+                return (double.NaN, double.NaN);
+            }
             return (min, max);
-
         }
 
         /// <summary>
@@ -241,21 +414,15 @@ namespace MxPlot.Core
             if (_minMaxFinder == null)
             {
                 return ([double.NaN], [double.NaN]);
-                /*
-               throw new InvalidOperationException(
-                   $"Type '{typeof(T).Name}' has no MinMaxFinder registered. " +
-                   $"Call 'MatrixData<{typeof(T).Name}>.RegisterDefaultMinMaxFinder(...)' first, " +
-                   $"or avoid operations that require min/max statistics.");
-               */
             }
 
-            var array = _arrayList[frameIndex];
+            var array = GetInternalArray(frameIndex, needsInvalidate: false);
             var (minValues, maxValues) = _minMaxFinder(array);
-
-            if (_valueRangeMap.ContainsKey(array))
+            var keyArray = GetFrameKey(frameIndex);
+            if (_valueRangeMap.TryGetValue(keyArray, out var range))
             {
-                _valueRangeMap[array].Set(minValues, maxValues);
-                return (_valueRangeMap[array].MinValues, _valueRangeMap[array].MaxValues);
+                range.Set(minValues, maxValues);
+                return (range.MinValues, range.MaxValues);
             }
             else
             {
@@ -273,16 +440,16 @@ namespace MxPlot.Core
         private bool RefreshValueRangeRequired(int frameIndex)
         {
             // Check if the arrays exist and if primary dimension is invalid
-            if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+            if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
             {
                 if (!range.IsValid)
-                    return true;
-                var minArr = range.MinValues;
-                var maxArr = range.MaxValues;
-                if (minArr == null || maxArr == null || minArr.Count == 0 || maxArr.Count == 0 || minArr.Count != maxArr.Count)
                 {
                     return true;
+                    // Definition of IsValid for reference:
+                    // public bool IsValid => MinValues != null && MaxValues != null && MinValues.Count > 0 && MinValues.Count == MaxValues.Count;
                 }
+                var minArr = range.MinValues;
+                var maxArr = range.MaxValues;
                 for (int i = 0; i < minArr.Count; i++)
                 {
                     if (minArr[i] > maxArr[i])
@@ -314,7 +481,7 @@ namespace MxPlot.Core
         public void Invalidate(int frameIndex)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            if (_valueRangeMap.TryGetValue(_arrayList[frameIndex], out var range))
+            if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
             {
                 range.Invalidate();
             }
@@ -329,13 +496,20 @@ namespace MxPlot.Core
             Invalidate(ActiveIndex);
         }
 
+        /// <summary>
+        /// Invalidates all frames in the current context, ensuring that any cached data is refreshed.
+        /// </summary>
+        /// <remarks>This method iterates through all value ranges and calls the Invalidate method on
+        /// each, which may affect performance if called frequently. It is recommended to use this method judiciously to
+        /// avoid unnecessary overhead.</remarks>
         public void InvalidateAllFrames()
         {
-            for (int i = 0; i < FrameCount; i++)
+            foreach(var range  in _valueRangeMap.Values)
             {
-                Invalidate(i);
+                range.Invalidate();
             }
         }
 
     }
+
 }

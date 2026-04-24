@@ -1,0 +1,15 @@
+﻿{
+  "profiles": {
+    "Default (system theme)": {
+      "commandName": "Project"
+    },
+    "Dark": {
+      "commandName": "Project",
+      "commandLineArgs": "--dark"
+    },
+    "Light": {
+      "commandName": "Project",
+      "commandLineArgs": "--light"
+    }
+  }
+}

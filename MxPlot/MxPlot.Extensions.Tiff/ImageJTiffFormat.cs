@@ -2,6 +2,7 @@
 using MxPlot.Core.IO;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.Design;
 using System.IO;
 using System.Text;
 
@@ -30,8 +31,12 @@ namespace MxPlot.Extensions.Tiff
     /// </code>
     /// </para>
     /// </remarks>
-    public class ImageJTiffFormat : IMatrixDataReader, IMatrixDataWriter
+    public class ImageJTiffFormat : IMatrixDataReader, IMatrixDataWriter, IProgressReportable
     {
+        public string FormatName => "TIFF (ImageJ-compatible)";
+
+        public IReadOnlyList<string> Extensions { get; } = [".tif", ".tiff"];
+
         /// <summary>
         /// Gets or sets the progress reporter for tracking the read/write operations.
         /// </summary>
@@ -47,20 +52,49 @@ namespace MxPlot.Extensions.Tiff
         /// </remarks>
         public IProgress<int>? ProgressReporter { get; set; } = null;
 
+        private CancellationToken _ct;
+        CancellationToken IMatrixDataReader.CancellationToken { get => _ct; set => _ct = value; }
+        bool IMatrixDataReader.IsCancellable => true;
+
+        /// <summary>
+        /// Maximum degree of parallelism for loading compressed files.
+        /// <c>1</c> = sequential.
+        /// <c>-1</c> = auto (use all available cores, default).
+        /// <c>N &gt; 1</c> = use N threads.
+        /// Effective only for LZW/Deflate-compressed files; uncompressed files are I/O-bound and gain nothing.
+        /// </summary>
+        public int MaxParallelDegree { get; set; } = 1;
+
         public MatrixData<T> Read<T>(string filePath) where T : unmanaged
         {
-            var md = ImageJTiffHandler.Load<T>(filePath, ProgressReporter);
-            return md;
+            if (typeof(T) == typeof(byte) || typeof(T) == typeof(ushort))
+            {
+                var md = ImageJTiffHandler.Load<T>(filePath, ProgressReporter, _ct, MaxParallelDegree);
+                return md;
+            }
+            else
+            {
+                throw new NotSupportedException($"Unsupported pixel type: {typeof(T).Name}. Only byte and ushort are supported.");
+            }
         }
 
         public IMatrixData Read(string path)
         {
-            //needs consideration for data type. Currently, ushot and byte are supported to write.
-            var md = ImageJTiffHandler.Load<ushort>(path, ProgressReporter);
-            return md;
+            string typeName = OmeTiffReader.DetectPixelType(path);
+            if (typeName == "uint16"){
+                return ImageJTiffHandler.Load<ushort>(path, ProgressReporter, _ct, MaxParallelDegree);
+            } 
+            else if (typeName == "uint8")
+            {
+                return ImageJTiffHandler.Load<byte>(path, ProgressReporter, _ct, MaxParallelDegree);
+            }
+            else
+            {
+                throw new NotSupportedException($"Unsupported pixel type detected: {typeName}. Only uint8 and uint16 are supported.");
+            }
         }
 
-        public void Write<T>(string filePath, MatrixData<T> data) where T : unmanaged
+        public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             ImageJTiffHandler.Save(filePath, data, ProgressReporter);
         }

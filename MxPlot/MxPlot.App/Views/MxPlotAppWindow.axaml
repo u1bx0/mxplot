@@ -1,0 +1,485 @@
+﻿<Window xmlns="https://github.com/avaloniaui"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+		xmlns:vm="using:MxPlot.App.ViewModels"
+		xmlns:local="using:MxPlot.App.Views"
+		xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+		xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+		mc:Ignorable="d" d:DesignWidth="350" d:DesignHeight="700"
+		x:Class="MxPlot.App.Views.MxPlotAppWindow"
+		x:DataType="vm:MxPlotAppViewModel"
+		Title="MxPlot"
+		Width="350" Height="700"
+		SystemDecorations="{OnPlatform Default=BorderOnly, macOS=Full}"
+		ExtendClientAreaToDecorationsHint="{OnPlatform Default=False, macOS=True}"
+		ExtendClientAreaChromeHints="{OnPlatform Default=NoChrome, macOS=PreferSystemChrome}"
+		ExtendClientAreaTitleBarHeightHint="{OnPlatform Default=0.0, macOS=-1.0}"
+		Icon="avares://MxPlot/Assets/mxplot_logo_pre.png">
+	<Window.Styles>
+		<Style Selector="MenuItem">
+			<Setter Property="FontSize" Value="12"/>
+			<Setter Property="Padding" Value="10,6"/>
+		</Style>
+		<!-- Details view: reduce default ListBoxItem vertical padding -->
+		<Style Selector="ListBox#WindowList > ListBoxItem">
+			<Setter Property="Padding" Value="8,3"/>
+		</Style>
+		<!-- Icon view: ListBoxItem should not stretch horizontally -->
+		<Style Selector="ListBox#WindowList.IconView > ListBoxItem">
+			<Setter Property="HorizontalContentAlignment" Value="Left"/>
+			<Setter Property="VerticalContentAlignment" Value="Top"/>
+			<Setter Property="Padding" Value="0"/>
+		</Style>
+		<!-- Selection: replace default gray with accent color (padding ring) -->
+		<Style Selector="ListBox#WindowList > ListBoxItem:selected">
+			<Setter Property="Background" Value="{DynamicResource WindowListSelectedBorder}"/>
+		</Style>
+		<Style Selector="ListBox#WindowList > ListBoxItem:selected:pointerover">
+			<Setter Property="Background" Value="{DynamicResource WindowListSelectedBorder}"/>
+		</Style>
+		<Style Selector="ListBox#WindowList > ListBoxItem:selected /template/ ContentPresenter">
+			<Setter Property="Background" Value="{DynamicResource WindowListSelectedBorder}"/>
+		</Style>
+		<Style Selector="ListBox#WindowList > ListBoxItem:selected:pointerover /template/ ContentPresenter">
+			<Setter Property="Background" Value="{DynamicResource WindowListSelectedBorder}"/>
+		</Style>
+	</Window.Styles>
+
+	<Window.Resources>
+		<ResourceDictionary>
+			<ResourceDictionary.ThemeDictionaries>
+				<ResourceDictionary x:Key="Light">
+					<SolidColorBrush x:Key="LoadingOverlayBg" Color="#A0FFFFFF"/>
+					<SolidColorBrush x:Key="LoadingCardBg"    Color="#F5F5F5"/>
+					<x:Double x:Key="SliderHorizontalThumbWidth">14</x:Double>
+					<x:Double x:Key="SliderHorizontalThumbHeight">14</x:Double>
+				</ResourceDictionary>
+				<ResourceDictionary x:Key="Dark">
+					<SolidColorBrush x:Key="LoadingOverlayBg" Color="#A0000000"/>
+					<SolidColorBrush x:Key="LoadingCardBg"    Color="#CC1E1E1E"/>
+					<x:Double x:Key="SliderHorizontalThumbWidth">14</x:Double>
+					<x:Double x:Key="SliderHorizontalThumbHeight">14</x:Double>
+				</ResourceDictionary>
+			</ResourceDictionary.ThemeDictionaries>
+			<!-- Converters -->
+			<local:DepthToMarginConverter x:Key="DepthToMarginConv"/>
+			<!-- ── Details (list) DataTemplate ──────────────────────────────── -->
+			<DataTemplate x:Key="DetailsTemplate" x:DataType="vm:WindowListItemViewModel">
+				<Border CornerRadius="6"
+						Background="{DynamicResource MenuPopupBg}"
+						Padding="6"
+						Margin="{Binding Depth, Converter={StaticResource DepthToMarginConv}}"
+						Opacity="{Binding CardOpacity}">
+					<ToolTip.Tip>
+						<ToolTip>
+							<StackPanel Spacing="2">
+								<TextBlock Text="{Binding ToolTipTitle}" FontWeight="SemiBold"/>
+								<TextBlock Text="{Binding DimensionLine}" FontSize="10" Opacity="0.75"
+										   IsVisible="{Binding DimensionLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+							</StackPanel>
+						</ToolTip>
+					</ToolTip.Tip>
+					<Border.ContextMenu>
+						<ContextMenu>
+							<MenuItem Header="Rename"    Command="{Binding RenameCommand}"/>
+							<MenuItem Header="Duplicate" Command="{Binding DuplicateCommand}"/>
+							<Separator/>
+							<MenuItem Header="Close"   Command="{Binding CloseWindowCommand}"/>
+						</ContextMenu>
+					</Border.ContextMenu>
+					<Grid ColumnDefinitions="52,*">
+						<Border Grid.Column="0" CornerRadius="4" ClipToBounds="True"
+								Width="52" Height="52" Background="#20808080">
+							<Panel>
+								<Image Source="{Binding Thumbnail}"
+									   Stretch="Uniform"
+									   IsVisible="{Binding HasRealThumbnail}"/>
+								<Image Source="{Binding FallbackBitmap}"
+									   Stretch="Uniform"
+									   IsVisible="{Binding ShowFallbackBitmap}"
+									   Opacity="0.85"/>
+								<PathIcon Data="{Binding FallbackIconData}"
+										  Width="28" Height="28"
+										  HorizontalAlignment="Center"
+										  VerticalAlignment="Center"
+										  IsVisible="{Binding ShowFallbackIcon}"
+										  Opacity="0.45"/>
+							</Panel>
+						</Border>
+						<StackPanel Grid.Column="1" Margin="10,0,0,0"
+									VerticalAlignment="Center" Spacing="2">
+							<Panel>
+								<!-- Normal display: 🔗 badge (child only) + filename -->
+								<Grid ColumnDefinitions="Auto,*" IsVisible="{Binding !IsRenaming}">
+									<TextBlock Grid.Column="0"
+											   Text="🔗"
+											   FontSize="11"
+											   FontWeight="SemiBold"
+											   Margin="0,0,4,0"
+											   VerticalAlignment="Center"
+											   Opacity="0.75"
+											   IsVisible="{Binding IsChild}"/>
+									<TextBlock Grid.Column="1"
+											   Text="{Binding FileName}" FontWeight="SemiBold"
+											   FontSize="13" TextTrimming="CharacterEllipsis"
+											   VerticalAlignment="Center"/>
+								</Grid>
+								<!-- Rename mode: inline TextBox -->
+								<TextBox Text="{Binding EditingName, Mode=TwoWay}"
+										 FontWeight="SemiBold" FontSize="13"
+										 IsVisible="{Binding IsRenaming}"
+										 local:FocusHelper.FocusOnVisible="True"
+										 BorderThickness="0,0,0,1"
+										 Padding="1,0" Background="Transparent"
+										 VerticalContentAlignment="Center">
+									<TextBox.KeyBindings>
+										<KeyBinding Gesture="Return" Command="{Binding CommitRenameCommand}"/>
+										<KeyBinding Gesture="Escape" Command="{Binding CancelRenameCommand}"/>
+									</TextBox.KeyBindings>
+								</TextBox>
+							</Panel>
+							<TextBlock Text="{Binding MetaData}" FontSize="11" Opacity="0.55"
+									   TextTrimming="CharacterEllipsis"/>
+							<StackPanel Orientation="Horizontal" Spacing="4">
+								<Border CornerRadius="3" Padding="4,1" Background="#D0D0D0"
+										IsVisible="{Binding IsInMemory}">
+									<TextBlock Text="InMemory" FontSize="9" Foreground="#303030"/>
+								</Border>
+								<Border CornerRadius="3" Padding="4,1" Background="#1E4D7A"
+										IsVisible="{Binding IsVirtualReadOnly}">
+									<TextBlock Text="Virtual" FontSize="9" Foreground="#7EC8FF"/>
+								</Border>
+								<Border CornerRadius="3" Padding="4,1" Background="#7A1E1E"
+										IsVisible="{Binding IsVirtualWritable}">
+									<TextBlock Text="Virtual" FontSize="9" Foreground="#FF7E7E"/>
+								</Border>
+							</StackPanel>
+						</StackPanel>
+					</Grid>
+				</Border>
+			</DataTemplate>
+
+			<!-- ── Icon (grid) DataTemplate ──────────────────────────────────── -->
+			<DataTemplate x:Key="IconTemplate" x:DataType="vm:WindowListItemViewModel">
+				<Border Width="{DynamicResource GridCardOuter}" CornerRadius="6"
+						Background="{DynamicResource MenuPopupBg}"
+						Padding="5" Margin="2"
+						Opacity="{Binding CardOpacity}">
+					<ToolTip.Tip>
+						<ToolTip>
+							<StackPanel Spacing="2">
+								<TextBlock Text="{Binding ToolTipTitle}" FontWeight="SemiBold"/>
+								<TextBlock Text="{Binding DimensionLine}" FontSize="10" Opacity="0.75"
+										   IsVisible="{Binding DimensionLine, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+							</StackPanel>
+						</ToolTip>
+					</ToolTip.Tip>
+					<Border.ContextMenu>
+						<ContextMenu>
+							<MenuItem Header="Rename"    Command="{Binding RenameCommand}"/>
+							<MenuItem Header="Duplicate" Command="{Binding DuplicateCommand}"/>
+							<Separator/>
+							<MenuItem Header="Close"   Command="{Binding CloseWindowCommand}"/>
+						</ContextMenu>
+					</Border.ContextMenu>
+					<StackPanel Spacing="4">
+						<Border CornerRadius="4" ClipToBounds="True"
+								Width="{DynamicResource GridCardThumb}"
+								Height="{DynamicResource GridCardThumb}"
+								HorizontalAlignment="Center"
+								Background="#20808080">
+							<Panel>
+								<Image Source="{Binding Thumbnail}"
+									   Stretch="Uniform"
+									   IsVisible="{Binding HasRealThumbnail}"/>
+								<Image Source="{Binding FallbackBitmap}"
+									   Stretch="Uniform"
+									   IsVisible="{Binding ShowFallbackBitmap}"
+									   Opacity="0.85"/>
+								<PathIcon Data="{Binding FallbackIconData}"
+										  Width="{DynamicResource GridCardIcon}"
+										  Height="{DynamicResource GridCardIcon}"
+										  HorizontalAlignment="Center"
+										  VerticalAlignment="Center"
+										  IsVisible="{Binding ShowFallbackIcon}"
+										  Opacity="0.45"/>
+							</Panel>
+						</Border>
+						<Panel>
+							<TextBlock Text="{Binding FileName}" FontSize="9.5"
+									   TextTrimming="CharacterEllipsis" TextAlignment="Center"
+									   IsVisible="{Binding !IsRenaming}"/>
+							<TextBox Text="{Binding EditingName, Mode=TwoWay}"
+									 FontSize="9.5" TextAlignment="Center"
+									 IsVisible="{Binding IsRenaming}"
+									 local:FocusHelper.FocusOnVisible="True"
+									 BorderThickness="0,0,0,1"
+									 Padding="1,0" Background="Transparent"
+									 VerticalContentAlignment="Center">
+								<TextBox.KeyBindings>
+									<KeyBinding Gesture="Return" Command="{Binding CommitRenameCommand}"/>
+									<KeyBinding Gesture="Escape" Command="{Binding CancelRenameCommand}"/>
+								</TextBox.KeyBindings>
+							</TextBox>
+						</Panel>
+						<TextBlock Text="{Binding DimensionsText}"
+								   FontSize="8" Opacity="0.55"
+								   HorizontalAlignment="Center"
+								   TextTrimming="CharacterEllipsis"
+								   IsVisible="{Binding DimensionsText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+					</StackPanel>
+				</Border>
+			</DataTemplate>
+
+			<!-- ItemsPanelTemplates -->
+			<ItemsPanelTemplate x:Key="DetailsPanel">
+				<VirtualizingStackPanel/>
+			</ItemsPanelTemplate>
+			<ItemsPanelTemplate x:Key="IconsPanel">
+				<WrapPanel Orientation="Horizontal"/>
+			</ItemsPanelTemplate>
+
+			<!-- ── Grid card size resources (updated dynamically by ApplyCardSize) ── -->
+			<x:Double x:Key="GridCardOuter">76</x:Double>
+			<x:Double x:Key="GridCardThumb">62</x:Double>
+			<x:Double x:Key="GridCardIcon">34</x:Double>
+		</ResourceDictionary>
+	</Window.Resources>
+	<Design.DataContext>
+		<vm:MxPlotAppViewModel/>
+	</Design.DataContext>
+
+	<Grid RowDefinitions="Auto, Auto, Auto, *, Auto">
+
+		<!-- Row 0: Title bar (drag to move, minimize, close) -->
+		<Grid Grid.Row="0" ColumnDefinitions="*, Auto, Auto"
+			  Margin="{OnPlatform Default='15,6,8,0', macOS='80,6,8,0'}" Height="28">
+			<Border Name="TopBarDrag" Background="Transparent" Grid.Column="0">
+				<StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
+					<Image Source="avares://MxPlot/Assets/mxplot_logo_pre.png"
+						   Width="16" Height="16" VerticalAlignment="Center"
+						   IsVisible="{OnPlatform Default=True, macOS=False}"/>
+					<TextBlock Text="MxPlot"
+							   FontSize="12" FontWeight="SemiBold"
+							   VerticalAlignment="Center" Opacity="0.75"/>
+				</StackPanel>
+			</Border>
+			<!-- Win32 only: macOS uses native traffic-light buttons instead -->
+			<Button Grid.Column="1" Name="MinimizeBtn"
+					Content="&#x2500;"
+					Width="28" Height="28"
+					Background="Transparent" BorderThickness="0"
+					FontSize="14" VerticalAlignment="Center"
+					ToolTip.Tip="Minimize"
+					IsVisible="{OnPlatform Default=True, macOS=False}"/>
+			<Button Grid.Column="2" Name="CloseBtn"
+					Content="&#x2715;"
+					Width="28" Height="28"
+					Background="Transparent" BorderThickness="0"
+					FontSize="11" VerticalAlignment="Center"
+					ToolTip.Tip="Close"
+					IsVisible="{OnPlatform Default=True, macOS=False}"/>
+		</Grid>
+
+		<!-- Row 1: Hamburger menu bar + view toggle -->
+		<Grid Grid.Row="1" Margin="8,4,8,2" ColumnDefinitions="Auto, *, Auto, Auto">
+			<Button Grid.Column="0" Name="HamburgerBtn"
+					Width="30" Height="28"
+					Background="Transparent" BorderThickness="0"
+					Padding="0">
+				<TextBlock Text="&#x2630;"
+						   FontSize="16"
+						   HorizontalAlignment="Center"
+						   VerticalAlignment="Center"/>
+				<Button.Flyout>
+					<MenuFlyout Placement="BottomEdgeAlignedLeft">
+						<MenuItem Header="Open File…"  Click="HamburgerOpenFile_Click" />
+						<Separator/>
+						<MenuItem Header="Tools">
+							<MenuItem Header="Sample 2D data…" Click="ToolsGenerate2DTestData_Click"
+									  ToolTip.Tip="Creates a sample 2D dataset and opens it."/>
+							<MenuItem Header="Sample Julia Set…" Click="ToolsGenerateJulia_Click"
+									  ToolTip.Tip="Creates 8 Julia set frames (800×800, float) sweeping through classic c values."/>
+							<MenuItem Header="Sample Hyperstack…" Click="ToolsGenerateHyperstack_Click"
+									  ToolTip.Tip="Creates a sample C=3 / Z=10 / T=5 float hyperstack (256×256) and opens it."/>
+						</MenuItem>
+						<Separator/>
+						<MenuItem Header="About"       Click="HamburgerAbout_Click"/>
+						<Separator/>
+						<MenuItem Header="Exit"        Click="HamburgerExit_Click"/>
+					</MenuFlyout>
+				</Button.Flyout>
+			</Button>
+
+			<!-- Column 1: spacer -->
+			<!-- Details view toggle: [□]── × 3 rows (thumbnail + title metaphor) -->
+			<Button Grid.Column="2" Name="ViewDetailsBtn"
+					Width="28" Height="28"
+					Background="Transparent" BorderThickness="0"
+					VerticalAlignment="Center"
+					ToolTip.Tip="Details view"
+					Opacity="1.0">
+				<PathIcon Data="M0,0 H3.5 V3.5 H0 Z M5,1 H14 V2.5 H5 Z
+				M0,5 H3.5 V8.5 H0 Z M5,6 H14 V7.5 H5 Z
+				M0,10 H3.5 V13.5 H0 Z M5,11 H14 V12.5 H5 Z"
+				Width="14" Height="14"/>
+			</Button>
+			<!-- Icons view toggle: 2×2 grid of squares (filled) -->
+			<Button Grid.Column="3" Name="ViewIconsBtn"
+					Width="28" Height="28"
+					Background="Transparent" BorderThickness="0"
+					VerticalAlignment="Center"
+					ToolTip.Tip="Icon view"
+					Opacity="0.35">
+				<PathIcon Data="M0,0 H6 V6 H0 Z M8,0 H14 V6 H8 Z M0,8 H6 V14 H0 Z M8,8 H14 V14 H8 Z"
+						  Width="14" Height="14"/>
+			</Button>
+		</Grid>
+
+		<!-- Row 2: Card size slider (icon view only) -->
+		<Border Grid.Row="2"
+				IsVisible="{Binding IsIconView}"
+				Padding="12,0,12,0"
+				Height="15"
+				Margin="0,1,0,0">
+			<DockPanel>
+				<TextBlock DockPanel.Dock="Left"
+						   Text="Thumbnail size" FontSize="11" Opacity="0.65"
+						   VerticalAlignment="Center" Margin="0,0,8,0"/>
+				<Slider Name="CardSizeSlider"
+						Minimum="0" Maximum="6"
+						Value="2"
+						TickFrequency="1"
+						IsSnapToTickEnabled="True"
+						VerticalAlignment="Center"
+						Height="45"
+						ToolTip.Tip="Card size"/>
+			</DockPanel>
+		</Border>
+
+		<!-- Row 3: Window List (also drag-drop target) -->
+		<Border Grid.Row="3" Background="Transparent"
+				BorderThickness="0,1,0,1"
+				Margin="0,8,0,8"
+				BorderBrush="{DynamicResource ListPanelBorderColor}"
+				>
+
+			<Panel Margin="8,0,8,6" Name="ListPanel">
+				<ListBox Name="WindowList"
+						 ItemsSource="{Binding ManagedWindows}"
+						 ItemTemplate="{StaticResource DetailsTemplate}"
+						 SelectionMode="Multiple"
+						 Background="Transparent"
+						 BorderThickness="0">
+				</ListBox>
+
+				<!-- Empty-state hint -->
+				<StackPanel IsVisible="{Binding HasNoWindows}"
+							VerticalAlignment="Center"
+							HorizontalAlignment="Center"
+							Spacing="6"
+							Margin="24,0">
+					<!-- Subtle branding mark -->
+					<StackPanel Orientation="Horizontal" HorizontalAlignment="Center"
+								Spacing="6" Margin="0,0,0,10" Opacity="0.18">
+						<Image Source="avares://MxPlot/Assets/mxplot_logo_pre.png"
+							   Width="28" Height="28" VerticalAlignment="Center"/>
+						<TextBlock Text="MxPlot" FontSize="22" FontWeight="Light"
+								   VerticalAlignment="Center"/>
+					</StackPanel>
+					<TextBlock Text="Drop files here"
+							   FontSize="15"
+							   FontWeight="SemiBold"
+							   HorizontalAlignment="Center"
+							   Opacity="0.75"/>
+					<TextBlock Text="or open a file from the menu (&#x2630; )"
+							   FontSize="12"
+							   HorizontalAlignment="Center"
+							   Opacity="0.75"/>
+					<TextBlock Text="Supported formats"
+							   FontSize="12"
+							   FontWeight="SemiBold"
+							   HorizontalAlignment="Center"
+							   Opacity="0.5"
+							   Margin="0,10,0,2"/>
+					<TextBlock Text="{Binding SupportedFormatsText}"
+							   FontSize="10"
+							   HorizontalAlignment="Center"
+							   Opacity="0.5"
+							   TextWrapping="Wrap"
+							   TextAlignment="Center"/>
+				</StackPanel>
+			</Panel>
+		</Border>
+
+		<!-- Row 4: Action Bar -->
+		<UniformGrid Grid.Row="4" Columns="3" Margin="8,2,8,8">
+			<Button Content="Tile"
+					Command="{Binding TileWindowsCommand}"
+					IsEnabled="{Binding HasMultiSelection}"
+					HorizontalAlignment="Stretch"
+					HorizontalContentAlignment="Center"
+					Margin="0,0,3,0"/>
+			<Button Content="Sync"
+					Name="SyncBtn"
+					IsEnabled="{Binding HasMultiSelection}"
+					HorizontalAlignment="Stretch"
+					HorizontalContentAlignment="Center"
+					Margin="3,0,3,0"/>
+			<Button Content="Close"
+					Command="{Binding CloseSelectedWindowsCommand}"
+					IsEnabled="{Binding HasSelection}"
+					HorizontalAlignment="Stretch"
+					HorizontalContentAlignment="Center"
+					Margin="3,0,0,0"/>
+		</UniformGrid>
+
+		<!-- Loading overlay: covers menu bar + list + action bar while a file is reading -->
+		<Panel Grid.Row="1" Grid.RowSpan="4"
+			   IsVisible="{Binding IsLoading}"
+			   Background="{DynamicResource LoadingOverlayBg}">
+			<Border Background="{DynamicResource LoadingCardBg}" CornerRadius="8"
+					Padding="20,14" HorizontalAlignment="Center" VerticalAlignment="Center"
+					MinWidth="200">
+				<StackPanel Spacing="10">
+					<TextBlock Text="{Binding LoadingMessage}"
+							   FontSize="11" HorizontalAlignment="Center"/>
+					<ProgressBar IsIndeterminate="{Binding IsLoadingIndeterminate}"
+								 Maximum="{Binding LoadingTotal}"
+								 Value="{Binding LoadingProgress}"
+								 Height="3" Width="160"/>
+					<Button Content="Cancel"
+							Command="{Binding CancelLoadingCommand}"
+							IsVisible="{Binding IsCancelVisible}"
+							HorizontalContentAlignment="Center"
+							HorizontalAlignment="Center" Width="72" FontSize="11"/>
+				</StackPanel>
+			</Border>
+		</Panel>
+
+		<!-- Toast notification: fades in/holds/fades out at bottom; never blocks interaction -->
+		<Border Name="ToastPanel"
+				Grid.Row="1" Grid.RowSpan="4"
+				IsHitTestVisible="False"
+				VerticalAlignment="Bottom"
+				HorizontalAlignment="Center"
+				Margin="0,0,0,50"
+				Opacity="0"
+				CornerRadius="10"
+				Background="#D8181818"
+				BoxShadow="0 2 10 0 #60000000"
+				Padding="16,9">
+			<StackPanel Orientation="Horizontal" Spacing="9">
+				<TextBlock Text="&#x2713;"
+						   FontSize="13"
+						   Foreground="#72D060"
+						   VerticalAlignment="Center"/>
+				<TextBlock Name="ToastText"
+						   FontSize="12"
+						   Foreground="#F0F0F0"
+						   VerticalAlignment="Center"/>
+			</StackPanel>
+		</Border>
+
+	</Grid>
+</Window>
+

@@ -1,0 +1,63 @@
+﻿-------------------------------------------------------------------------
+THIRD-PARTY SOFTWARE NOTICES
+-------------------------------------------------------------------------
+
+This library (MxPlot.UI.Avalonia) incorporates and uses the following third-party
+software. We are grateful to the authors and contributors of these projects
+for their open-source contributions.
+
+-------------------------------------------------------------------------
+1. Avalonia UI and related packages
+-------------------------------------------------------------------------
+Components: Avalonia; Avalonia.Fonts.Inter; Avalonia.Themes.Fluent; (versions: 11.3.11)
+License: MIT License
+Copyright: Copyright (c) AvaloniaUI OÜ. All rights reserved.
+
+-------------------------------------------------------------------------
+2. CommunityToolkit.Mvvm
+-------------------------------------------------------------------------
+License: MIT License
+Copyright: Copyright (c) .NET Foundation and Contributors.
+
+-------------------------------------------------------------------------
+3. .NET Runtime and Libraries (note)
+-------------------------------------------------------------------------
+This library depends on the .NET runtime and standard libraries (System.*,
+Microsoft.* and related packages). Licenses for those components are provided
+by Microsoft with the runtime distribution. Please refer to the runtime
+distribution or Microsoft documentation for the exact license terms.
+
+-------------------------------------------------------------------------
+LICENSE TEXT (THE MIT LICENSE)
+-------------------------------------------------------------------------
+The following license applies to the software components listed above as "MIT License":
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------
+Notes and distribution guidance
+-------------------------------------------------------------------------
+- The above list reflects the packages detected by `dotnet-project-licenses`.
+- If you later add or bundle other packages (for example SkiaSharp or native Skia
+  binaries), include their license texts and copyright notices as required.
+- If your NuGet package or distribution **bundles native binaries** (e.g. native
+  Skia .dll/.so/.dylib), you must include the native component's license (for
+  Skia: BSD-3-Clause style) in addition to SkiaSharp's MIT notice.
+- Before publishing a NuGet package, verify the actual files included in the
+  package and ensure all required license texts are present.

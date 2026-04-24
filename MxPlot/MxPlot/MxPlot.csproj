@@ -4,6 +4,7 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<PackageIcon>mxplot_logo_pre.png</PackageIcon>
+		<Platforms>AnyCPU</Platforms>
 		
 	</PropertyGroup>
 	
@@ -15,6 +16,7 @@
 		<ProjectReference Include="..\MxPlot.Extensions.Hdf5\MxPlot.Extensions.Hdf5.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Images\MxPlot.Extensions.Images.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Tiff\MxPlot.Extensions.Tiff.csproj" />
+		<ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
 	</ItemGroup>
 
 </Project>

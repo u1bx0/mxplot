@@ -25,99 +25,6 @@ namespace MxPlot.Core
     {
 
         /// <summary>
-        /// A stateful container that manages statistical cache via shared list instances.
-        /// </summary>
-        /// <remarks>
-        /// The essential point of this class is that it holds references to <see cref="List{Double}"/> 
-        /// instances rather than cloning their values. When multiple <see cref="ValueRange"/> 
-        /// instances share the same list references, calling <see cref="Invalidate"/> (which clears the lists) 
-        /// synchronizes the invalidation state across all associated objects.
-        /// </remarks>
-        internal class ValueRange
-        {
-            /// <summary> Gets the list of minimum values for each value mode. </summary>
-            public List<double> MinValues { get; } = [];
-
-            /// <summary> Gets the list of maximum values for each value mode. </summary>
-            public List<double> MaxValues { get; } = [];
-
-            /// <summary>
-            /// Gets a value indicating whether the current statistics are valid (calculated).
-            /// </summary>
-            public bool IsValid => MinValues.Count > 0;
-
-            /// <summary>
-            /// Clears the cached statistics and marks the state as invalid (<see cref="IsValid"/> = false).
-            /// </summary>
-            public void Invalidate() {MinValues.Clear(); MaxValues.Clear(); }   
-            public ValueRange() { }
-
-            /// <summary>
-            /// Initializes a new instance of the <see cref="ValueRange"/> class 
-            /// by wrapping existing list instances to enable shared synchronization.
-            /// </summary>
-            /// <param name="minValues">The shared list instance for minimum values.</param>
-            /// <param name="maxValues">The shared list instance for maximum values.</param>
-            public ValueRange(List<double> minValues, List<double> maxValues)
-            {
-                // Critical Logic: Capture the references of the lists to maintain 
-                // synchronization across different ValueRange containers.
-                MinValues = minValues;
-                MaxValues = maxValues;
-            }
-
-            public void Set(IEnumerable<double> minValues, IEnumerable<double> maxValues)
-            {
-                MinValues.Clear();
-                MaxValues.Clear();
-                using (var minEnum = minValues.GetEnumerator())
-                using (var maxEnum = maxValues.GetEnumerator())
-                {
-                    while (true)
-                    {
-                        bool hasMin = minEnum.MoveNext();
-                        bool hasMax = maxEnum.MoveNext();
-                        if (hasMin != hasMax)
-                        {
-                            throw new ArgumentException("Enumerables must have the same number of elements.");
-                        }
-                        if (!hasMin) break; // No elements anymore
-                        MinValues.Add(minEnum.Current);
-                        MaxValues.Add(maxEnum.Current);
-                    }
-                }
-            }
-        }
-
-        /// <summary>
-        /// Provider delegate for min and max arraies for the specified array
-        /// </summary>
-        /// <param name="array"></param>
-        /// <returns></returns>
-        public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
-
-        /// <summary>
-        /// Holds the currently registered default instance of the MinMaxFinder, or null if no default is set.
-        /// </summary>
-        private static MinMaxFinder? _registeredDefaultFinder;
-
-        /// <summary>
-        /// Initializes static members of the MatrixData class and registers the default MinMaxFinder for common types.
-        /// </summary>
-        static MatrixData()
-        {
-            _registeredDefaultFinder = CreateBuiltInMinMaxFinder();
-        }
-
-        /// <summary>
-        /// Indicates whether the type parameter T is a supported primitive type within the MatrixData framework.
-        /// </summary>
-        /// <remarks>This field is used to determine if operations involving the type T can be performed,
-        /// based on its inclusion in the supported primitive types list.</remarks>
-        private static readonly bool _isSupportedPrimitive =
-                MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
-
-        /// <summary>
         /// Number of elements in x direction: immutable parameter for MatrixData instance
         /// </summary>
         protected readonly int _xcount;
@@ -138,13 +45,13 @@ namespace MxPlot.Core
         /// <summary>
         /// Array list of actual data arrays: corresponds to frames
         /// </summary>
-        private readonly List<T[]> _arrayList = [];
+        private readonly IList<T[]> _arrayList;
 
         /// <summary>
         /// A map that associates an array reference with its corresponding <see cref="ValueRange"/> statistics.
         /// </summary>
-        private readonly Dictionary<T[], ValueRange> _valueRangeMap = new Dictionary<T[], ValueRange>(); 
-
+        private readonly Dictionary<T[], ValueRange> _valueRangeMap = new Dictionary<T[], ValueRange>();
+        
         /// <summary>
         /// MinMaxFinder for this type. May be null for custom structs until registered.
         /// </summary>
@@ -156,6 +63,27 @@ namespace MxPlot.Core
         private int _activeIndex = 0;
 
         /// <summary>
+        /// Initializes static members of the MatrixData class and registers the default MinMaxFinder for common types.
+        /// </summary>
+        static MatrixData()
+        {
+            _registeredDefaultFinder = CreateBuiltInMinMaxFinder();
+        }
+
+        /// <summary>
+        /// Holds the currently registered default instance of the MinMaxFinder, or null if no default is set.
+        /// </summary>
+        private static MinMaxFinder? _registeredDefaultFinder;
+
+        /// <summary>
+        /// Indicates whether the type parameter T is a supported primitive type within the MatrixData framework.
+        /// </summary>
+        /// <remarks>This field is used to determine if operations involving the type T can be performed,
+        /// based on its inclusion in the supported primitive types list.</remarks>
+        private static readonly bool _isSupportedPrimitive =
+                MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
+
+        /// <summary>
         /// Delegate to convert T to double
         /// </summary>
         private static readonly Func<T, double> _toDouble = CreateConverter();
@@ -165,6 +93,34 @@ namespace MxPlot.Core
         /// </summary>
         private static readonly Func<double, T> _fromDouble = CreateReverseConverter();
 
+        private static readonly Type _valueType = typeof(T);
+
+        private static readonly string _valueTyepName = default(T) switch
+        {
+            byte => "byte",
+            sbyte => "sbyte",
+            short => "short",
+            ushort => "ushort",
+            int => "int",
+            uint => "uint",
+            long => "long",
+            ulong => "ulong",
+            float => "float",
+            double => "double",
+            decimal => "decimal",
+            Complex => "Complex",
+            _ => typeof(T).Name
+        };
+
+        private static readonly int _elementSize = Unsafe.SizeOf<T>();
+
+        /// <summary>
+        /// Provider delegate for min and max arraies for the specified array
+        /// </summary>
+        /// <param name="array"></param>
+        /// <returns></returns>
+        public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
+
         // Events
         public event EventHandler? ScaleChanged;
         public event EventHandler? FrameAxisChanged;
@@ -172,6 +128,22 @@ namespace MxPlot.Core
         public event EventHandler? UnitChanged;
 
         // Properties
+        /// <summary>
+        /// 
+        /// </summary>
+        public bool IsVirtual => _arrayList is IVirtualFrameList;
+
+        /// <inheritdoc/>
+        public bool IsWritable => !_arrayList.IsReadOnly;
+
+        protected delegate T[] InternalArrayProvider(int frameIndex, bool needsInvalidate);
+
+        /// <summary>
+        /// Gets the internal array provider to obtain T[] with parameters (int frameIndex, bool needsInvalidate), used to manage array data for this instance.
+        /// </summary>
+        /// <remarks>This property is intended for advanced scenarios where direct access to the
+        /// underlying array management system is required. The appropriate provider is set at the constructor.</remarks>
+        protected InternalArrayProvider GetInternalArray { get; }
 
         public double XMax { get => _xmax; set { if (_xmax != value) { _xmax = value; UpdateScale(); } } }
         public double XMin { get => _xmin; set { if (_xmin != value) { _xmin = value; UpdateScale(); } } }
@@ -213,7 +185,49 @@ namespace MxPlot.Core
 
         public IReadOnlyList<Axis> Axes => Dimensions.Axes;
 
-        public Type ValueType => typeof(T);
+        /// <summary>
+        /// Gets the type of the value represented by this instance.
+        /// </summary>
+        public Type ValueType => _valueType;
+
+        public string ValueTypeName => _valueTyepName;
+
+        public int ElementSize => _elementSize;
+
+        /// <summary>
+        /// Gets whether this MatrixData instance requires explicit disposal to release resources. 
+        /// Default: false (does not require disposal) when using in-memory arrays. 
+        /// This is true if the underlying data storage is a VirtualFrameList with its ownership.
+        /// </summary>
+        public bool RequiresDisposal { get; private set; } = false;
+
+        public ICacheStrategy? CacheStrategy
+        {
+            get
+            {
+                if(_arrayList is IVirtualFrameList virtualList)
+                {
+                    return virtualList.CacheStrategy;
+                }
+                return null;
+            }
+            set
+            {
+                if(value != null &&_arrayList is IVirtualFrameList virtualList)
+                {
+                    virtualList.CacheStrategy = value;
+                }
+            }
+        }
+
+        public IVirtualFrameList? GetDiagnosticVirtualList()
+        {
+            if(IsVirtual)
+                return _arrayList as IVirtualFrameList;
+            else
+                return null;
+        }
+
 
         /// <summary>
         /// Registers the specified MinMaxFinder instance as the default implementation to use for min/max operations.
@@ -226,8 +240,6 @@ namespace MxPlot.Core
         {
             _registeredDefaultFinder = finder;
         }
-
-       
 
         // Type conversion methods
         private static Func<T, double> CreateConverter()
@@ -280,6 +292,9 @@ namespace MxPlot.Core
 
         protected virtual double ToDoubleFrom(T v) => _toDouble(v);
         protected virtual T ToValueTypeFrom(double v) => _fromDouble(v);
+
+        internal static Func<T, double> ToDoubleConverter => _toDouble;
+        internal static Func<double, T> FromDoubleConverter => _fromDouble;
 
         /// <summary>
         /// Check the dimension of the plane. If the size is invalid, throw ArgumentException.
@@ -374,7 +389,7 @@ namespace MxPlot.Core
             int ix = (int)Math.Round((x - XMin) / XStep);
 
             // Range check
-            if ((ix < 0 || ix >= YCount) && !extendRange)
+            if ((ix < 0 || ix >= XCount) && !extendRange)
             {
                 // Throw exception if not allowed
                 throw new IndexOutOfRangeException($"x={x}, ix={ix}, XCount={_xcount}");
@@ -413,7 +428,9 @@ namespace MxPlot.Core
                 if (Dimensions.AxisCount == 1)
                     return new VolumeAccessor<T>(_arrayList, GetScale(), Dimensions[0]);
                 else
+                {
                     throw new InvalidOperationException($"Axis must be specified to create VolumeAccessor for muti-axis data");
+                }
             }
             else
             {
@@ -426,8 +443,114 @@ namespace MxPlot.Core
             }
         }
 
+        /// <summary>
+        /// Creates a new <see cref="MatrixData{T}"/> instance with frames rearranged according to the specified order.
+        /// The order list does not require the complete set of the original frames; it can extract a subset,
+        /// reverse, or repeat frames as needed. Dimension information is removed from the result.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Shallow copy (default):</b> The returned instance shares the same underlying <c>T[]</c> 
+        /// frame buffers and <see cref="ValueRange"/> <c>List&lt;double&gt;</c> references with the original.
+        /// This means:</para>
+        /// <list type="bullet">
+        ///   <item>Mutations to pixel data are immediately visible across all instances sharing the same <c>T[]</c>.</item>
+        ///   <item>Calling <see cref="Invalidate(int)"/> on any instance that shares the same <c>T[]</c> key 
+        ///         propagates to all others via the shared <c>List&lt;double&gt;</c> reference 
+        ///         (see <see cref="ValueRange"/> design).</item>
+        ///   <item>For virtual (MMF-backed) data, a <see cref="RoutedFrames{T}"/> wrapper is used to
+        ///         route logical indices to physical frames in the underlying <c>IFrameKeyProvider&lt;T&gt;</c>.</item>
+        /// </list>
+        /// <para><b>Deep copy:</b> All frame buffers are duplicated. The result is fully independent;
+        /// no data or cache state is shared with the original.</para>
+        /// <para><b>Metadata</b> is <b>not</b> copied to the new instance.</para>
+        /// </remarks>
+        /// <param name="order">
+        /// A list of zero-based frame indices specifying the desired order. 
+        /// May contain duplicates (to alias frames) or a subset of the original indices.
+        /// </param>
+        /// <param name="deepCopy">
+        /// <c>true</c> to allocate independent copies of all frame arrays;
+        /// <c>false</c> (default) to share frame references and ValueRange cache.
+        /// </param>
+        /// <returns>A new <see cref="MatrixData{T}"/> with frames arranged per <paramref name="order"/>.</returns>
+        /// <exception cref="ArgumentException">
+        /// Thrown if <paramref name="order"/> is empty or contains indices outside <c>[0, FrameCount)</c>.
+        /// </exception>
+        public MatrixData<T> Reorder(List<int> order, bool deepCopy = false)
+        {
+            int num = order.Count;
+            if (num == 0)
+                throw new ArgumentException("order list cannot be empty."); 
+            int max = order.Max();
+            int min = order.Min();
+            if (max >= FrameCount || min < 0)
+                throw new ArgumentException($"invalid order: min = {min}, max = {max}, count = {num}");
 
+            IList<T[]> newArrays;
+            var vminList = new List<List<double>>();
+            var vmaxList = new List<List<double>>();
+
+            if(deepCopy)
+            {
+                var arrays = new List<T[]>();
+                foreach (int index in order)
+                {
+                    var srcSpan = AsSpan(index);
+                    var dst = new T[srcSpan.Length];
+                    srcSpan.CopyTo(dst);
+                    arrays.Add(dst);
+                    //For deep copy, min/max value list is  not provided.
+                    vminList.Add(new List<double>());
+                    vmaxList.Add(new List<double>());
+                }
+                newArrays = arrays;
+            }
+            else //Shallow copy
+            {
+                if(_arrayList is IFrameKeyProvider<T> fkp)
+                {
+                    newArrays = new RoutedFrames<T>(_arrayList, order);
+                }
+                else //InMemory: _arrayList is List<T[]>
+                {
+                    var arrays = new List<T[]>();
+                    foreach (int index in order)
+                    {
+                        arrays.Add(_arrayList[index]);
+                    }
+                    newArrays = arrays;
+                }
+                foreach (int index in order)
+                {
+                    var (vmins, vmaxs) = GetValueRangeList(index, true);
+                    vminList.Add(vmins);
+                    vmaxList.Add(vmaxs);
+                }
+            }
+
+            var md = new MatrixData<T>(GetScale(), newArrays, vminList, vmaxList);
+            md.XUnit = XUnit;
+            md.YUnit = YUnit;
+
+            return md;
+        }
+
+        /// <summary>
+        /// Creates a deep copy of this <see cref="MatrixData{T}"/>.
+        /// <para>When the source is virtual (MMF-backed), the clone is also virtual — frame data is
+        /// streamed to a temporary .mxd file one frame at a time, keeping peak memory proportional
+        /// to a single frame regardless of total dataset size.</para>
+        /// <para>When the source is in-memory, a conventional in-memory deep copy is returned.</para>
+        /// </summary>
         public object Clone()
+        {
+            if (IsVirtual)
+                return CloneAsVirtual();
+            else
+                return CloneInMemory();
+        }
+
+        private MatrixData<T> CloneInMemory()
         {
             var clone = new MatrixData<T>(_xcount, _ycount, FrameCount);
             clone.SetXYScale(_xmin, _xmax, _ymin, _ymax);
@@ -443,16 +566,38 @@ namespace MxPlot.Core
             {
                 List<double>? minValueList = null;
                 List<double>? maxValueList = null;
-                if(_valueRangeMap.TryGetValue(_arrayList[i], out var range))
+                if(_valueRangeMap.TryGetValue(GetFrameKey(i), out var range))
                 {
                     minValueList = range.MinValues;
                     maxValueList = range.MaxValues;
                 }
-                var srcArray = GetArray(i);
-                var dstArray = new T[srcArray.Length];
-                srcArray.AsSpan().CopyTo(dstArray);
+                var srcSpan = AsSpan(i);
+                var dstArray = new T[srcSpan.Length];
+                srcSpan.CopyTo(dstArray);
                 clone.SetArray(dstArray, i, minValueList?.ToArray(), maxValueList?.ToArray());
             }
+
+            return clone;
+        }
+
+        private MatrixData<T> CloneAsVirtual()
+        {
+            var wvsf = IO.MatrixDataSerializer.CreateTempVessel<T>(_xcount, _ycount, FrameCount);
+
+            for (int i = 0; i < FrameCount; i++)
+            {
+                T[] src = GetInternalArray(i, needsInvalidate: false);
+                wvsf.WriteDirectly(i, src);
+            }
+            wvsf.Flush();
+            
+            var clone = CreateAsVirtualFrames(_xcount, _ycount, wvsf);
+            clone.SetXYScale(_xmin, _xmax, _ymin, _ymax);
+            clone.XUnit = XUnit;
+            clone.YUnit = YUnit;
+            clone.DefineDimensions(Axis.CreateFrom(Dimensions.Axes.ToArray()));
+            foreach (var key in Metadata.Keys)
+                clone.Metadata[key] = Metadata[key];
 
             return clone;
         }
@@ -462,52 +607,125 @@ namespace MxPlot.Core
             return $"MatrixData<{typeof(T).Name}>: XCount={XCount}, YCount={YCount}, FrameCount={FrameCount}";
         }
 
-        #region I/O methods using IMatrixDataIO (IMatrixDataReader/IMatrixDataWriter)
+        public void Flush()
+        {
+            if (_arrayList is IWritableFrameProvider<T> virtualList)
+            {
+                virtualList.Flush();
+            }
+        }
+
+        #region I/O methods and create virtual frames using IMatrixDataIO (IMatrixDataReader/IMatrixDataWriter/IVirtualFrameBuilder)
         /// <summary>
-        /// Loads matrix data from a file with a specified reader.
-        /// <para>Example: <c>var data = MatrixData.Load("file.mxd", new MxBinaryFormat());</c></para>
+        /// Loads matrix data from a file using the specified reader.
         /// </summary>
-        /// <param name="filePath"></param>
-        /// <param name="reader"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentNullException"></exception>
-        public static MatrixData<T> Load(string filePath, IMatrixDataReader reader) 
+        /// <param name="filePath">The path to the file to load.</param>
+        /// <param name="reader">The reader implementation responsible for parsing the file format.</param>
+        /// <returns>A new <see cref="MatrixData{T}"/> instance containing the loaded data.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="reader"/> is null.</exception>
+        /// <example>
+        /// <code>
+        /// var data = MatrixData&lt;float&gt;.Load("file.mxd", new MxBinaryFormat());
+        /// </code>
+        /// </example>
+        public static MatrixData<T> Load(string filePath, IMatrixDataReader reader)
         {
             if (reader == null) throw new ArgumentNullException(nameof(reader));
             return reader.Read<T>(filePath);
         }
 
-
         /// <summary>
-        /// Saves the matrix data to a file using the specified writer. 
-        /// <para>Example: <c>data.Save("file.csv", new CsvFormat());</c></para>
+        /// Saves the current matrix data to a file using the specified writer. 
         /// </summary>
-        /// <param name="filePath">The destination file path.</param>
-        /// <param name="writer">The format writer implementation (e.g., CsvFormat, MxBinaryFormat).</param>
+        /// <param name="filePath">The destination file path where the data will be saved.</param>
+        /// <param name="writer">The writer implementation responsible for formatting and writing the data.</param>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="writer"/> is null.</exception>
         /// <example>
         /// <code>
         /// var csv = new CsvFormat { Separator = "," };
-        /// matrix.Save("output.csv", csv);
+        /// matrix.SaveAs("output.csv", csv);
         /// </code>
         /// </example>
-        public void Save(string filePath, IMatrixDataWriter writer)
+        public void SaveAs(string filePath, IMatrixDataWriter writer)
         {
             if (writer == null) throw new ArgumentNullException(nameof(writer));
-            writer.Write(filePath, this);
+
+            // Guard: prevent overwriting the active backing file of read-only virtual data.
+            // Writers typically open the destination in truncate mode, which would destroy
+            // the MMF-backed source mid-read and corrupt the data irreversibly.
+            if (_arrayList is IVirtualFrameList vfl && !IsWritable)
+            {
+                string dest = Path.GetFullPath(filePath);
+                string src = Path.GetFullPath(vfl.FilePath);
+                if (string.Equals(dest, src, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException(
+                        $"Cannot save to '{Path.GetFileName(filePath)}' because it is the active backing file " +
+                        $"for this read-only virtual data. Choose a different destination.");
+            }
+
+            var accessor = new BackendAccessor(_arrayList);
+            writer.Write(filePath, this, accessor);
         }
+
+        /// <summary>
+        /// Internal class acting as an adapter to provide access to the underlying frame data for I/O operations.
+        /// </summary>
+        private class BackendAccessor: IBackendAccessor {
+            private readonly object _backingStore;
+            public BackendAccessor(object backingStore)
+            {
+                _backingStore = backingStore;
+            }
+            public bool TryGet<TBackend>(out TBackend? backend) where TBackend : class
+            {
+                //If the backing store matches the requested type, return it; otherwise, return null.
+                //This allows writers to access specific implementations if available.
+                if (_backingStore is TBackend match)
+                {
+                    backend = match;
+                    return true;
+                }
+                backend = null;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Creates a new, writable <see cref="MatrixData{T}"/> backed by virtual storage (e.g., a memory-mapped file) 
+        /// using the specified builder.
+        /// </summary>
+        /// <param name="filePath">
+        /// The explicit file path for the underlying virtual storage. 
+        /// If <see langword="null"/>, the builder is responsible for creating and managing a temporary file.
+        /// </param>
+        /// <param name="builder">The builder implementation that defines the structure and allocates the virtual frames.</param>
+        /// <returns>A newly constructed <see cref="MatrixData{T}"/> instance bound to the virtual storage.</returns>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="builder"/> is null.</exception>
+        /// <example>
+        /// <code>
+        /// var builder = OmeTiffFormat.AsVirtualBuilder(spec);
+        /// var data = MatrixData&lt;ushort&gt;.CreateVirtual(null, builder);
+        /// </code>
+        /// </example>
+        public static MatrixData<T> CreateVirtual(string? filePath, IVirtualFrameBuilder builder)
+        {
+            if (builder == null) throw new ArgumentNullException(nameof(builder));
+            return builder.CreateWritable<T>(filePath);
+        }
+
         #endregion
 
 
-        public IMatrixData Apply(IOperation operation)
+
+        public TResult Apply<TResult>(IOperation<TResult> operation)
         {
-            if (operation == null) 
-                throw new ArgumentNullException(nameof(operation));
+            if (operation == null) throw new ArgumentNullException(nameof(operation));
 
             return operation switch
             {
-                IMatrixDataOperation mdOp => mdOp.Execute(this),
-                IVolumeOperation volOp => volOp.Execute(AsVolume(volOp.AxisName, volOp.BaseIndices)),
-                _ => throw new NotSupportedException($"Unsupported operation type: {operation.GetType().Name}")
+                IMatrixDataOperation matOp => (TResult)matOp.Execute(this), 
+                IVolumeOperation<TResult> volOp => volOp.Execute(AsVolume(volOp.AxisName, volOp.BaseIndices)),
+                _ => throw new NotSupportedException($"Unsupported operation: {operation.GetType().Name}")
             };
         }
 

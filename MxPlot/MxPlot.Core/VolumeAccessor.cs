@@ -1,10 +1,13 @@
-﻿using MxPlot.Core.Processing;
+﻿//#define VA_DEBUG
+using MxPlot.Core.Processing;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Timers;
 
 namespace MxPlot.Core
 {
@@ -44,14 +47,14 @@ namespace MxPlot.Core
     public readonly unsafe struct VolumeAccessor<T> 
         where T : unmanaged
     {
-        internal readonly List<T[]> _frames;
+        internal readonly IList<T[]> _frames;
         internal readonly int _width;
         internal readonly int _height;
         internal readonly int _depth;
         internal readonly Scale2D _scale;
         internal readonly Axis _axis;
 
-        internal VolumeAccessor(List<T[]> frames, Scale2D scale, Axis axis)
+        internal VolumeAccessor(IList<T[]> frames, Scale2D scale, Axis axis)
         {
             _frames = frames;
             _width = scale.XCount;
@@ -119,7 +122,7 @@ namespace MxPlot.Core
         /// <exception cref="ArgumentException">Thrown when the specified axis is not a valid value of the ViewFrom enumeration.</exception>
         public MatrixData<T> SliceAt(ViewFrom axis, int index)
         {
-            // 境界チェック (indexが範囲外なら即例外)
+            
             int maxLimit = (axis == ViewFrom.X) ? _width : _height;
             if (index < 0 || index >= maxLimit)
                 throw new ArgumentOutOfRangeException(nameof(index), index, $"Index must be between 0 and {maxLimit - 1}");
@@ -133,6 +136,233 @@ namespace MxPlot.Core
                 _ => throw new ArgumentException()
             };
         }
+
+        
+
+        // =================================================================
+        // Implementations: Slice (Private)
+        // =================================================================
+
+        private MatrixData<T> SliceZ(int iz)
+        {
+            var m = new MatrixData<T>(_width, _height, _frames[iz]);
+            m.SetXYScale(_scale.XMin, _scale.XMax, _scale.YMin, _scale.YMax);
+            return m;
+        }
+
+
+        /// <summary>
+        /// Slice Y to get XZ Plane (as a different data instance)
+        /// </summary>
+        /// <param name="y"></param>
+        /// <returns></returns>
+        private MatrixData<T> SliceY(int y)
+        {
+            int outW = _width;
+            int outH = _depth;
+            var result = new T[outW * outH];
+
+            var width = _width;
+            var frames = _frames;
+
+            fixed (T* resBase = result)
+            {
+                nint resPtrAddr = (nint)resBase;
+                Parallel.For(0, _depth, z =>
+                {
+                    // BlockCopy的なSpanコピー
+                    frames[z].AsSpan().Slice(y * width, width)
+                        .CopyTo(new Span<T>((T*)resPtrAddr + z * outW, outW));
+                });
+            }
+            var md = new MatrixData<T>(outW, outH, result);
+            md.SetXYScale(_scale.XMin, _scale.XMax, _axis.Min, _axis.Max);
+            md.XUnit = _scale.XUnit;
+            md.YUnit = _axis.Unit;
+            return md;
+        }
+
+
+        // Slice X (YZ Plane, Transposed visualization)
+        private MatrixData<T> SliceX(int x)
+        {
+            int outW = _height;
+            int outH = _depth;
+            var result = new T[outW * outH];
+
+            var width = _width;
+            var height = _height;
+            var frames = _frames;
+
+            fixed (T* resBase = result)
+            {
+                nint resPtrAddr = (nint)resBase;
+                Parallel.For(0, _depth, z =>
+                {
+                    fixed (T* srcBase = frames[z])
+                    {
+                        T* resPtr = (T*)resPtrAddr + z * outW;
+                        T* srcPtr = srcBase + x;
+                        int stride = width;
+                        for (int y = 0; y < height; y++)
+                        {
+                            resPtr[y] = *srcPtr;
+                            srcPtr += stride;
+                        }
+                    }
+                });
+            }
+            var md = new MatrixData<T>(outW, outH, result);
+            md.SetXYScale(_scale.YMin, _scale.YMax, _axis.Min, _axis.Max);
+            md.XUnit = _scale.YUnit;
+            md.YUnit = _axis.Unit;
+            return md;
+        }
+
+
+        /// <summary>
+        /// Simultaneously extracts XZ (SliceY) and YZ (SliceX) planes at the intersection of (x, y) in a single unified pass.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This method is optimized for high-throughput data access by traversing the Z-axis once, 
+        /// significantly reducing <see cref="VirtualFrameList"/> overhead and cache misses compared to discrete slice operations.
+        /// </para>
+        /// <para>
+        /// It is designed for zero-allocation performance through destination buffer reuse and 
+        /// allows granular concurrency control to prevent thread contention in nested parallel execution.
+        /// </para>
+        /// </remarks>
+        /// <param name="x">The X-coordinate; defines the vertical plane (YZ) to be extracted.</param>
+        /// <param name="y">The Y-coordinate; defines the horizontal plane (XZ) to be extracted.</param>
+        /// <param name="numThreads">
+        /// The degree of parallelism. 
+        /// Set to <c>1</c> for sequential execution (to avoid contention when the caller is already parallelized), 
+        /// or <c>-1</c> to utilize all available logical cores.
+        /// </param>
+        /// <param name="dstXZ">Optional destination <see cref="IMatrixData"/> to receive the XZ plane data.</param>
+        /// <param name="dstXZIndex">Starting index within the <paramref name="dstXZ"/> buffer.</param>
+        /// <param name="dstYZ">Optional destination <see cref="IMatrixData"/> to receive the YZ plane data.</param>
+        /// <param name="dstYZIndex">Starting index within the <paramref name="dstYZ"/> buffer.</param>
+        /// <returns>A tuple of <see cref="MatrixData{T}"/> wrapping the extracted orthogonal planes.</returns>
+        public (MatrixData<T> XZ, MatrixData<T> YZ) SliceOrthogonal(int x, int y, int numThreads = -1, 
+            IMatrixData? dstXZ = null, int dstXZIndex = 0, IMatrixData? dstYZ = null, int dstYZIndex = 0)
+        {
+
+#if VA_DEBUG
+            var sw = Stopwatch.StartNew();
+            var sb = new StringBuilder();
+            long lap = 0;
+            sb.AppendLine($"[SliceOrthogonal] Start slicing at (x={x}, y={y}), numThreads={numThreads}");
+            sb.Append("[SliceOrthogonal] Initialized:");
+#endif 
+            if (x < 0 || x >= _width) throw new ArgumentOutOfRangeException(nameof(x));
+            if (y < 0 || y >= _height) throw new ArgumentOutOfRangeException(nameof(y));
+
+            int xzOutW = _width;
+            int xzOutH = _depth;
+            var resultXZ = (dstXZ is MatrixData<T> xz) ? xz.GetArray(dstXZIndex) : null;
+            if (resultXZ == null || resultXZ.Length < xzOutW * xzOutH)    
+                resultXZ = new T[xzOutW * xzOutH];
+          
+            int yzOutW = _height;
+            int yzOutH = _depth;
+            var resultYZ = (dstYZ is MatrixData<T> yz) ? yz.GetArray(dstYZIndex) : null;
+            if (resultYZ == null || resultYZ.Length < yzOutW * yzOutH)
+                resultYZ = new T[yzOutW * yzOutH];
+
+            var width = _width;
+            var height = _height;
+            var frames = _frames;
+
+            unsafe
+            {
+                fixed (T* resXZBase = resultXZ)
+                fixed (T* resYZBase = resultYZ)
+                {
+                    T* pXZ = resXZBase;
+                    T* pYZ = resYZBase;
+                    int remainder = height % 4; 
+                    int mainLoopCount = height - remainder;
+                    void Proc(int iz)
+                    {
+                        // ========================================================
+                        // Access to the original data only once per frame, minimizing overhead of VirtualFrameList and improving cache locality.
+                        // ========================================================
+                        T[] frame = frames[iz];
+
+                        // --- 1. XZ plane extraction (y-th row copy) ---
+                        frame.AsSpan(y * width, width)
+                             .CopyTo(new Span<T>(pXZ+ iz * xzOutW, xzOutW));
+
+                        // --- 2. YZ plane extraction (x-th column copy) ---
+                        fixed (T* srcBase = frame)
+                        {
+                            T* resYZPtr = pYZ + iz * yzOutW;
+                            T* srcPtr = srcBase + x;
+                            int stride = width;
+                            // Unroll loop for better performance (if height is large enough)
+                            for (int iy = 0; iy < mainLoopCount; iy += 4)
+                            {
+                                resYZPtr[iy] = *srcPtr;
+                                resYZPtr[iy + 1] = *(srcPtr + stride);
+                                resYZPtr[iy + 2] = *(srcPtr + 2 * stride);
+                                resYZPtr[iy + 3] = *(srcPtr + 3 * stride);
+                                srcPtr += 4 * stride;
+                            }
+                            for (int iy = mainLoopCount; iy < height; iy++)
+                            {
+                                resYZPtr[iy] = *srcPtr;
+                                srcPtr += stride;
+                            }
+                        }
+                    }
+
+#if VA_DEBUG
+                    lap = sw.ElapsedMilliseconds;
+                    sb.Append($"{lap} ms, Loop:");
+#endif 
+                    if (numThreads > 1 || numThreads < 0)
+                    {
+                        Parallel.For(0, _depth, new ParallelOptions() { MaxDegreeOfParallelism = numThreads }, iz =>
+                        {
+                            Proc(iz);
+                        });
+                    }
+                    else
+                    {
+                        for(int iz = 0; iz < _depth; iz++)
+                        {
+                            Proc(iz);
+                        }
+                    }
+                }
+            }
+
+#if VA_DEBUG
+            lap = sw.ElapsedMilliseconds - lap;
+            sb.Append($"{lap} ms, Create date:");
+#endif 
+
+            var mdYZ = new MatrixData<T>(yzOutW, yzOutH, resultYZ);
+            mdYZ.SetXYScale(_scale.YMin, _scale.YMax, _axis.Min, _axis.Max);
+            mdYZ.XUnit = _scale.YUnit;
+            mdYZ.YUnit = _axis.Unit;
+
+            var mdXZ = new MatrixData<T>(xzOutW, xzOutH, resultXZ);
+            mdXZ.SetXYScale(_scale.XMin, _scale.XMax, _axis.Min, _axis.Max);
+            mdXZ.XUnit = _scale.XUnit;
+            mdXZ.YUnit = _axis.Unit;
+
+#if VA_DEBUG
+            lap = sw.ElapsedMilliseconds - lap;
+            sb.Append($"{lap} ms, Total:{sw.ElapsedMilliseconds} ms");
+            Trace.WriteLine(sb.ToString());
+#endif 
+
+            return (mdXZ, mdYZ);
+        }
+
 
         // =================================================================
         // Implementations: Restack (Private)
@@ -220,92 +450,25 @@ namespace MxPlot.Core
 
         private MatrixData<T> CreateStackFromViewZ()
         {
-            var m = new MatrixData<T>(_width, _height, _frames.ConvertAll(arr => arr.AsSpan().ToArray()));
+            var newFrames = new List<T[]>(_frames.Count);
+            for (int i = 0; i < _frames.Count; i++)
+            {
+                // 仮想リスト(MMF)の場合、ここでデコードが発生
+                T[] src = _frames[i];
+
+                // 新しい実体配列にコピー
+                T[] copy = new T[src.Length];
+                Array.Copy(src, copy, src.Length);
+                newFrames.Add(copy);
+            }
+
+            //var m = new MatrixData<T>(_width, _height, _frames.ConvertAll(arr => arr.AsSpan().ToArray()));
+            var m = new MatrixData<T>(_width, _height, newFrames);
             m.SetXYScale(_scale.XMin, _scale.XMax, _scale.YMin, _scale.YMax);
             m.XUnit = _scale.XUnit;
             m.YUnit = _scale.YUnit;
             m.DefineDimensions(_axis);
             return m;
-        }
-
-        // =================================================================
-        // Implementations: Slice (Private)
-        // =================================================================
-
-        private MatrixData<T> SliceZ(int iz)
-        {
-            var m = new MatrixData<T>(_width, _height, _frames[iz]);
-            m.SetXYScale(_scale.XMin, _scale.XMax, _scale.YMin, _scale.YMax);
-            return m;
-        }
-
-
-        /// <summary>
-        /// Slice Y to get XZ Plane (as a different data instance)
-        /// </summary>
-        /// <param name="y"></param>
-        /// <returns></returns>
-        private MatrixData<T> SliceY(int y)
-        {
-            int outW = _width;
-            int outH = _depth;
-            var result = new T[outW * outH];
-
-            var width = _width;
-            var frames = _frames;
-
-            fixed (T* resBase = result)
-            {
-                nint resPtrAddr = (nint)resBase;
-                Parallel.For(0, _depth, z =>
-                {
-                    // BlockCopy的なSpanコピー
-                    frames[z].AsSpan().Slice(y * width, width)
-                        .CopyTo(new Span<T>((T*)resPtrAddr + z * outW, outW));
-                });
-            }
-            var md = new MatrixData<T>(outW, outH, result);
-            md.SetXYScale(_scale.XMin, _scale.XMax, _axis.Min, _axis.Max);
-            md.XUnit = _scale.XUnit;
-            md.YUnit = _axis.Unit;
-            return md;
-        }
-
-
-        // Slice X (YZ Plane, Transposed visualization)
-        private MatrixData<T> SliceX(int x)
-        {
-            int outW = _height;
-            int outH = _depth;
-            var result = new T[outW * outH];
-
-            var width = _width;
-            var height = _height;
-            var frames = _frames;
-
-            fixed (T* resBase = result)
-            {
-                nint resPtrAddr = (nint)resBase;
-                Parallel.For(0, _depth, z =>
-                {
-                    fixed (T* srcBase = frames[z])
-                    {
-                        T* resPtr = (T*)resPtrAddr + z * outW;
-                        T* srcPtr = srcBase + x;
-                        int stride = width;
-                        for (int y = 0; y < height; y++)
-                        {
-                            resPtr[y] = *srcPtr;
-                            srcPtr += stride;
-                        }
-                    }
-                });
-            }
-            var md = new MatrixData<T>(outW, outH, result);
-            md.SetXYScale(_scale.YMin, _scale.YMax, _axis.Min, _axis.Max);
-            md.XUnit = _scale.YUnit;
-            md.YUnit = _axis.Unit;
-            return md;
         }
 
         /// <summary>
@@ -505,4 +668,5 @@ namespace MxPlot.Core
         }
 
     }
+
 }

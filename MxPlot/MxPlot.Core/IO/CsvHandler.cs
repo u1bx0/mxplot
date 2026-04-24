@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
@@ -7,7 +8,9 @@ namespace MxPlot.Core.IO
 {
     /// <summary>
     /// Provides simple CSV export and import for single-frame MatrixData.
-    /// CSV format is pure numeric data without headers: comma-separated values, one row per line.
+    /// On save, pure numeric data is written with no headers or comments.
+    /// On load, non-numeric lines before the first data row are preserved as
+    /// <c>CSV_HEADER</c> metadata (read-only; not written back on save).
     /// </summary>
     public static class CsvHandler
     {
@@ -143,30 +146,106 @@ namespace MxPlot.Core.IO
             if (csvLines == null || csvLines.Length == 0)
                 throw new ArgumentException("Input lines are empty.");
 
-            int yCount = csvLines.Length;
-            // 区切り文字は動的に指定（Separatorプロパティから来る）
-            var firstRowValues = csvLines[0].Split(new[] { separator }, StringSplitOptions.None);
-            int xCount = firstRowValues.Length;
-
-            var array = new T[xCount * yCount];
-
-            for (int iy = 0; iy < yCount; iy++)
+            bool LooksLikeNumericLine(string line)
             {
-                var values = csvLines[iy].Split(new[] { separator }, StringSplitOptions.None);
-                if (values.Length != xCount)
-                    throw new InvalidDataException($"Row {iy} has {values.Length} columns, expected {xCount}");
+                if (string.IsNullOrWhiteSpace(line))
+                    return false;
 
-                int actualY = flipY ? (yCount - 1 - iy) : iy;
+                var s = line.TrimStart();
 
-                for (int ix = 0; ix < xCount; ix++)
-                {
-                    // ここは既存の Load<T> のパースロジックを流用
-                    double value = double.Parse(values[ix], CultureInfo.InvariantCulture);
-                    array[actualY * xCount + ix] = (T)Convert.ChangeType(value, typeof(T));
-                }
+                // 先頭トークンを取る（区切り文字前まで）
+                int sep = s.IndexOfAny([',', '\t', ' ']);
+                string token = sep >= 0 ? s[..sep] : s;
+
+                // 先頭文字が + - . 数字
+                char c = s[0];
+                if (c is '+' or '-' or '.' or >= '0' and <= '9')
+                    return true;
+
+                // 特殊値
+                if (token.Equals("NaN", StringComparison.OrdinalIgnoreCase))
+                    return true;
+                
+                // "--" などの欠損値
+                if (token == "--")
+                    return true;
+
+                return false;
             }
 
-            return new MatrixData<T>(xCount, yCount, array);
+
+            int xCount = 0;
+            //かなり甘めにチェックする
+            //最初にヘッダーがあるかもしれない、途中にもコメントが有るかもしれない、と仮定
+            //行頭が +,-,.,数字以外は全てスキップ
+            List<string[]> validLines = [];
+            StringBuilder comments = new StringBuilder();
+            foreach (string line in csvLines)
+            {
+                if (!LooksLikeNumericLine(line)) // 行頭が +, -, ., 数字 以外ならスキップ、ただし最初の数値行まではヘッダーだとして記録する
+                {
+                    if(validLines.Count == 0) //まだヘッダー行のはず
+                        comments.AppendLine(line);
+                    continue;
+                }
+                var values = line.Split(new[] { separator }, StringSplitOptions.None);
+                if(values.Length > xCount) xCount = values.Length; // 最も多い列数を採用
+                validLines.Add(values);
+            }
+
+            int yCount = validLines.Count;
+            var array = new T[xCount * yCount];
+            for(int iy = 0; iy < yCount; iy++)
+            {
+                var line = validLines[iy]; //string[]
+                for(int ix = 0; ix < xCount; ix++)
+                {
+                    
+                    if (ix < line.Length)
+                    {
+                        var s = line[ix].Trim();
+                        double value;
+
+                        // NaN, -- チェック
+                        bool isMissing =
+                            string.Equals(s, "NaN", StringComparison.OrdinalIgnoreCase) ||
+                            s == "--";
+
+                        if (isMissing)
+                        {
+                            value = double.NaN;
+                        }
+                        else if (!double.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out value))
+                        {
+                            value = double.NaN;
+                        }
+
+                        // 整数型の場合は NaN を 0 に正規化
+                        bool isIntegerType =
+                            typeof(T) == typeof(int) ||
+                            typeof(T) == typeof(long) ||
+                            typeof(T) == typeof(short) ||
+                            typeof(T) == typeof(byte);
+
+                        if (isIntegerType && double.IsNaN(value))
+                        {
+                            value = 0; // 甘々仕様
+                        }
+
+                        array[iy * xCount + ix] = (T)Convert.ChangeType(value, typeof(T));
+                    }
+                    else
+                    {
+                        // 列数が足りない場合はゼロで埋める
+                        array[iy * xCount + ix] = default;
+                    }
+                }
+            }
+            var md = new MatrixData<T>(xCount, yCount, array);
+            var header = comments.ToString();
+            if(!string.IsNullOrWhiteSpace(header))
+                md.Metadata["CSV_HEADER"] = header;
+            return md;
         }
     }
 
@@ -180,6 +259,10 @@ namespace MxPlot.Core.IO
     /// by adjusting its properties.</remarks>
     public class CsvFormat : IMatrixDataReader, IMatrixDataWriter
     {
+        public string FormatName => "CSV";
+
+        public IReadOnlyList<string> Extensions { get; } = [".csv"];
+
         // 設定をプロパティとして持てる！
         public string Separator { get; set; } = ",";
 
@@ -187,8 +270,11 @@ namespace MxPlot.Core.IO
 
         public int FrameIndex { get; set; } = -1;
 
+        public CancellationToken CancellationToken { get; set; }
+        // CsvFormat は軽量フォーマットのためキャンセル未実装。IsCancellable はデフォルト false のまま。
+
         // インターフェイス実装：静的メソッドへ委譲
-        public void Write<T>(string path, MatrixData<T> data) where T : unmanaged
+        public void Write<T>(string path, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             CsvHandler.Save(path, data, Separator, FrameIndex, FlipY);
         }

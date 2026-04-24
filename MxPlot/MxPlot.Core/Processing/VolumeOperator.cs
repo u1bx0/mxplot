@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace MxPlot.Core.Processing
@@ -33,8 +35,7 @@ namespace MxPlot.Core.Processing
         /// performance and output quality depending on the projection algorithm.</remarks>
         public static  bool OptimizedTilingEnabledForZProjection = true;
 
-        // 統合されたプロジェクション生成メソッド
-        // T に対する演算能力 (INumber) をここで要求
+        
         public static MatrixData<T> CreateProjection<T>(this VolumeAccessor<T> volume, ViewFrom axis, ProjectionMode mode)
             where T : unmanaged, INumber<T>, IMinMaxValue<T>
         {
@@ -47,6 +48,13 @@ namespace MxPlot.Core.Processing
                                                 ProjectAlongZ(volume, mode),
                                 _ => throw new ArgumentOutOfRangeException(nameof(axis), "Invalid axis for projection."),
             };
+        }
+
+        public static (MatrixData<T> XZ, MatrixData<T> YZ) CreateOrthogonalProjections<T>(this VolumeAccessor<T> volume, ProjectionMode mode,
+            int numThreads = -1, IMatrixData? dstXZ = null, int dstXZIndex = 0, IMatrixData? dstYZ = null, int dstYZIndex = 0)
+            where T : unmanaged, INumber<T>, IMinMaxValue<T>
+        {
+            return ProjectAlongXandY(volume, mode, numThreads: numThreads, dstXZ: dstXZ, dstXZIndex: dstXZIndex, dstYZ: dstYZ, dstYZIndex: dstYZIndex);
         }
 
         // ---------------------------------------------------------
@@ -186,6 +194,220 @@ namespace MxPlot.Core.Processing
             md.YUnit = axis.Unit;
             return md;
         }
+
+
+        // ---------------------------------------------------------
+        // Implementation: XZ + YZ Combined (Single Frame Pass)
+        // ---------------------------------------------------------
+        /// <summary>
+        /// Computes XZ and YZ projections simultaneously in a single pass over Z-frames.
+        /// </summary>
+        /// <remarks>
+        /// <b>Loop structure:</b> <c>Parallel.For(z) { for y { for x { val = frame[y*W+x] } } }</c><br/>
+        /// - Reading <c>frame[y*W+x]</c>: row-major sequential access → cache-friendly.<br/>
+        /// - Writing <c>xzRow[x]</c>: sequential (same stride as x-loop) → cache-friendly.<br/>
+        /// - Writing <c>yzRow[y]</c>: single scalar update per y-iteration → no cache pressure.<br/>
+        /// - Per-z output rows are non-overlapping across threads → lock-free.<br/>
+        /// <br/>
+        /// For <see cref="ProjectionMode.Average"/>, per-thread <see cref="ArrayPool{T}"/> buffers
+        /// are used to accumulate double-precision sums without GC allocation.
+        /// </remarks>
+        private static (MatrixData<T> XZ, MatrixData<T> YZ) ProjectAlongXandY<T>
+            (VolumeAccessor<T> vol, ProjectionMode mode, 
+            int numThreads = -1, IMatrixData? dstXZ = null, int dstXZIndex = 0, IMatrixData? dstYZ = null, int dstYZIndex = 0)
+         where T : unmanaged, INumber<T>, IMinMaxValue<T>
+        {
+            int width = vol._width;
+            int height = vol._height;
+            int depth = vol._depth;
+
+            var xzResult = (dstXZ is MatrixData<T> xz) ? xz.GetArray(dstXZIndex) : null;
+            if (xzResult == null || xzResult.Length < width * depth)
+                xzResult = new T[width * depth]; 
+
+            var yzResult = (dstYZ is MatrixData<T> yz) ? yz.GetArray(dstYZIndex) : null;
+            if (yzResult == null || yzResult.Length < height * depth)
+                yzResult = new T[height* depth];
+
+
+            void Proc(int z)
+            {
+                // 1. 結果配列の先頭参照を取得 (fixedによるピン留めを完全に排除)
+                ref T xzResultRef = ref MemoryMarshal.GetArrayDataReference(xzResult);
+                ref T yzResultRef = ref MemoryMarshal.GetArrayDataReference(yzResult);
+
+                // IList<T[]> を想定。フレームの先頭参照を直接取得
+                T[] frame = vol._frames[z];
+                ref T frameRef = ref MemoryMarshal.GetArrayDataReference(frame);
+
+                // この z に対応する XZ/YZ 行の先頭参照
+                ref T xzRowRef = ref Unsafe.Add(ref xzResultRef, z * width);
+                ref T yzRowRef = ref Unsafe.Add(ref yzResultRef, z * height);
+
+                int vectorCount = Vector<T>.Count;
+
+                if (mode == ProjectionMode.Maximum)
+                {
+                    // XZ行を初期化
+                    MemoryMarshal.CreateSpan(ref xzRowRef, width).Fill(T.MinValue);
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        ref T frameRowRef = ref Unsafe.Add(ref frameRef, y * width);
+                        Vector<T> vYzMax = new Vector<T>(T.MinValue);
+                        T rowMax = T.MinValue;
+
+                        int x = 0;
+                        // SIMDループ: XZの比較とYZ行内の最大値を同時計算
+                        if (Vector.IsHardwareAccelerated && width >= vectorCount)
+                        {
+                            for (; x <= width - vectorCount; x += vectorCount)
+                            {
+                                Vector<T> vFrame = Vector.LoadUnsafe(ref frameRowRef, (nuint)x);
+                                Vector<T> vXz = Vector.LoadUnsafe(ref xzRowRef, (nuint)x);
+
+                                // XZ更新: Max(現在のXZ, 新しいフレームの行)
+                                Vector.Max(vXz, vFrame).StoreUnsafe(ref xzRowRef, (nuint)x);
+
+                                // YZ集計: 行内の最大値をベクトル単位で保持
+                                vYzMax = Vector.Max(vYzMax, vFrame);
+                            }
+                        }
+
+                        // vYzMax の中からスカラーの最大値を抽出
+                        for (int i = 0; i < vectorCount; i++)
+                        {
+                            if (vYzMax[i] > rowMax) rowMax = vYzMax[i];
+                        }
+
+                        // 端数処理
+                        for (; x < width; x++)
+                        {
+                            T val = Unsafe.Add(ref frameRowRef, x);
+                            ref T xzVal = ref Unsafe.Add(ref xzRowRef, x);
+                            if (val > xzVal) xzVal = val;
+                            if (val > rowMax) rowMax = val;
+                        }
+
+                        // YZ行への書き込みは1回だけで完了
+                        Unsafe.Add(ref yzRowRef, y) = rowMax;
+                    }
+                }
+                else if (mode == ProjectionMode.Minimum)
+                {
+                    // XZ行を初期化
+                    MemoryMarshal.CreateSpan(ref xzRowRef, width).Fill(T.MaxValue);
+
+                    for (int y = 0; y < height; y++)
+                    {
+                        ref T frameRowRef = ref Unsafe.Add(ref frameRef, y * width);
+                        Vector<T> vYzMin = new Vector<T>(T.MaxValue);
+                        T rowMin = T.MaxValue;
+
+                        int x = 0;
+                        // SIMDループ: XZの比較とYZ行内の最小値を同時計算
+                        if (Vector.IsHardwareAccelerated && width >= vectorCount)
+                        {
+                            for (; x <= width - vectorCount; x += vectorCount)
+                            {
+                                Vector<T> vFrame = Vector.LoadUnsafe(ref frameRowRef, (nuint)x);
+                                Vector<T> vXz = Vector.LoadUnsafe(ref xzRowRef, (nuint)x);
+
+                                Vector.Min(vXz, vFrame).StoreUnsafe(ref xzRowRef, (nuint)x);
+                                vYzMin = Vector.Min(vYzMin, vFrame);
+                            }
+                        }
+
+                        for (int i = 0; i < vectorCount; i++)
+                        {
+                            if (vYzMin[i] < rowMin) rowMin = vYzMin[i];
+                        }
+
+                        for (; x < width; x++)
+                        {
+                            T val = Unsafe.Add(ref frameRowRef, x);
+                            ref T xzVal = ref Unsafe.Add(ref xzRowRef, x);
+                            if (val < xzVal) xzVal = val;
+                            if (val < rowMin) rowMin = val;
+                        }
+
+                        Unsafe.Add(ref yzRowRef, y) = rowMin;
+                    }
+                }
+                else // Average
+                {
+                    // accYZは不要。y方向に進むループ内で合計が確定するため
+                    double[] accXZ = ArrayPool<double>.Shared.Rent(width);
+                    ref double accXzRef = ref MemoryMarshal.GetArrayDataReference(accXZ);
+                    MemoryMarshal.CreateSpan(ref accXzRef, width).Clear();
+
+                    double invW = 1.0 / width;
+                    double invH = 1.0 / height;
+
+                    try
+                    {
+                        for (int y = 0; y < height; y++)
+                        {
+                            ref T frameRowRef = ref Unsafe.Add(ref frameRef, y * width);
+                            double yzRowSum = 0;
+
+                            // INumber<T>制約下での安全なキャストと合計
+                            for (int x = 0; x < width; x++)
+                            {
+                                double v = double.CreateChecked(Unsafe.Add(ref frameRowRef, x));
+                                Unsafe.Add(ref accXzRef, x) += v;
+                                yzRowSum += v;
+                            }
+
+                            // YZ行への書き込みは1回だけで完了
+                            Unsafe.Add(ref yzRowRef, y) = T.CreateChecked(yzRowSum * invW);
+                        }
+
+                        // XZ平均の確定
+                        for (int x = 0; x < width; x++)
+                        {
+                            Unsafe.Add(ref xzRowRef, x) = T.CreateChecked(Unsafe.Add(ref accXzRef, x) * invH);
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<double>.Shared.Return(accXZ);
+                    }
+                }
+            }
+
+            if (numThreads > 1 || numThreads < 0)
+            {
+                Parallel.For(0, depth, new ParallelOptions() { MaxDegreeOfParallelism = numThreads }, iz =>
+                {
+                    Proc(iz);
+                });
+            }
+            else
+            {
+                for (int iz = 0; iz < depth; iz++)
+                {
+                    Proc(iz);
+                }
+            }
+
+            // 2. メタデータの生成・割り当て
+            var scale = vol._scale;
+            var axis = vol._axis;
+
+            var mdXZ = new MatrixData<T>(width, depth, xzResult);
+            mdXZ.SetXYScale(scale.XMin, scale.XMax, axis.Min, axis.Max);
+            mdXZ.XUnit = scale.XUnit;
+            mdXZ.YUnit = axis.Unit;
+
+            var mdYZ = new MatrixData<T>(height, depth, yzResult);
+            mdYZ.SetXYScale(scale.YMin, scale.YMax, axis.Min, axis.Max);
+            mdYZ.XUnit = scale.YUnit;
+            mdYZ.YUnit = axis.Unit;
+
+            return (mdXZ, mdYZ);
+        }
+
 
         private static unsafe MatrixData<T> ProjectAlongZ<T>(VolumeAccessor<T> vol, ProjectionMode mode)
     where T : unmanaged, INumber<T>, IMinMaxValue<T>
@@ -430,5 +652,6 @@ namespace MxPlot.Core.Processing
             return md;
         }
     }
+
 
 }

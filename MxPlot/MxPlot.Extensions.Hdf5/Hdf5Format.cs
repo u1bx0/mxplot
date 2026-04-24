@@ -28,6 +28,10 @@ namespace MxPlot.Extensions.Hdf5
     /// </remarks>
     public class Hdf5Format: IMatrixDataWriter
     {
+        public string FormatName => "HDF5";
+
+        public IReadOnlyList<string> Extensions { get; } = [".h5", ".hdf5"];
+
         //public IProgress<int>? ProgressReporter { get; set; }
         /// <summary>
         /// Gets or sets the internal HDF5 group path where the dataset will be stored.
@@ -41,7 +45,7 @@ namespace MxPlot.Extensions.Hdf5
         /// </summary>
         public bool FlipY { get; set; } = true;
 
-        public void Write<T>(string filePath, MatrixData<T> data) where T : unmanaged
+        public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             Hdf5Handler.Save(filePath, data, GroupPath, FlipY);
         }

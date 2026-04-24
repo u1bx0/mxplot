@@ -1,5 +1,6 @@
 ﻿using BitMiracle.LibTiff.Classic;
 using MxPlot.Core;
+using MxPlot.Core.IO;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -9,31 +10,38 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 using System.Xml.Linq;
+using static MxPlot.Extensions.Tiff.OmeTiffHandler;
 
 namespace MxPlot.Extensions.Tiff
 {
     /// <summary>
-    /// OME-TIFF形式のhyperstackファイルの読み書きを行うクラス
-    /// signed/unsigned 16bit、8bit、32bit、floatに対応
-    /// 
-    /// 生成：us.anthropic.claude-sonnet-4-20250514-v1:0 
-    /// から、少し改変（BigTiff対応、圧縮オプション追加）
-    /// 
+    /// Reads and writes OME-TIFF hyperstack files.
+    /// Supports signed/unsigned 16-bit, 8-bit, 32-bit, and float pixel types.
     /// </summary>
-    /// <typeparam name="T">画像データの型（short, ushort, byte, sbyte, int, uint, float）</typeparam>
+    /// <typeparam name="T">Pixel data type (short, ushort, byte, sbyte, int, uint, float)</typeparam>
     public class OmeTiffHandlerInstance<T> where T : unmanaged
     {
+        /// <summary>
+        /// Maximum degree of parallelism for InMemory loading.
+        /// <c>0</c> or <c>1</c> = sequential (default).
+        /// <c>N &gt; 1</c> = open N LibTiff handles and decompress frames in parallel.
+        /// Most effective for LZW/Deflate-compressed files where decompression is CPU-bound.
+        /// Uncompressed files are already fast after the O(N) IFD traversal fix.
+        /// </summary>
+        public int MaxParallelDegree { get; set; } = 0;
 
-        #region 書き込みメソッド
+        #region Write Methods
 
         /// <summary>
-        /// Hyperstackデータを全てメモリに保持してOME-TIFFファイルに書き込み
+        /// Writes a hyperstack to an OME-TIFF file, loading all frames into memory.
         /// </summary>
         public void WriteHyperstack(string filename, List<T[]> imageStack,
             int width, int height, int channels, int zSlices, int timePoints,
-            int fovCount = 1, //タイルデータにも対応
+            int fovCount = 1,
             double pixelSizeX = 1.0, double pixelSizeY = 1.0, double pixelSizeZ = 1.0)
         {
             var data = new HyperstackData<T>();
@@ -50,11 +58,11 @@ namespace MxPlot.Extensions.Tiff
         }
 
         /// <summary>
-        /// Hyperstackデータを遅延処理でOME-TIFFファイルに書き込み（メモリ効率版）
+        /// Writes a hyperstack to an OME-TIFF file using lazy enumeration (memory-efficient).
         /// </summary>
         public void WriteHyperstack(string filename, IEnumerable<T[]> imageFrames,
             HyperstackData<T> data,
-            OmeTiffOptions? options = null, string? customParameters = null, IProgress<int>? progress = null)
+            OmeTiffOptions? options = null, IProgress<int>? progress = null)
         {
 
             int width = data.Width;
@@ -66,37 +74,36 @@ namespace MxPlot.Extensions.Tiff
             double pixelSizeY = data.PixelSizeY;
             double pixelSizeZ = data.PixelSizeZ;
             if (channels <= 0 || zSlices <= 0 || timePoints <= 0)
-                throw new ArgumentException("チャンネル、Zスライス、タイムポイントは1以上である必要があります");
+                throw new ArgumentException("Channels, Z slices, and time points must each be at least 1.");
 
-            // オプションがnullならデフォルト値を使用
+            // Use default options if not provided
             options = options ?? new OmeTiffOptions();
             int expectedFrames = channels * zSlices * timePoints * Math.Max(1, data.FovCount);
-            //サイズの見積もり
+            // Estimate total pixel count to detect BigTIFF requirement
             var pixels = width * height * expectedFrames;
-            if(pixels > 4L*1024*1024*1024/GetBytesPerPixel())
+            if (pixels > 4L * 1024 * 1024 * 1024 / GetBytesPerPixel())
             {
-                //4GBを超える場合はBigTIFFを強制
-                //ただし、圧縮が掛かる場合は必ずしも超えないとは限らない
+                // Force BigTIFF when data exceeds 4 GB (compression may keep actual size smaller)
                 options.UseBigTiff = true;
             }
-            // BigTIFFモードの判定 ("w" = 通常, "w8" = BigTIFF)
+            // Select mode: "w" = standard TIFF, "w8" = BigTIFF
             string mode = options.UseBigTiff ? "w8" : "w";
-            
+
             using (var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, mode))
             {
-                if (tiff == null) throw new IOException("Tiffファイルを作成できませんでした。");
+                if (tiff == null) throw new IOException("Could not create Tiff file.");
 
-                var omeXml = CreateOmeXml(data, customParameters);
-                //omeXml = omeXml.Replace("\r", "").Replace("\n", ""); //1行にする
+                var omeXml = CreateOmeXml(data);
+                //omeXml = omeXml.Replace("\r", "").Replace("\n", ""); // collapse to a single line
                 Debug.WriteLine("[OMETiffHandler] XML: " + omeXml);
 
-                progress?.Report(0);
+                // Start signal: negative value = total frame count
+                progress?.Report(-expectedFrames);
                 int frameIndex = 0;
                 foreach (var frame in imageFrames)
                 {
                     if (frameIndex >= expectedFrames) break;
 
-                    // frameIndexとoptionsを渡すように修正
                     WriteFrameSafe(tiff, frame, width, height, frameIndex, expectedFrames, omeXml, options);
                     progress?.Report(frameIndex);
                     frameIndex++;
@@ -108,18 +115,19 @@ namespace MxPlot.Extensions.Tiff
 
         private void WriteFrameSafe(BitMiracle.LibTiff.Classic.Tiff tiff, T[] data, int width, int height, int frameIndex, int totalFrames, string omeXml, OmeTiffOptions options)
         {
-
             try
             {
-                // タグ設定メソッドにoptionsを渡す
                 SetBasicTiffTags(tiff, width, height, options);
 
-                // 最初のフレームにのみOME-XMLを設定
+                // Write OME-XML to the first frame only.
+                // Pass UTF-8 bytes directly to avoid LibTiff's ASCII encoding
+                // which corrupts non-ASCII chars like µ (U+00B5).
                 if (frameIndex == 0)
                 {
-                    tiff.SetField(TiffTag.IMAGEDESCRIPTION, omeXml);
+                    byte[] utf8 = Encoding.UTF8.GetBytes(omeXml);
+                    tiff.SetField(TiffTag.IMAGEDESCRIPTION, utf8);
                 }
-                
+
                 WriteImageData(tiff, data, width, height);
 
                 if (frameIndex < totalFrames - 1)
@@ -129,10 +137,10 @@ namespace MxPlot.Extensions.Tiff
             }
             catch (Exception ex)
             {
-                throw new InvalidOperationException($"フレーム {frameIndex} の処理中にエラーが発生しました: {ex.Message}", ex);
+                throw new InvalidOperationException($"Error at {frameIndex}: {ex.Message}", ex);
             }
         }
-               
+
 
         private void SetBasicTiffTags(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height, OmeTiffOptions options)
         {
@@ -146,80 +154,71 @@ namespace MxPlot.Extensions.Tiff
             tiff.SetField(TiffTag.PLANARCONFIG, PlanarConfig.CONTIG);
             //tiff.SetField(TiffTag.COMPRESSION, Compression.NONE);
 
-            // --- 圧縮設定の適用 ---
+            // Apply compression settings
             tiff.SetField(TiffTag.COMPRESSION, options.Compression);
 
-            // LZW または Deflate (Zip) の場合、Predictorを設定するとサイズが小さくなる
+            // For LZW or Deflate, apply the configured predictor.
+            // Default is Predictor.NONE; callers may opt in to HORIZONTAL for
+            // higher compression when the target reader is known-compatible.
             if (options.Compression == Compression.LZW || options.Compression == Compression.ADOBE_DEFLATE)
             {
-                //tiff.SetField(TiffTag.PREDICTOR, options.Predictor);
-                // 浮動小数点のときは、事故を防ぐために予測子を使わない
                 if (sampleFormat == SampleFormat.IEEEFP)
-                {
                     tiff.SetField(TiffTag.PREDICTOR, Predictor.NONE);
-                }
                 else
-                {
-                    // 整数型なら Horizontal (2) を使う
-                    tiff.SetField(TiffTag.PREDICTOR, Predictor.HORIZONTAL);
-                }
-
+                    tiff.SetField(TiffTag.PREDICTOR, options.Predictor);
             }
-            // -------------------
-            // RowsPerStrip を適切に設定
+            // Set RowsPerStrip
             int rowsPerStrip = CalculateOptimalRowsPerStrip(width, height);
             tiff.SetField(TiffTag.ROWSPERSTRIP, rowsPerStrip);
         }
 
         private int CalculateOptimalRowsPerStrip(int width, int height)
         {
-            int bytesPerRow = width * GetBytesPerPixel();
-
-            // 目標：1ストリップあたり64KB程度
-            const int targetStripSize = 64 * 1024;
-            int optimalRows = Math.Max(1, targetStripSize / bytesPerRow);
-
-            // 画像の高さを超えないように調整
-            return Math.Min(optimalRows, height);
+            // Use a single strip per frame (rowsPerStrip = height).
+            //
+            // Some readers (e.g. FluoRender) have a bug in their horizontal-predictor
+            // undo pass where they iterate rowsPerStrip rows unconditionally, even on the
+            // last strip which may contain fewer rows.  With a single strip there is no
+            // partial last strip, so the bug is never triggered.
+            //
+            // The 64 KB target heuristic is kept as a comment for reference:
+            //   int bytesPerRow = width * GetBytesPerPixel();
+            //   const int targetStripSize = 64 * 1024;
+            //   int optimalRows = Math.Max(1, targetStripSize / bytesPerRow);
+            //   return Math.Min(optimalRows, height);
+            return height;
         }
 
         private void WriteImageData(BitMiracle.LibTiff.Classic.Tiff tiff, T[] data, int width, int height)
         {
-            // ジェネリック型 T のサイズを取得
             int typeSize = Marshal.SizeOf(typeof(T));
             int stride = width * typeSize;
             byte[] buffer = new byte[stride];
 
-            // ここで変換用スパンを作成（C# 7.2以降、あるいはSystem.Memory参照）
-            // 配列全体をSpanとして扱う
             Span<byte> sourceBytes = MemoryMarshal.AsBytes(data.AsSpan());
 
             for (int row = 0; row < height; row++)
             {
-                // 1行分のバイトデータをバッファにコピー
-                // data配列の該当位置から切り出す
                 var rowSlice = sourceBytes.Slice(row * stride, stride);
                 rowSlice.CopyTo(buffer);
 
-                // ★重要: TIFF側のエンディアン設定に合わせてスワップが必要ならここでやるべきだが、
-                // LibTiff.Netは通常、ネイティブオーダーで渡せばヘッダーに合わせて変換してくれる。
-                // ただし BlockCopy で渡していた前回のコードは危険だった。
-
+                // LibTiff.NET handles endianness internally via WriteScanline;
+                // no manual byte-swapping is needed here.
                 if (!tiff.WriteScanline(buffer, row, 0))
                 {
-                    throw new InvalidOperationException($"行 {row} の書き込みに失敗しました");
+                    throw new InvalidOperationException($"Failed to write scanline at row {row}");
                 }
             }
         }
 
         #endregion
 
-        #region 読み込みメソッド
+        #region Read Methods
 
         /// <summary>
-        /// OME-TIFFファイルを全てメモリに読み込み
+        /// Read Ome-tiff file 
         /// </summary>
-        public HyperstackData<T> ReadHyperstack(string filename, IProgress<int>? progress = null)
+        public HyperstackData<T> ReadHyperstack(string filename, LoadingMode mode, IProgress<int>? progress = null, CancellationToken ct = default)
         {
             if (!File.Exists(filename))
                 throw new FileNotFoundException($"No such file: {filename}");
@@ -228,15 +227,102 @@ namespace MxPlot.Extensions.Tiff
 
             using (var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "r"))
             {
+                Debug.WriteLine($"[ReadHyperstack] File opened: {filename}");
+
+                //Read metadata from the file header
                 ReadOmeMetadata(tiff, data);
-                ReadImageData(tiff, data, progress);
+                Debug.WriteLine($"[ReadHyperstack] Metadata read.");
+
+                // Multi-file OME-TIFF fallback:
+                // If the OME-XML references external files via TiffData/UUID/FileName, we cannot
+                // follow those references here.  Instead we clamp TotalFrames to the actual IFD
+                // count in this file and continue with sequential reading.
+                // The warning is stored in data.MultiFileWarning for the caller to surface.
+                if (data.MultiFileWarning != null)
+                {
+                    int actualDirs = tiff.NumberOfDirectories();
+                    string currentBaseName = Path.GetFileName(filename);
+                    Debug.WriteLine($"[ReadHyperstack] Multi-file OME-TIFF detected. Referenced: {data.MultiFileWarning}. Clamping to {actualDirs} IFDs.");
+
+                    // Update the warning to include the current file context
+                    data.MultiFileWarning =
+                        $"This is a multi-file OME-TIFF (referenced: {data.MultiFileWarning}). " +
+                        $"Only '{currentBaseName}' was opened ({actualDirs} frame(s)). " +
+                        "The other files were not loaded.";
+
+                    // Clamp dimensions so TotalFrames == actualDirs
+                    if (data.TotalFrames > actualDirs)
+                    {
+                        data.Channels = 1;
+                        data.ZSlices = 1;
+                        data.TimePoints = actualDirs;
+                    }
+                }
+
+                // Calculate total data size
+                long bytesPerPixel = System.Runtime.InteropServices.Marshal.SizeOf<T>();
+                Debug.WriteLine($"[ReadHyperstack] Data value type: {typeof(T).Name}");
+
+                long totalBytes = (long)data.TotalFrames * data.Width * data.Height * bytesPerPixel;
+                long totalMB = totalBytes / 1024 / 1024;
+                Debug.WriteLine($"[ReadHyperstack] Data: {data.Width} x {data.Height} x {data.TotalFrames}");
+                Debug.WriteLine($"[ReadHyperstack] Data size: {(totalMB > 0 ? totalMB.ToString() + " MB" : "< 1 MB")}");
+
+                // Check compression at frame 0 before resolving loading mode.
+                // Virtual mode requires uncompressed data (NONE); compressed files must fall back to InMemory.
+                FieldValue[]? compTag = tiff.GetField(TiffTag.COMPRESSION);
+                bool isCompressed = compTag != null && compTag[0].ToInt() != (int)Compression.NONE;
+                Debug.WriteLine($"[ReadHyperstack] Compression: {(isCompressed ? "yes (InMemory forced)" : "none")}");
+
+                var resolvedMode = VirtualPolicy.Resolve(mode, totalBytes, frameCount: data.TotalFrames, canVirtual: !isCompressed);
+                if (resolvedMode == LoadingMode.Virtual)
+                {
+                    Debug.WriteLine("[ReadHyperstack] Virtual loading enabled");
+                    data.IsVirtualMode = true;
+
+                    bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
+                    Debug.WriteLine($"[ReadHyperstack] Stored data structure: {(isTiled ? "Tile" : "Strip")}");
+
+                    if (isTiled)
+                    {
+                        (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) = ScanTileInfo(tiff, data.TotalFrames, progress, ct);
+                        Debug.WriteLine($"[ReadHyperstack] offset array for tiled image was extracted. length = {offsets.Length}");
+                        var vl = new VirtualTiledFrames<T>(filename, data.Width, data.Height, tileWidth, tileLength, offsets, byteCounts, isYFlipped: true);
+                        data.ImageStack = vl;
+                    }
+                    else //Strip
+                    {
+                        var (offsets, byteCounts) = ScanStripInfo(tiff, data.TotalFrames, progress, ct);
+                        Debug.WriteLine($"[ReadHyperstack] offset array for stripped image was extracted. length = {offsets.Length}");
+                        data.ImageStack = new VirtualStrippedFrames<T>(filename, data.Width, data.Height, offsets, byteCounts, isYFlipped: true);
+                    }
+
+                    Debug.WriteLine($"[ReadHyperstack] VirtualFrameList was initialized.");
+                }
+                else
+                {
+                    Debug.WriteLine("[ReadHyperstack] InMemory loading enabled");
+                    data.IsVirtualMode = false;
+
+                    bool isTiledInMemory = tiff.GetField(TiffTag.TILEWIDTH) != null;
+                    if (MaxParallelDegree > 1)
+                    {
+                        Debug.WriteLine($"[ReadHyperstack] Parallel loading (degree={MaxParallelDegree})");
+                        ReadImageDataParallel(filename, data, MaxParallelDegree, isTiledInMemory, progress, ct);
+                    }
+                    else
+                    {
+                        ReadImageData(tiff, data, progress, ct);
+                    }
+                    Debug.WriteLine($"[ReadHyperstack] All frames were read.");
+                }
             }
 
             return data;
         }
 
         /// <summary>
-        /// OME-TIFFファイルを遅延読み込み（メモリ効率版）
+        /// Reads frames from an OME-TIFF file lazily (memory-efficient).
         /// </summary>
         public IEnumerable<T[]> ReadFramesLazy(string filename)
         {
@@ -252,13 +338,16 @@ namespace MxPlot.Extensions.Tiff
                 for (int directory = 0; directory < totalDirectories; directory++)
                 {
                     tiff.SetDirectory((short)directory);
-                    yield return ReadSingleFrame(tiff, width, height);
+                    bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
+                    yield return isTiled
+                        ? ReadSingleFrameTiled(tiff, width, height)
+                        : ReadSingleFrameStripped(tiff, width, height);
                 }
             }
         }
 
         /// <summary>
-        /// 特定フレームのみを読み込み
+        /// Reads a single frame at the specified index.
         /// </summary>
         public T[] ReadSingleFrameAt(string filename, int frameIndex)
         {
@@ -273,13 +362,15 @@ namespace MxPlot.Extensions.Tiff
                 tiff.SetDirectory((short)frameIndex);
                 var width = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
                 var height = tiff.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
-
-                return ReadSingleFrame(tiff, width, height);
+                bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
+                return isTiled
+                    ? ReadSingleFrameTiled(tiff, width, height)
+                    : ReadSingleFrameStripped(tiff, width, height);
             }
         }
 
         /// <summary>
-        /// メタデータのみを読み込み
+        /// Reads metadata only, without loading pixel data.
         /// </summary>
         public HyperstackMetadata ReadMetadata(string filename)
         {
@@ -301,13 +392,15 @@ namespace MxPlot.Extensions.Tiff
             var imageDescription = tiff.GetField(TiffTag.IMAGEDESCRIPTION);
             if (imageDescription != null && imageDescription.Length > 0)
             {
-                string omeXml = imageDescription[0].ToString();
+                string omeXml = DecodeOmeXmlString(imageDescription[0]);
                 ParseOmeXml(omeXml, data);
                 data.OMEXml = omeXml;
 
                 ReadCoordinateSystemAnnotation(omeXml, data);
 
-                ReadCustomParameters(omeXml, data);
+                ReadMatrixDataMetadataAnnotation(omeXml, data);
+
+                ReadLegacyCustomParameters(omeXml, data);
             }
             else
             {
@@ -315,29 +408,50 @@ namespace MxPlot.Extensions.Tiff
             }
         }
 
+        /// <summary>
+        /// Decodes the OME-XML string stored in the TIFF IMAGEDESCRIPTION tag.
+        /// <para>
+        /// Although the TIFF spec defines this tag as ASCII, OME-TIFF writers encode it as UTF-8.
+        /// LibTiff.NET maps ASCII bytes 1:1 to Latin-1 chars, so µ (UTF-8: 0xC2 0xB5) becomes Âµ.
+        /// </para>
+        /// <para>
+        /// Fix: re-encode the Latin-1 string back to bytes and decode those bytes as UTF-8.
+        /// </para>
+        /// </summary>
+        private static string DecodeOmeXmlString(FieldValue fv)
+        {
+            // If LibTiff holds raw bytes internally, decode directly as UTF-8
+            if (fv.Value is byte[] rawBytes)
+                return Encoding.UTF8.GetString(rawBytes).TrimEnd('\0');
+
+            // String path: re-encode as Latin-1 to recover the original UTF-8 byte sequence
+            string raw = fv.ToString() ?? string.Empty;
+            return Encoding.UTF8.GetString(Encoding.Latin1.GetBytes(raw)).TrimEnd('\0');
+        }
+
         private void ParseOmeXml(string omeXml, HyperstackMetadata data)
         {
             try
             {
                 var doc = XDocument.Parse(omeXml);
-                if(doc == null)
+                if (doc == null)
                     throw new InvalidDataException("Invalid OME-XML format.");
                 var ns = doc.Root?.GetDefaultNamespace() ?? null;
-                if(ns == null)
+                if (ns == null)
                     throw new InvalidDataException("No namespace found in OME-XML.");
 
-                // 1. Image要素を全て取得 (これがタイル数に対応)
+                // 1. Collect all Image elements (one per FOV/tile)
                 var images = doc.Descendants(ns + "Image").ToList();
 
                 if (images.Count == 0)
                     throw new InvalidDataException("No Image elements found in OME-XML.");
 
-                // 2. FOV数の設定
+                // 2. Set FOV count
                 data.FovCount = images.Count;
                 data.GlobalOrigins = new GlobalPoint[data.FovCount];
 
-                // 3.最初のImage要素を使って、全体の共通プロパティ（画像サイズ、物理サイズなど）を読み込む
-                // ※通常、同一ファイル内のタイル画像のサイズや物理単位は共通であるという前提です。
+                // 3. Read common properties (size, physical units) from the first Image element.
+                //    All tiles within the same file are assumed to share the same pixel dimensions and units.
                 var pixels = images[0].Descendants(ns + "Pixels").FirstOrDefault();
                 if (pixels != null)
                 {
@@ -348,7 +462,7 @@ namespace MxPlot.Extensions.Tiff
                     data.TimePoints = int.Parse(pixels.Attribute("SizeT")?.Value ?? "1");
                     data.DimensionOrder = pixels.Attribute("DimensionOrder")?.Value ?? "XYCZT";
 
-                    // ピクセルサイズ
+                    // Physical pixel size
                     if (double.TryParse(pixels.Attribute("PhysicalSizeX")?.Value, out double psx))
                         data.PixelSizeX = psx;
                     if (double.TryParse(pixels.Attribute("PhysicalSizeY")?.Value, out double psy))
@@ -356,27 +470,39 @@ namespace MxPlot.Extensions.Tiff
                     if (double.TryParse(pixels.Attribute("PhysicalSizeZ")?.Value, out double psz))
                         data.PixelSizeZ = psz;
 
-                    // 単位
+                    // Units
                     data.UnitX = pixels.Attribute("PhysicalSizeXUnit")?.Value ?? "µm";
                     data.UnitY = pixels.Attribute("PhysicalSizeYUnit")?.Value ?? "µm";
                     data.UnitZ = pixels.Attribute("PhysicalSizeZUnit")?.Value ?? "µm";
+
+                    // Detect multi-file OME-TIFF: any TiffData/UUID/@FileName that differs from
+                    // the file being opened.  We cannot resolve the external file here (the
+                    // filename is unknown at this layer), so we just collect all distinct external
+                    // basenames for the caller to act on.
+                    var externalFiles = pixels
+                        .Descendants(ns + "TiffData")
+                        .Select(td => td.Element(ns + "UUID")?.Attribute("FileName")?.Value)
+                        .Where(fn => !string.IsNullOrEmpty(fn))
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    if (externalFiles.Count > 0)
+                        data.MultiFileWarning = string.Join(", ", externalFiles!);
                 }
 
-                //最初のimageでDeltaTの平均値とDeltaTUnitを取得
+                // Compute average DeltaT interval from the first Image element
                 if (pixels != null && data.TimePoints > 1)
                 {
                     string targetZ = "0";
                     string targetC = "0";
 
-                    // 3. 最初のフレーム (T=0) のDeltaTを取得
-                    // LINQの FirstOrDefault で条件に合うものを1つだけ検索（全走査より高速）
+                    // Get DeltaT of the first frame (T=0); FirstOrDefault avoids a full scan
                     var firstPlane = pixels.Descendants(ns + "Plane")
                         .FirstOrDefault(p =>
                             p.Attribute("TheT")?.Value == "0" &&
                             p.Attribute("TheZ")?.Value == targetZ &&
                             p.Attribute("TheC")?.Value == targetC);
 
-                    // 4. 最後のフレーム (T=SizeT-1) のDeltaTを取得
+                    // Get DeltaT of the last frame (T=SizeT-1)
                     string lastTIndex = (data.TimePoints - 1).ToString();
                     var lastPlane = pixels.Descendants(ns + "Plane")
                         .FirstOrDefault(p =>
@@ -384,31 +510,29 @@ namespace MxPlot.Extensions.Tiff
                             p.Attribute("TheZ")?.Value == targetZ &&
                             p.Attribute("TheC")?.Value == targetC);
 
-                    // 両方見つかった場合のみ計算
+                    // Only compute if both endpoints were found
                     if (firstPlane != null && lastPlane != null)
-                    { 
-                        // パース (失敗時は0になるが、nullチェック済みなので概ね安全)
+                    {
+                        // Parse timestamps (TryParse returns 0 on failure; null-checked above)
                         double.TryParse(firstPlane.Attribute("DeltaT")?.Value, out double tStart);
                         double.TryParse(lastPlane.Attribute("DeltaT")?.Value, out double tEnd);
 
-                        // 平均間隔 = (終了時間 - 開始時間) / (ステップ数)
-                        // ステップ数は "フレーム数 - 1"
-                        data.TimeStep  = (tEnd - tStart) / (data.TimePoints - 1);
+                        // Average interval = (end - start) / (TimePoints - 1)
+                        data.TimeStep = (tEnd - tStart) / (data.TimePoints - 1);
                         data.StartTime = tStart;
-                        //単位があればそれも取得
                         data.UnitTime = firstPlane.Attribute("DeltaTUnit")?.Value ?? "s";
                     }
                 }
                 else
                 {
-                    // TimePointsが1の場合は間隔なし
+                    // No time interval when there is only one time point
                     data.TimeStep = 0;
                 }
 
                 var fovOrigins = new List<GlobalPoint>();
 
-                // 中心座標からOrigin(左上/左下)へ戻すためのオフセット
-                double halfWidth = (data.Width - 1) * data.PixelSizeX * 0.5; //PixelSizeXは(Max - Min)  / (Num - 1)で考える
+                // Half-extent offsets to convert center coordinates back to origin (PixelSizeX = (Max-Min)/(Count-1))
+                double halfWidth = (data.Width - 1) * data.PixelSizeX * 0.5;
                 double halfHeight = (data.Height - 1) * data.PixelSizeY * 0.5;
 
                 foreach (var img in images)
@@ -420,17 +544,16 @@ namespace MxPlot.Extensions.Tiff
                         continue;
                     }
 
-                    // 最初のPlaneを取得
                     var firstPlane = thePixels.Descendants(ns + "Plane").FirstOrDefault();
 
-                    //原点座標
+                    // Origin coordinates
                     double originX = 0;
                     double originY = 0;
                     double originZ = 0;
 
                     if (firstPlane != null)
                     {
-                        // PositionX, Y (中心座標) を取得
+                        // PositionX/Y are center coordinates; convert to left-edge origin
                         if (double.TryParse(firstPlane.Attribute("PositionX")?.Value, out double px))
                         {
                             // Center -> Origin (Left)
@@ -439,71 +562,29 @@ namespace MxPlot.Extensions.Tiff
 
                         if (double.TryParse(firstPlane.Attribute("PositionY")?.Value, out double py))
                         {
-                            //もしY軸を反転させたい場合はデータを取得後に行うので、ここでは左上を原点として考える
+                            // Y-flip (if needed) is applied after loading; treat top-left as origin here
                             originY = py - halfHeight;
                         }
 
-                        // Z座標 (最初のスライスの位置)
+                        // Z coordinate: position of the first slice
                         if (double.TryParse(firstPlane.Attribute("PositionZ")?.Value, out double pz))
                         {
-                            originZ = pz; //StartZに相当する
+                            originZ = pz; // equivalent to StartZ
                         }
                     }
 
-                    fovOrigins.Add(new GlobalPoint(originX, originY, originZ)); //実際には2次元タイルしか考えないのでorizinZは使われない
+                    fovOrigins.Add(new GlobalPoint(originX, originY, originZ)); // originZ unused for 2-D tile layouts
                 }
 
-                // 解析結果をメタデータに格納
+                // Store parsed results
                 data.GlobalOrigins = fovOrigins.ToArray();
-                data.StartZ = fovOrigins[0].Z; //Zは共通なので、最初のフレームのZを入れておく全体のZ原点も設定 
+                data.StartZ = fovOrigins[0].Z; // Z is shared across all FOVs; store from the first one
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"OME-XML parse error: {ex.Message}");
-                // フォールバック処理は行わない（エラーを上位に伝播）
+                // Do not fall back; propagate the error to the caller
                 throw new InvalidDataException($"Unable to parse OME-XML: {ex.Message}", ex);
-            }
-        }
-
-        private void ReadBasicTiffInfo(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackMetadata data)
-        {
-            var width = tiff.GetField(TiffTag.IMAGEWIDTH);
-            var height = tiff.GetField(TiffTag.IMAGELENGTH);
-
-            data.Width = width?[0].ToInt() ?? 0;
-            data.Height = height?[0].ToInt() ?? 0;
-            data.Channels = 1;
-            data.ZSlices = 1;
-            data.TimePoints = tiff.NumberOfDirectories();
-        }
-
-        
-        private void ReadCustomParameters(string omeXml, HyperstackMetadata data)
-        {
-            try
-            {
-                var doc = XDocument.Parse(omeXml);
-                if(doc.Root == null)
-                    return;
-                // 1. ルート要素を取得
-                XElement root = doc.Root;
-                if (root == null) 
-                    return;
-
-                // 2. 名前空間なしの "CustomParameters" 要素を探す
-                // XML内で xmlns="" となっているため、XNamespace.None を指定するか、名前だけで検索します
-                XElement? customParams = root.Element(XNamespace.None + "CustomParameters");
-                
-                // 3. 値を返す（CDATAの中身が自動的に文字列として取得されます）
-                var values =  customParams?.Value;
-                if (values == null)
-                    return;
-                data.CustomParameters = values;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"CoordinateSystem annotation read error: {ex.Message}");
-                // エラーでも継続（オプショナル情報）
             }
         }
 
@@ -536,7 +617,7 @@ namespace MxPlot.Extensions.Tiff
                     }
                     if (unit != null)
                     {
-                        // 単位情報の読み取り（必要に応じてアンコメント）
+                        // Read unit information
                         data.UnitX = unit.Attribute("X")?.Value ?? data.UnitX;
                         data.UnitY = unit.Attribute("Y")?.Value ?? data.UnitY;
                         data.UnitZ = unit.Attribute("Z")?.Value ?? data.UnitZ;
@@ -554,77 +635,497 @@ namespace MxPlot.Extensions.Tiff
             catch (Exception ex)
             {
                 Debug.WriteLine($"CoordinateSystem annotation read error: {ex.Message}");
-                // エラーでも継続（オプショナル情報）
+                // Non-fatal: continue without coordinate system annotation
             }
         }
 
-        private void ReadImageData(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackData<T> data, IProgress<int>? progress = null)
+        private void ReadBasicTiffInfo(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackMetadata data)
         {
-            int totalFrames = data.TotalFrames;
+            var width = tiff.GetField(TiffTag.IMAGEWIDTH);
+            var height = tiff.GetField(TiffTag.IMAGELENGTH);
+
+            data.Width = width?[0].ToInt() ?? 0;
+            data.Height = height?[0].ToInt() ?? 0;
+            data.Channels = 1;
+            data.ZSlices = 1;
+            data.TimePoints = tiff.NumberOfDirectories();
+        }
+
+        private void ReadMatrixDataMetadataAnnotation(string omeXml, HyperstackMetadata data)
+        {
+            try
+            {
+                var doc = XDocument.Parse(omeXml);
+                var nsSA = XNamespace.Get("http://www.openmicroscopy.org/Schemas/SA/2016-06");
+
+                // Search for a MapAnnotation whose Namespace contains "matrix-data/metadata"
+                var mapAnnotation = doc.Descendants(nsSA + "MapAnnotation")
+                    .FirstOrDefault(a => a.Attribute("Namespace")?.Value?.Contains("matrix-data/metadata") == true);
+
+                if (mapAnnotation != null)
+                {
+                    var valueElement = mapAnnotation.Element(nsSA + "Value");
+
+                    if (valueElement != null)
+                    {
+                        if (data.MatrixDataMetadata == null)
+                        {
+                            data.MatrixDataMetadata = new Dictionary<string, string>();
+                        }
+                        else
+                        {
+                            // Clear existing entries (merge behavior can be adjusted per requirements)
+                            data.MatrixDataMetadata.Clear();
+                        }
+
+                        // Collect all <M K="Key">Value</M> elements into the dictionary
+                        foreach (var mElement in valueElement.Elements(nsSA + "M"))
+                        {
+                            var key = mElement.Attribute("K")?.Value;
+
+                            // XElement.Value automatically strips CDATA wrappers, returning the raw string content.
+                            var value = mElement.Value;
+
+                            if (!string.IsNullOrEmpty(key))
+                            {
+                                data.MatrixDataMetadata[key] = value ?? string.Empty;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"MatrixDataMetadata annotation read error: {ex.Message}");
+                // Non-fatal: continue without metadata annotation
+            }
+        }
+
+        private void ReadLegacyCustomParameters(string omeXml, HyperstackMetadata data)
+        {
+            try
+            {
+                var doc = XDocument.Parse(omeXml);
+                if (doc.Root == null) return;
+
+                // Look for a namespace-less "CustomParameters" element
+                XElement? customParams = doc.Root.Element("CustomParameters");
+                string? rawValues = customParams?.Value;
+
+                if (!string.IsNullOrEmpty(rawValues))
+                {
+                    // Use the legacy Key=... parser to recover a Dictionary<int, string>
+                    var legacyDict = ParseCustomParametersString(rawValues);
+
+                    if (legacyDict != null)
+                    {
+                        if (data.MatrixDataMetadata == null)
+                            data.MatrixDataMetadata = new Dictionary<string, string>();
+
+                        // Merge into the existing dictionary (skip duplicate keys)
+                        foreach (var kvp in legacyDict)
+                        {
+                            string key = $"IntKey_{kvp.Key}"; // Prefix to indicate legacy origin
+                            if (!data.MatrixDataMetadata.ContainsKey(key))
+                            {
+                                data.MatrixDataMetadata[key] = kvp.Value;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"CustomParameters read error: {ex.Message}");
+            }
+        }
+
+        private static Dictionary<int, string> ParseCustomParametersString(string values)
+        {
+            if (values == null) 
+                return null;
+
+            //CustomParameters stores Dictionary<int, string> entries as sequential "Key=XXX" / value pairs
+            var result = new Dictionary<int, string>();
+
+            try
+            {
+                // Split into lines
+                string[] lines = values.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+
+                int? currentKey = null;
+                List<string> currentValueLines = new List<string>();
+
+                foreach (var line in lines)
+                {
+                    // Check whether the line starts with "Key="
+                    if (line.StartsWith("Key="))
+                    {
+                        // Save the accumulated value for the previous key
+                        if (currentKey.HasValue)
+                        {
+                            result[currentKey.Value] = string.Join(Environment.NewLine, currentValueLines).TrimEnd();
+                        }
+
+                        // Parse the new key, e.g. "Key=8119" → 8119
+                        if (int.TryParse(line.Substring(4), out int key))
+                        {
+                            currentKey = key;
+                            currentValueLines.Clear();
+                        }
+                    }
+                    else if (currentKey.HasValue)
+                    {
+                        // All non-Key lines accumulate as part of the current value
+                        currentValueLines.Add(line);
+                    }
+                }
+
+                // Save the last key-value pair
+                if (currentKey.HasValue)
+                {
+                    result[currentKey.Value] = string.Join(Environment.NewLine, currentValueLines).TrimEnd();
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidDataException("Parse error in CustomParameters: " + ex.Message, ex);
+            }
+
+            return result;
+        }
+
+
+
+        private void ReadImageData(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackData<T> data, IProgress<int>? progress = null, CancellationToken ct = default)
+        {
+            int totalFrames  = data.TotalFrames;
             int actualFrames = Math.Min(totalFrames, tiff.NumberOfDirectories());
-            data.ImageStack = new List<T[]>(actualFrames);
+            data.ImageStack  = new List<T[]>(actualFrames);
+
+            // Determine layout once from the first directory (same for all frames).
+            // SetDirectory(0) is used only here; subsequent frames advance via ReadDirectory()
+            // so that each IFD is visited exactly once — O(N) instead of O(N²).
+            tiff.SetDirectory(0);
+            bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
 
             progress?.Report(-actualFrames);
             for (int directory = 0; directory < actualFrames; directory++)
             {
-                tiff.SetDirectory((short)directory);
-                var frameData = ReadSingleFrame(tiff, data.Width, data.Height);
+                ct.ThrowIfCancellationRequested();
+                var frameData = isTiled
+                    ? ReadSingleFrameTiled(tiff, data.Width, data.Height)
+                    : ReadSingleFrameStripped(tiff, data.Width, data.Height);
                 data.ImageStack.Add(frameData);
-
                 progress?.Report(directory);
+
+                if (directory < actualFrames - 1 && !tiff.ReadDirectory())
+                    throw new InvalidDataException($"Could not advance to directory {directory + 1}");
             }
             progress?.Report(actualFrames);
-
         }
 
-        private T[] ReadSingleFrame(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
+        /// <summary>
+        /// Parallel variant of <see cref="ReadImageData"/>.
+        /// Opens one LibTiff handle per thread; each thread advances sequentially within its range.
+        /// Effective for compressed (e.g. LZW) files where decompression is CPU-bound.
+        /// </summary>
+        private void ReadImageDataParallel(string filePath, HyperstackData<T> data, int parallelDegree, bool isTiled, IProgress<int>? progress, CancellationToken ct = default)
         {
-            var imageData = new T[width * height];
+            int actualFrames = data.TotalFrames;
+            var imageStack   = new T[actualFrames][];
 
-            // T が ushort (16bit) かどうか確認
-            bool isUshort = typeof(T) == typeof(ushort);
-            int typeSize = isUshort ? 2 : Marshal.SizeOf(typeof(T));
+            int threads = Math.Min(parallelDegree, actualFrames);
+            int chunk   = (actualFrames + threads - 1) / threads;
 
-            int stride = width * typeSize;
-            byte[] buffer = new byte[stride];
+            progress?.Report(-actualFrames);
+            int reported = 0;
 
-            // ファイルが逆エンディアン（スワップが必要）かチェック
-            bool isSwapped = tiff.IsByteSwapped();
-
-            // 出力先の Span
-            Span<byte> destBytes = MemoryMarshal.AsBytes(imageData.AsSpan());
-
-            for (int row = 0; row < height; row++)
+            Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads, CancellationToken = ct }, t =>
             {
-                // 1行読み込み
-                if (!tiff.ReadScanline(buffer, row, 0))
-                {
-                    throw new InvalidOperationException($"Failed to read the row: {row}");
-                }
+                int start = t * chunk;
+                int end   = Math.Min(start + chunk, actualFrames);
+                if (start >= actualFrames) return;
 
-                // ★スワップ処理 (16bitの場合)
-                if (isUshort && isSwapped)
-                {
-                    // バイト順を入れ替える (BigEndian <-> LittleEndian)
-                    for (int i = 0; i < buffer.Length; i += 2)
-                    {
-                        byte temp = buffer[i];
-                        buffer[i] = buffer[i + 1];
-                        buffer[i + 1] = temp;
-                    }
-                }
+                using var localTiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
 
-                // 変換後のバイト列を imageData の所定の位置にコピー
-                buffer.AsSpan().CopyTo(destBytes.Slice(row * stride, stride));
+                // Advance to this thread's starting IFD: O(start) hops, sequential ReadDirectory
+                localTiff.SetDirectory(0);
+                for (int i = 0; i < start; i++) localTiff.ReadDirectory();
+
+                for (int f = start; f < end; f++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    imageStack[f] = isTiled
+                        ? ReadSingleFrameTiled(localTiff, data.Width, data.Height)
+                        : ReadSingleFrameStripped(localTiff, data.Width, data.Height);
+
+                    progress?.Report(Interlocked.Increment(ref reported) - 1);
+
+                    if (f < end - 1 && !localTiff.ReadDirectory())
+                        throw new InvalidDataException($"Thread {t}: could not advance to frame {f + 1}");
+                }
+            });
+
+            data.ImageStack = imageStack.ToList();
+            progress?.Report(actualFrames);
+        }
+
+        /// <summary>
+        /// Reads one frame from a strip-organized TIFF using <c>ReadEncodedStrip</c>.
+        /// One API call per strip instead of one per row, reducing overhead by ×(rows/strip).
+        /// </summary>
+        private T[] ReadSingleFrameStripped(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
+        {
+            var imageData    = new T[width * height];
+            int typeSize     = Marshal.SizeOf(typeof(T));
+
+            Span<byte> dest  = MemoryMarshal.AsBytes(imageData.AsSpan());
+
+            int rowsPerStrip = tiff.GetField(TiffTag.ROWSPERSTRIP)?[0].ToInt() ?? height;
+            int numStrips    = tiff.NumberOfStrips();
+            int maxStripBytes = tiff.StripSize();
+            var stripBuf     = new byte[maxStripBytes];
+
+            for (int strip = 0; strip < numStrips; strip++)
+            {
+                int bytesRead = tiff.ReadEncodedStrip(strip, stripBuf, 0, maxStripBytes);
+                if (bytesRead < 0)
+                    throw new InvalidOperationException($"ReadEncodedStrip failed: strip={strip}");
+
+                int startRow    = strip * rowsPerStrip;
+                int actualRows  = Math.Min(rowsPerStrip, height - startRow);
+                int bytesToCopy = actualRows * width * typeSize;
+                stripBuf.AsSpan(0, bytesToCopy)
+                        .CopyTo(dest.Slice(startRow * width * typeSize));
             }
-
             return imageData;
         }
 
+        /// <summary>
+        /// Reads one frame from a tile-organized TIFF using <c>ReadEncodedTile</c>.
+        /// One API call per tile instead of one per row, reducing overhead significantly.
+        /// </summary>
+        private T[] ReadSingleFrameTiled(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
+        {
+            var imageData  = new T[width * height];
+            int typeSize   = Marshal.SizeOf(typeof(T));
+
+            Span<byte> dest = MemoryMarshal.AsBytes(imageData.AsSpan());
+
+            int tileWidth  = tiff.GetField(TiffTag.TILEWIDTH)[0].ToInt();
+            int tileHeight = tiff.GetField(TiffTag.TILELENGTH)[0].ToInt();
+            int tilesAcross = (width  + tileWidth  - 1) / tileWidth;
+            int tilesDown   = (height + tileHeight - 1) / tileHeight;
+            int maxTileBytes = tiff.TileSize();
+            var tileBuf    = new byte[maxTileBytes];
+
+            for (int tileRow = 0; tileRow < tilesDown; tileRow++)
+            {
+                for (int tileCol = 0; tileCol < tilesAcross; tileCol++)
+                {
+                    int tileIndex = tileRow * tilesAcross + tileCol;
+                    int bytesRead = tiff.ReadEncodedTile(tileIndex, tileBuf, 0, maxTileBytes);
+                    if (bytesRead < 0)
+                        throw new InvalidOperationException($"ReadEncodedTile failed: tile={tileIndex}");
+
+                    int startX = tileCol * tileWidth;
+                    int startY = tileRow * tileHeight;
+                    int actualTileWidth  = Math.Min(tileWidth,  width  - startX);
+                    int actualTileHeight = Math.Min(tileHeight, height - startY);
+
+                    for (int row = 0; row < actualTileHeight; row++)
+                    {
+                        int srcOffset = row * tileWidth * typeSize;
+                        int dstOffset = ((startY + row) * width + startX) * typeSize;
+                        tileBuf.AsSpan(srcOffset, actualTileWidth * typeSize)
+                               .CopyTo(dest.Slice(dstOffset));
+                    }
+                }
+            }
+            return imageData;
+        }
+                
+
+        #region Logic for VirtualList (OmeTiffLoadMode == Virtual)
+
+
+        internal (long[][] offsets, long[][] byteCounts) ScanStripInfo(BitMiracle.LibTiff.Classic.Tiff tiff, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
+        {
+            long[][] offsets = new long[totalFrames][];
+            long[][] byteCounts = new long[totalFrames][];
+
+            progress?.Report(-totalFrames); // Signal total frame count to the UI
+
+            // Always start from directory 0 before entering the loop
+            tiff.SetDirectory(0);
+
+            for (short i = 0; i < totalFrames; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                // 1. Verify that the frame is uncompressed (Virtual mode requires raw access)
+                FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
+                if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
+                {
+                    throw new NotSupportedException($"Virtual mode requires uncompressed TIFF. Frame {i} is compressed.");
+                }
+
+                // 2. Read strip offsets
+                FieldValue[] offsetTag = tiff.GetField(TiffTag.STRIPOFFSETS);
+                if (offsetTag == null || offsetTag.Length == 0)
+                    throw new InvalidDataException($"Missing StripOffsets tag at frame {i}.");
+
+                // 3. Read strip byte counts
+                FieldValue[] byteCountTag = tiff.GetField(TiffTag.STRIPBYTECOUNTS);
+                if (byteCountTag == null || byteCountTag.Length == 0)
+                    throw new InvalidDataException($"Missing StripByteCounts tag at frame {i}.");
+
+                offsets[i] = ExtractLongArray(offsetTag[0]);
+                byteCounts[i] = ExtractLongArray(byteCountTag[0]);
+                progress?.Report(i);
+
+                // Advance sequentially — never use SetDirectory(i) here!
+                if (i < totalFrames - 1)
+                {
+                    if (!tiff.ReadDirectory())
+                        throw new InvalidDataException($"Could not read directory for frame {i + 1}");
+                }
+            }
+
+            return (offsets, byteCounts);
+        }
+
+        /// <summary>
+        /// Opens <paramref name="filePath"/> read-only, scans all IFDs and returns strip offset/bytecount arrays.
+        /// Convenience overload that avoids exposing LibTiff types to callers outside this assembly.
+        /// </summary>
+        internal (long[][] offsets, long[][] byteCounts) ScanStripInfoFromFile(string filePath, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
+        {
+            using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
+            if (tiff == null)
+                throw new IOException($"Cannot open OME-TIFF for strip scanning: {filePath}");
+            return ScanStripInfo(tiff, totalFrames, progress, ct);
+        }
+
+        /// <summary>
+        /// Creates a pre-allocated OME-TIFF vessel by writing only the BigTIFF header and IFDs,
+        /// then calling <see cref="FileStream.SetLength"/> for pixel data space.
+        /// <para>
+        /// This is O(frames) for IFD writing and effectively O(1) for pixel data allocation on NTFS,
+        /// making it dramatically faster than the skeleton-write approach for large files.
+        /// </para>
+        /// </summary>
+        /// <returns>
+        /// Per-frame strip offset and byte-count arrays pointing into the pre-allocated file regions.
+        /// Pass these directly to <see cref="WritableVirtualStrippedFrames{T}"/>.
+        /// </returns>
+        internal (long[][] offsets, long[][] byteCounts) BuildVesselFast(string filePath, HyperstackMetadata spec)
+        {
+            string omeXml = CreateOmeXml(spec);
+            int rowsPerStrip = CalculateOptimalRowsPerStrip(spec.Width, spec.Height);
+            ushort sampleFmtCode = (ushort)GetSampleFormat(); // 1=UINT, 2=INT, 3=IEEEFP (matches TIFF spec)
+
+            return BigTiffVesselWriter.Build(
+                filePath,
+                spec.Width,
+                spec.Height,
+                spec.TotalFrames,
+                GetBytesPerPixel(),
+                GetBitsPerSample(),
+                sampleFmtCode,
+                omeXml,
+                rowsPerStrip);
+        }
+
+        private (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) ScanTileInfo(BitMiracle.LibTiff.Classic.Tiff tiff, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
+        {
+            long[][] offsets = new long[totalFrames][];
+            long[][] byteCounts = new long[totalFrames][];
+
+            progress?.Report(-totalFrames);
+
+            tiff.SetDirectory(0);
+
+            // Read tile dimensions (shared across all frames) from directory 0
+            FieldValue[] twTag = tiff.GetField(TiffTag.TILEWIDTH);
+            FieldValue[] tlTag = tiff.GetField(TiffTag.TILELENGTH);
+
+            if (twTag == null || tlTag == null)
+                throw new InvalidDataException("TileWidth or TileLength tag is missing in a tiled TIFF.");
+
+            int tileWidth = twTag[0].ToInt();
+            int tileLength = tlTag[0].ToInt();
+
+            for (short i = 0; i < totalFrames; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
+                if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
+                {
+                    throw new NotSupportedException($"Virtual mode requires uncompressed TIFF. Frame {i} is compressed.");
+                }
+
+                // Tiled TIFFs use TILEOFFSETS / TILEBYTECOUNTS instead of STRIPOFFSETS / STRIPBYTECOUNTS
+                FieldValue[] offsetTag = tiff.GetField(TiffTag.TILEOFFSETS);
+                if (offsetTag == null || offsetTag.Length == 0)
+                    throw new InvalidDataException($"Missing TileOffsets tag at frame {i}.");
+
+                FieldValue[] byteCountTag = tiff.GetField(TiffTag.TILEBYTECOUNTS);
+                if (byteCountTag == null || byteCountTag.Length == 0)
+                    throw new InvalidDataException($"Missing TileByteCounts tag at frame {i}.");
+
+                // Each frame contains multiple tiles; array length equals the total tile count
+                //offsets[i] = offsetTag[0].ToIntArray().Select(v => (long)v).ToArray();
+                //byteCounts[i] = byteCountTag[0].ToIntArray().Select(v => (long)v).ToArray();
+
+                offsets[i] = ExtractLongArray(offsetTag[0]);
+                byteCounts[i] = ExtractLongArray(byteCountTag[0]);
+
+                progress?.Report(i);
+
+                if (i < totalFrames - 1)
+                {
+                    if (!tiff.ReadDirectory())
+                        throw new InvalidDataException($"Could not read directory for frame {i + 1}");
+                }
+            }
+
+            return (tileWidth, tileLength, offsets, byteCounts);
+        }
+
+        private long[] ExtractLongArray(BitMiracle.LibTiff.Classic.FieldValue fieldValue)
+        {
+            //if (fieldValue == null) return Array.Empty<long>();
+
+            // 1. For BigTIFF (>16 GB), LibTiff may hold long[] internally; try direct cast first
+            if (fieldValue.Value is long[] longArray)
+            {
+                return longArray;
+            }
+
+            // 2. ulong[] case
+            if (fieldValue.Value is ulong[] ulongArray)
+            {
+                return ulongArray.Select(v => (long)v).ToArray();
+            }
+
+            // 3. Standard TIFF (or 32-bit downcast) case
+            int[] intArray = fieldValue.ToIntArray();
+            if (intArray != null)
+            {
+                // Cast int to uint before widening to long to correctly recover
+                // 2 GB – 4 GB offsets that appeared negative as signed int
+                return intArray.Select(v => (long)(uint)v).ToArray();
+            }
+
+            return Array.Empty<long>();
+        }
+
+        #endregion
         #endregion
 
 
-        #region 型依存メソッド
+        #region Type Utilities
 
         private int GetBitsPerSample()
         {
@@ -675,15 +1176,15 @@ namespace MxPlot.Extensions.Tiff
 
         #endregion
 
-        #region OME-XML生成
+        #region OME-XML Generation
 
-        private string CreateOmeXml(HyperstackMetadata data, string? customParameters = null)
+        private string CreateOmeXml(HyperstackMetadata data)
         {
             XNamespace ns = "http://www.openmicroscopy.org/Schemas/OME/2016-06";
             XNamespace sa = "http://www.openmicroscopy.org/Schemas/SA/2016-06";
             XNamespace xsi = "http://www.w3.org/2001/XMLSchema-instance";
 
-            // UUIDを生成（Fijiの出力に合わせてファイル固有IDを作る）
+            // Generate a file-unique UUID to match Fiji's output format
             string uuid = "urn:uuid:" + Guid.NewGuid().ToString();
 
             var ome = new XElement(ns + "OME",
@@ -691,22 +1192,22 @@ namespace MxPlot.Extensions.Tiff
                   new XAttribute(XNamespace.Xmlns + "xsi", xsi.NamespaceName),
                   new XAttribute(xsi + "schemaLocation", $"{ns.NamespaceName} {ns.NamespaceName}/ome.xsd"),
                   new XAttribute("UUID", uuid),
-                  new XAttribute("Creator", "OMETiffHandler.cs C#")
+                  new XAttribute("Creator", "OmeTiffHandler.cs C# (MxPlot)")
               );
 
-            // 1つのFOVに含まれる画像の総数 (Z * C * T)
+            // Total planes per FOV (Z * C * T)
             int planesPerFov = data.ZSlices * data.Channels * data.TimePoints;
 
-            // ★修正点: FOVの数だけ Image ノードを生成して追加
+            // Generate one Image node per FOV
             for (int fov = 0; fov < data.FovCount; fov++)
             {
-                // このFOVが始まるIFD番号 (前のFOVの枚数分だけずらす)
+                // IFD start index for this FOV (offset by the number of planes in previous FOVs)
                 int startIfd = fov * planesPerFov;
                 (int tileX, int tileY) = data.GetTileIndices(fov);
 
                 var imageNode = new XElement(ns + "Image",
                     new XAttribute("ID", $"Image:{fov}"), // Image:0, Image:1 ...
-                    new XAttribute("Name", data.FovCount > 1 ? $"FOV:{fov} [{tileX},{tileY}]" : "Single FOV"), // 任意の名前
+                    new XAttribute("Name", data.FovCount > 1 ? $"FOV:{fov} [{tileX},{tileY}]" : "Single FOV"),
                     new XElement(ns + "Pixels",
                         new XAttribute("ID", $"Pixels:{fov}"), // Pixels:0, Pixels:1 ...
                         new XAttribute("SizeX", data.Width),
@@ -720,34 +1221,36 @@ namespace MxPlot.Extensions.Tiff
                         new XAttribute("PhysicalSizeY", data.PixelSizeY),
                         new XAttribute("PhysicalSizeZ", data.PixelSizeZ),
 
-                        // チャンネル定義 (共通)
+                        // Channel definitions (shared across all FOVs)
                         CreateChannels(data.Channels, ns),
 
-                        // ★重要: IFDの開始位置を渡す必要があります
-                        // 既存のメソッドを CreateTiffData(..., startIfd) に修正してください
                         CreateTiffData(data.Channels, data.ZSlices, data.TimePoints, ns, startIfd),
 
-                        // Plane定義 (FOVインデックスを渡して、そのFOVのGlobalPointを参照させる)
+                        // Plane definitions (pass the FOV index to resolve its GlobalPoint)
                         CreatePlanes(data, ns, fov)
                     )
                 );
 
-                // アノテーション参照 (必要であれば各Imageに追加)
+                // Annotation reference for each Image node
                 imageNode.Add(new XElement(ns + "AnnotationRef", new XAttribute("ID", "Annotation:CoordinateSystem:0")));
 
-                // OMEルートに追加
+
+                if (data.MatrixDataMetadata != null && data.MatrixDataMetadata.Count > 0)
+                {
+                    imageNode.Add(new XElement(ns + "AnnotationRef", new XAttribute("ID", "Annotation:Map:Custom")));
+                }
+
                 ome.Add(imageNode);
             }
 
-            // StructuredAnnotations (全体で1つ、あるいは必要に応じて増やす)
-            ome.Add(new XElement(sa + "StructuredAnnotations",
-                 CreateCoordinateSystemAnnotation(data, sa)
-            ));
+            // Build StructuredAnnotations (coordinate system + custom metadata)
+            var structuredAnnotations = new XElement(sa + "StructuredAnnotations", 
+                CreateCoordinateSystemAnnotation(data, sa),
+                CreateMatrixDataMetadataAnnotation(data, sa)
+                );
 
-            if (!string.IsNullOrEmpty(customParameters))
-            {
-                ome.Add(new XElement("CustomParameters", new XCData(customParameters)));
-            }
+            ome.Add(structuredAnnotations);
+
             return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + ome.ToString();
         }
 
@@ -765,12 +1268,12 @@ namespace MxPlot.Extensions.Tiff
 
         private IEnumerable<XElement> CreateTiffData(int c, int z, int t, XNamespace ns, int ifd)
         {
-            // 全フレーム数
+            // Total frame count
             //int totalFrames = c * z * t;
 
             //int ifd = 0;
 
-            // XYCZT順序で正確にマッピング
+            // Map frames in XYCZT order
             for (int tIndex = 0; tIndex < t; tIndex++)
             {
                 for (int zIndex = 0; zIndex < z; zIndex++)
@@ -796,12 +1299,12 @@ namespace MxPlot.Extensions.Tiff
             int t = data.TimePoints;
             int c = data.Channels;
             int z = data.ZSlices;
-            //GlobalOriginは原点（左上/左下）の座標を示すので、中心座標に変換する必要がある
+            // GlobalOrigin is the origin (top-left / bottom-left); convert to center for OME-XML PositionX/Y
             var gorigin = (data.GlobalOrigins != null && fovIndex < data.GlobalOrigins.Length) ?
                 data.GlobalOrigins[fovIndex] : new GlobalPoint(data.StartX, data.StartY, data.StartZ);
-            //posX/Yは中心座標
+            // posX/Y are center coordinates
             double posX = gorigin.X + (data.Width - 1) * data.PixelSizeX * 0.5;
-            double posY = gorigin.Y + (data.Height - 1) * data.PixelSizeY * 0.5 ;
+            double posY = gorigin.Y + (data.Height - 1) * data.PixelSizeY * 0.5;
 
             for (int tIndex = 0; tIndex < t; tIndex++)
             {
@@ -809,7 +1312,7 @@ namespace MxPlot.Extensions.Tiff
                 for (int zIndex = 0; zIndex < z; zIndex++)
                 {
                     //double posZ = data.StartZ + data.PixelSizeZ * zIndex;
-                    double posZ = gorigin.Z + data.PixelSizeZ * zIndex; //MatrixData的には現状ではgorizin.Zはdata.StartZと同じになる
+                    double posZ = gorigin.Z + data.PixelSizeZ * zIndex; // gorigin.Z == data.StartZ in the current MatrixData model
                     for (int cIndex = 0; cIndex < c; cIndex++)
                     {
                         yield return new XElement(ns + "Plane",
@@ -818,10 +1321,10 @@ namespace MxPlot.Extensions.Tiff
                             new XAttribute("TheT", tIndex),
                             new XAttribute("PositionX", posX),
                             new XAttribute("PositionY", posY),
-                            new XAttribute("PositionZ", posZ), 
-                            new XAttribute("DeltaT", time), //OME-TIFFではDeltaTは測定開始（最初のフレーム）からの経過時間
+                            new XAttribute("PositionZ", posZ),
+                            new XAttribute("DeltaT", time), // DeltaT = elapsed time from the first frame
                             new XAttribute("DeltaTUnit", data.UnitTime),
-                            new XAttribute("ExposureTime", 1) 
+                            new XAttribute("ExposureTime", 1)
                         );
                     }
                 }
@@ -829,13 +1332,13 @@ namespace MxPlot.Extensions.Tiff
         }
 
         /// <summary>
-        /// カスタム座標系情報を追加
+        /// Creates a custom coordinate-system annotation and adds it to the OME-XML.
         /// </summary>
         private XElement CreateCoordinateSystemAnnotation(HyperstackMetadata data, XNamespace sa)
         {
             return new XElement(sa + "XMLAnnotation",
                 new XAttribute("ID", "Annotation:CoordinateSystem:0"),
-                new XAttribute("Namespace", "matarix-data-plotter/coordinate-system/v1"),
+                new XAttribute("Namespace", "mxplot/matrix-data/coordinate-system/v1"),
                 new XElement(sa + "Value",
                     new XElement("CoordinateSystem",
                         new XElement("IndexZeroPosition",
@@ -857,26 +1360,74 @@ namespace MxPlot.Extensions.Tiff
                 )
             );
         }
+        /// <summary>
+        /// Converts <c>MatrixData.Metadata</c> (IDictionary&lt;string, string&gt;) to an OME-XML MapAnnotation.
+        /// </summary>
+        /// <param name="data"></param>
+        /// <param name="sa"></param>
+        /// <returns></returns>
+        private XElement? CreateMatrixDataMetadataAnnotation(HyperstackMetadata data, XNamespace sa)
+        {
+            // Return null if there is no metadata (XElement silently ignores null children)
+            if (data.MatrixDataMetadata == null || data.MatrixDataMetadata.Count == 0)
+            {
+                return null;
+            }
+
+            var valueElement = new XElement(sa + "Value");
+            var metadata = data.MatrixDataMetadata;
+            foreach (var kvp in metadata)
+            {
+                if (string.Equals(kvp.Key, OmeTiffHandler.OmeXmlKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Avoid embedding OME-XML within itself
+                    continue;
+                }
+
+                // Escape the CDATA end sequence to safely embed arbitrary strings
+                string safeValue = kvp.Value?.Replace("]]>", "]]]]><![CDATA[>") ?? "";
+
+                valueElement.Add(
+                    new XElement(sa + "M",
+                        new XAttribute("K", kvp.Key.ToString()),
+                        new XCData(safeValue)
+                    )
+                );
+            }
+
+            // Return null if all entries were excluded (e.g., OME_XML key)
+            if (!valueElement.HasElements)
+            {
+                return null;
+            }
+
+            return new XElement(sa + "MapAnnotation",
+                new XAttribute("ID", "Annotation:Map:Custom"),
+                new XAttribute("Namespace", "mxplot/matrix-data/metadata/v1"),
+                valueElement
+            );
+        }
+
         #endregion
     }
 
-    #region データクラス
+    #region Data class
     public class HyperstackMetadata
     {
         /// <summary>
-        /// X方向の画素数
+        /// Number of pixels in the X direction.
         /// </summary>
         public int Width { get; set; }
         /// <summary>
-        /// Y方向の画素数
+        /// Number of pixels in the Y direction.
         /// </summary>
         public int Height { get; set; }
         public int Channels { get; set; }
         public int ZSlices { get; set; }
         public int TimePoints { get; set; }
-        public double StartTime { get; set; } =0.0;
+        public double StartTime { get; set; } = 0.0;
         /// <summary>
-        /// DeltaTは各タイムポイント間の時間間隔（単位はUnitTimeに依存）の平均値
+        /// Average time interval between time points (units depend on UnitTime).
         /// </summary>
         public double TimeStep { get; set; } = 1;
 
@@ -886,32 +1437,30 @@ namespace MxPlot.Extensions.Tiff
         public string UnitX { get; set; } = "µm";
         public string UnitY { get; set; } = "µm";
         public string UnitZ { get; set; } = "µm";
-
         public string UnitTime { get; set; } = "s";
-        
 
-        //タイリング設定
+        // Tiling settings
         public int FovCount { get; set; } = 1;
 
         /// <summary>
-        /// 2次元タイルレイアウト (X方向タイル数, Y方向タイル数)
+        /// 2-D tile layout (number of tiles in X, number of tiles in Y).
         /// </summary>
         public (int X, int Y) TileLayout { get; set; } = (1, 1);
         /// <summary>
-        /// ワールド座標（ステージ座標）における各タイル（FOV)の原点座標
+        /// Origin coordinates of each tile (FOV) in world (stage) coordinates.
         /// </summary>
-        public GlobalPoint[]? GlobalOrigins { get; set; }   = null;
+        public GlobalPoint[]? GlobalOrigins { get; set; } = null;
 
         /// <summary>
-        /// フレームの原点X座標( = T[0]のX座標（相対値）、MatrixDataだと左下、通常は左下）
+        /// Frame origin X coordinate (= X of T[0], relative; bottom-left in MatrixData convention).
         /// </summary>
         public double StartX { get; set; } = 0.0;
         /// <summary>
-        /// フレームの原点Y座標( = T[0]のY座標（相対値）、MatrixDataだと左下、通常は左下）
+        /// Frame origin Y coordinate (= Y of T[0], relative; bottom-left in MatrixData convention).
         /// </summary>
         public double StartY { get; set; } = 0.0;
         /// <summary>
-        /// zスタックの【開始】Z座標(zindex = 0のときの絶対位置)
+        /// Starting Z coordinate of the Z stack (absolute position at zIndex = 0).
         /// </summary>
         public double StartZ { get; set; } = 0.0;
 
@@ -921,14 +1470,28 @@ namespace MxPlot.Extensions.Tiff
         public string DimensionOrder { get; set; } = "XYCZT";
         public string? PixelType { get; set; }
 
-        public string? CustomParameters { get; set; }
+        /// <summary>
+        /// Stores MatrixData.Metadata entries as key-value pairs.
+        /// </summary>
+        public IDictionary<string, string>? MatrixDataMetadata { get; set; }
 
         public string? OMEXml { get; set; }
 
         /// <summary>
-        /// 総フレーム数
+        /// Total frame count.
         /// </summary>
         public int TotalFrames => Channels * ZSlices * TimePoints * FovCount;
+
+        public bool IsYFlipped { get; set; } = false;
+
+        public bool IsVirtualMode { get; set; } = false;
+
+        /// <summary>
+        /// Set when the OME-XML contains TiffData entries that reference external files
+        /// (multi-file OME-TIFF). The external references are ignored and only the IFDs
+        /// present in this file are read. This property carries a human-readable warning message.
+        /// </summary>
+        public string? MultiFileWarning { get; set; }
 
         public (int X, int Y) GetTileIndices(int fovIndex)
         {
@@ -938,19 +1501,81 @@ namespace MxPlot.Extensions.Tiff
             return (xIndex, yIndex);
         }
 
-        //内部データを上下反転させる：派生クラスで型に応じて実装
-        public virtual void FlipVertical()
+        /// <summary>Default constructor; all properties retain their declared default values.</summary>
+        public HyperstackMetadata() { }
+
+        /// <summary>
+        /// Initializes a <see cref="HyperstackMetadata"/> from a <see cref="Scale2D"/> and optional axes,
+        /// which is more natural when the caller already has <see cref="MatrixData{T}"/>-style objects.
+        /// </summary>
+        /// <param name="scale">
+        /// XY plane scale. Provides Width, Height, pixel pitches (PixelSizeX/Y), origins (StartX/Y),
+        /// and units (UnitX/Y, applied only when non-empty).
+        /// </param>
+        /// <param name="channel">
+        /// Optional channel axis. Only <see cref="Axis.Count"/> is used (index-based; Min/Max are ignored).
+        /// </param>
+        /// <param name="z">
+        /// Optional Z axis. Provides ZSlices, StartZ, PixelSizeZ (= <see cref="Axis.Step"/>), and UnitZ.
+        /// </param>
+        /// <param name="time">
+        /// Optional time axis. Provides TimePoints, StartTime, TimeStep (= <see cref="Axis.Step"/>), and UnitTime.
+        /// </param>
+        /// <param name="fov">
+        /// Optional FOV axis. Provides FovCount, TileLayout, and GlobalOrigins.
+        /// </param>
+        public HyperstackMetadata(Scale2D scale, Axis? channel = null, Axis? z = null, Axis? time = null, FovAxis? fov = null)
         {
-            throw new NotSupportedException("Unable to excute FlipVertical on metadata-only class.");
+            Width = scale.XCount;
+            Height = scale.YCount;
+            // XStep is 0 when XCount == 1; fall back to 1.0 to avoid zero pixel size in metadata
+            PixelSizeX = scale.XCount > 1 ? scale.XStep : 1.0;
+            PixelSizeY = scale.YCount > 1 ? scale.YStep : 1.0;
+            StartX = scale.XMin;
+            StartY = scale.YMin;
+            if (!string.IsNullOrEmpty(scale.XUnit)) UnitX = scale.XUnit;
+            if (!string.IsNullOrEmpty(scale.YUnit)) UnitY = scale.YUnit;
+
+            // Always set count fields; default to 1 when the axis is omitted
+            Channels = channel?.Count ?? 1;
+            ZSlices = z?.Count ?? 1;
+            TimePoints = time?.Count ?? 1;
+
+            if (z != null)
+            {
+                StartZ = z.Min;
+                PixelSizeZ = z.Count > 1 ? z.Step : 1.0;
+                if (!string.IsNullOrEmpty(z.Unit)) UnitZ = z.Unit;
+            }
+
+            if (time != null)
+            {
+                StartTime = time.Min;
+                TimeStep = time.Count > 1 ? time.Step : 1.0;
+                if (!string.IsNullOrEmpty(time.Unit)) UnitTime = time.Unit;
+            }
+
+            if (fov != null)
+            {
+                FovCount = fov.Count;
+                TileLayout = (fov.TileLayout.X, fov.TileLayout.Y);
+                GlobalOrigins = (GlobalPoint[])fov.Origins.Clone();
+            }
+        }
+
+        // Flips internal data vertically: implemented in derived classes per pixel type
+        public virtual void FlipY()
+        {
+            throw new NotSupportedException("Cannot execute FlipVertical on a metadata-only class.");
         }
 
         public static string FormatXml(string xmlString)
         {
-            // 改行があるならそのまま返す
+            // Return as-is if the string already contains line breaks
             if (xmlString.Contains("\n") || xmlString.Contains("\r"))
                 return xmlString;
 
-            // 改行がない場合は整形
+            // Pretty-print if the string is a single line
             var doc = new XmlDocument();
             doc.LoadXml(xmlString);
 
@@ -974,13 +1599,13 @@ namespace MxPlot.Extensions.Tiff
     }
 
     /// <summary>
-    /// Hyperstackデータとメタデータを格納するクラス
+    /// Stores both hyperstack data (pixel frames) and the associated metadata.
     /// </summary>
-    public class HyperstackData<T>: HyperstackMetadata where T : unmanaged
+    public class HyperstackData<T> : HyperstackMetadata where T : unmanaged
     {
-        public List<T[]> ImageStack { get; set; } = new List<T[]>();
+        public IList<T[]>? ImageStack { get; set; }
 
-        // DataTypeプロパティをオーバーライド
+        // Override the base PixelType property
         public new string PixelType => GetPixelTypeString();
 
         private string GetPixelTypeString()
@@ -996,9 +1621,11 @@ namespace MxPlot.Extensions.Tiff
             throw new NotSupportedException($"Type {typeof(T)} is not supported.");
         }
 
+
         /// <summary>
-        /// MatrixData<typeparamref name="T"/>からHyperStackDataを生成する
-        /// list==nullの場合は、SeriesDataがそのまま入るが、ソート後のデータを入れるとそれに従った並びで記録される(XYCZTが必要）
+        /// Creates a <see cref="HyperstackData{T}"/> from a <see cref="MatrixData{T}"/>.
+        /// When <paramref name="list"/> is null the frames are taken directly from <paramref name="md"/>;
+        /// passing a pre-sorted list allows custom XYCZT ordering.
         /// </summary>
         /// <param name="md"></param>
         /// <param name="list"></param>
@@ -1033,8 +1660,8 @@ namespace MxPlot.Extensions.Tiff
             data.PixelSizeY = md.YStep;
             data.PixelSizeZ = dimensions.Contains("Z") ? dimensions["Z"]!.Step : 1;
 
-            //一応セットするが、Bio-formatだと好きな単位を入れられるわけではない
-            //µm ⇒文字化けする
+            //Set units; note that Bio-Formats does not support arbitrary unit strings
+            //µm is safe but other values may be unsupported by some readers
             data.UnitX = md.XUnit;
             data.UnitY = md.YUnit;
             data.UnitZ = dimensions.Contains("Z") ? dimensions["Z"]!.Unit : "";
@@ -1045,28 +1672,80 @@ namespace MxPlot.Extensions.Tiff
             data.TimeStep = dimensions.Contains("Time") ? dimensions["Time"]!.Step : 1;
             data.StartTime = dimensions.Contains("Time") ? dimensions["Time"]!.Min : 0;
 
-            if(data.FovCount > 1 && dimensions["FOV"] is FovAxis fovAxis)
+            if (data.FovCount > 1 && dimensions["FOV"] is FovAxis fovAxis)
             {
                 var tile = fovAxis.TileLayout;
                 data.TileLayout = (tile.X, tile.Y);
                 data.GlobalOrigins = fovAxis.Origins;
             }
 
+            // Exclude format-header blobs (e.g. FITS_HEADER, OME_XML) and the tracking key
+            // ("mxplot.*" reserved namespace). These describe the source file format and do not
+            // belong in the OME-XML metadata store of a newly written TIFF.
+            var formatHeaderKeys = md.GetFormatHeaderKeys();
+            data.MatrixDataMetadata = md.Metadata
+                .Where(kv => !formatHeaderKeys.Contains(kv.Key) &&
+                             !kv.Key.StartsWith("mxplot.", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(kv => kv.Key, kv => kv.Value);
             return data;
         }
 
 
         /// <summary>
-        /// データのy軸を全て上下反転する
+        /// Creates a <see cref="HyperstackData{T}"/> from a <see cref="HyperstackMetadata"/> instance.
+        /// The <see cref="ImageStack"/> is left null; this is intended for vessel-creation scenarios
+        /// where pixel data will be written later via <see cref="WritableVirtualStrippedFrames{T}"/>.
         /// </summary>
-        public override void FlipVertical()
+        public static HyperstackData<T> FromMetadata(HyperstackMetadata meta)
         {
+            return new HyperstackData<T>
+            {
+                Width = meta.Width,
+                Height = meta.Height,
+                Channels = meta.Channels,
+                ZSlices = meta.ZSlices,
+                TimePoints = meta.TimePoints,
+                FovCount = meta.FovCount,
+                TileLayout = meta.TileLayout,
+                GlobalOrigins = meta.GlobalOrigins,
+                PixelSizeX = meta.PixelSizeX,
+                PixelSizeY = meta.PixelSizeY,
+                PixelSizeZ = meta.PixelSizeZ,
+                UnitX = meta.UnitX,
+                UnitY = meta.UnitY,
+                UnitZ = meta.UnitZ,
+                UnitTime = meta.UnitTime,
+                StartX = meta.StartX,
+                StartY = meta.StartY,
+                StartZ = meta.StartZ,
+                StartTime = meta.StartTime,
+                TimeStep = meta.TimeStep,
+                DimensionOrder = meta.DimensionOrder,
+                // ImageStack intentionally null — pixel data not yet available
+            };
+        }
+
+        /// <summary>
+        /// Flips all frames in the Y axis.
+        /// </summary>
+        public override void FlipY()
+        {
+            if (ImageStack == null)
+                return;
+
+            IsYFlipped = true;
+
+            if (IsVirtualMode)
+                return;
+
+            // The following is only effective in InMemory mode
+
             int height = this.Height;
             int width = this.Width;
             int bytesPerPixel = System.Runtime.InteropServices.Marshal.SizeOf<T>();
             int bytesPerRow = width * bytesPerPixel;
 
-            // フレーム並列で処理
+            // Process frames in parallel
             Parallel.ForEach(ImageStack, frame =>
             {
                 byte[] tempRow = new byte[bytesPerRow];
@@ -1084,7 +1763,7 @@ namespace MxPlot.Extensions.Tiff
 
             if (this.FovCount > 1)
             {
-                for(int i = 0; i < this.GlobalOrigins?.Length; i++)
+                for (int i = 0; i < this.GlobalOrigins?.Length; i++)
                 {
                     var origin = this.GlobalOrigins[i];
                     this.GlobalOrigins[i] = new GlobalPoint(origin.X, -origin.Y, origin.Z);
@@ -1097,34 +1776,38 @@ namespace MxPlot.Extensions.Tiff
     #endregion
 
 
-    #region 保存オプション
+    #region Save Options
     /// <summary>
-    /// 書き込みオプション
+    /// Write options for OME-TIFF files.
     /// </summary>
     public class OmeTiffOptions
     {
         /// <summary>
-        /// trueの場合、BigTIFF形式(64bitオフセット)で保存します。
-        /// 4GBを超える可能性がある場合は必須です。
+        /// When true, writes the file in BigTIFF format (64-bit offsets).
+        /// Required when the data size may exceed 4 GB.
         /// </summary>
         public bool UseBigTiff { get; set; } = false;
 
         /// <summary>
-        /// 圧縮方式を指定します。
+        /// Specifies the compression codec.
         /// </summary>
-        public Compression Compression { get; set; } = Compression.LZW; // 推奨: LZW
+        public Compression Compression { get; set; } = Compression.LZW;
 
         /// <summary>
-        /// 圧縮時の予測子。LZWやDeflateの場合、Horizontal(2)にすると圧縮率が向上します。
+        /// Predictor for LZW/Deflate compression.
+        /// Defaults to <see cref="Predictor.NONE"/> for broadest reader compatibility.
+        /// FluoRender's DecodeAcc16 (ARM64 macOS) crashes when Predictor.HORIZONTAL
+        /// is set, regardless of strip layout.  Set to <see cref="Predictor.HORIZONTAL"/>
+        /// only when targeting readers that are known-good with it.
         /// </summary>
-        public Predictor Predictor { get; set; } = Predictor.HORIZONTAL;
+        public Predictor Predictor { get; set; } = Predictor.NONE;
     }
     #endregion
 
-    #region ファクトリークラス
+    #region Factory
 
     /// <summary>
-    /// 型安全なファクトリーパターン
+    /// Type-safe factory for creating <see cref="OmeTiffHandlerInstance{T}"/> instances.
     /// </summary>
     public static class OmeTiffFactory
     {
@@ -1141,7 +1824,7 @@ namespace MxPlot.Extensions.Tiff
     public static class OmeTiffReader
     {
         /// <summary>
-        /// メタデータのみを読み込み（型不要）
+        /// Reads metadata only (no pixel type required by the caller).
         /// </summary>
         public static HyperstackMetadata ReadMetadata(string filename)
         {
@@ -1166,40 +1849,49 @@ namespace MxPlot.Extensions.Tiff
         }
 
         /// <summary>
-        /// 完全なデータを読み込み（型を自動判定）
+        /// Reads the full hyperstack with automatic pixel type detection.
         /// </summary>
-        public static object ReadHyperstackAuto(string filename, IProgress<int>? progress = null)
+        public static object ReadHyperstackAuto(string filename, LoadingMode mode, IProgress<int>? progress = null, int maxParallelDegree = 0, CancellationToken ct = default)
         {
             var pixelType = DetectPixelType(filename);
 
+            // Local helper: set MaxParallelDegree then call ReadHyperstack
+            static HyperstackData<U> ReadWith<U>(OmeTiffHandlerInstance<U> h, int deg,
+                string fn, LoadingMode m, IProgress<int>? p, CancellationToken c) where U : unmanaged
+            {
+                h.MaxParallelDegree = deg;
+                return h.ReadHyperstack(fn, m, p, c);
+            }
+
             return pixelType switch
             {
-                "int16" => OmeTiffFactory.CreateSigned16().ReadHyperstack(filename, progress),
-                "uint16" => OmeTiffFactory.CreateUnsigned16().ReadHyperstack(filename, progress),
-                "uint8" => OmeTiffFactory.CreateUnsigned8().ReadHyperstack(filename, progress),
-                "int8" => OmeTiffFactory.CreateSigned8().ReadHyperstack(filename, progress),
-                "int32" => OmeTiffFactory.CreateSigned32().ReadHyperstack(filename, progress),
-                "uint32" => OmeTiffFactory.CreateUnsigned32().ReadHyperstack(filename, progress),
-                "float" => OmeTiffFactory.CreateFloat32().ReadHyperstack(filename, progress),
-                "double" => OmeTiffFactory.CreateFloat64().ReadHyperstack(filename, progress),
+                "int16"  => ReadWith(OmeTiffFactory.CreateSigned16(),   maxParallelDegree, filename, mode, progress, ct),
+                "uint16" => ReadWith(OmeTiffFactory.CreateUnsigned16(), maxParallelDegree, filename, mode, progress, ct),
+                "uint8"  => ReadWith(OmeTiffFactory.CreateUnsigned8(),  maxParallelDegree, filename, mode, progress, ct),
+                "int8"   => ReadWith(OmeTiffFactory.CreateSigned8(),    maxParallelDegree, filename, mode, progress, ct),
+                "int32"  => ReadWith(OmeTiffFactory.CreateSigned32(),   maxParallelDegree, filename, mode, progress, ct),
+                "uint32" => ReadWith(OmeTiffFactory.CreateUnsigned32(), maxParallelDegree, filename, mode, progress, ct),
+                "float"  => ReadWith(OmeTiffFactory.CreateFloat32(),    maxParallelDegree, filename, mode, progress, ct),
+                "double" => ReadWith(OmeTiffFactory.CreateFloat64(),    maxParallelDegree, filename, mode, progress, ct),
                 _ => throw new NotSupportedException($"Pixel type '{pixelType}' is not supported.")
             };
         }
 
         /// <summary>
-        /// TIFFファイルからピクセルタイプを検出
+        /// Detects the pixel type of a TIFF file by first checking the OME-XML metadata and then falling back to TIFF tags if necessary.
         /// </summary>
-        private static string DetectPixelType(string filename)
+        /// <returns>The detected pixel type as a string (e.g., "uint8", "int16").</returns>
+        public static string DetectPixelType(string filename)
         {
             if (!File.Exists(filename))
-                throw new FileNotFoundException($"ファイルが見つかりません: {filename}");
+                throw new FileNotFoundException($"File not found: {filename}");
 
             using (var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "r"))
             {
                 if (tiff == null)
-                    throw new IOException("TIFFファイルを開けませんでした。");
+                    throw new IOException("Failed to open TIFF file.");
 
-                // 1. OME-XMLから型を取得
+                // 1. Try to read the pixel type from OME-XML
                 var imageDescription = tiff.GetField(TiffTag.IMAGEDESCRIPTION);
                 if (imageDescription != null && imageDescription.Length > 0)
                 {
@@ -1209,9 +1901,9 @@ namespace MxPlot.Extensions.Tiff
                         return pixelTypeFromXml;
                 }
 
-                // 2. TIFFタグから推測
+                // 2. Fall back to TIFF tags
                 var bitsPerSample = tiff.GetField(TiffTag.BITSPERSAMPLE)?[0].ToInt() ?? 0;
-                var sampleFormat = tiff.GetField(TiffTag.SAMPLEFORMAT)?[0].ToInt() ?? 0;
+                var sampleFormat = tiff.GetField(TiffTag.SAMPLEFORMAT)?[0].ToInt() ?? 1; // Default to UINT per TIFF spec
 
                 return InferPixelType(bitsPerSample, (SampleFormat)sampleFormat);
             }
@@ -1222,12 +1914,12 @@ namespace MxPlot.Extensions.Tiff
             try
             {
                 var doc = XDocument.Parse(omeXml);
-                if(doc.Root == null)
+                if (doc.Root == null)
                     return null;
                 var ns = doc.Root.GetDefaultNamespace();
                 var pixels = doc.Descendants(ns + "Pixels").FirstOrDefault();
 
-                // Type属性またはPixelType属性を探す
+                // Look for the Type or PixelType attribute
                 return pixels?.Attribute("Type")?.Value
                     ?? pixels?.Attribute("PixelType")?.Value;
             }
@@ -1256,35 +1948,37 @@ namespace MxPlot.Extensions.Tiff
     #endregion
 }
 
-#region 使用例
+#region Usage Examples
 
 /*
-// 使用例1: signed 16bit
+// Example 1: signed 16-bit
 var signedHandler = OmeTiffFactory.CreateSigned16();
 List<short[]> signedData = GetSignedImageData();
-signedHandler.WriteHyperstack("signed.ome.tiff", signedData, 1024, 1024, 1, 10, 5);
+signedHandler.WriteHyperstack("signed.ome.tiff", signedData, 1024, 1024, channels: 1, zSlices: 10, timePoints: 5);
 
-// 使用例2: unsigned 16bit
+// Example 2: unsigned 16-bit
 var unsignedHandler = OmeTiffFactory.CreateUnsigned16();
 List<ushort[]> unsignedData = GetUnsignedImageData();
-unsignedHandler.WriteHyperstack("unsigned.ome.tiff", unsignedData, 1024, 1024, 3, 10, 20);
+unsignedHandler.WriteHyperstack("unsigned.ome.tiff", unsignedData, 1024, 1024, channels: 3, zSlices: 10, timePoints: 20);
 
-// 使用例3: メモリ効率版（大容量データ）
-var frames = GenerateFramesLazy(2048, 2048, 1000); // 1000フレーム
-unsignedHandler.WriteHyperstack("large.ome.tiff", frames, 2048, 2048, 1, 1, 1000);
+// Example 3: lazy enumeration (memory-efficient, large data)
+// The IEnumerable<T[]> overload requires a HyperstackData<T> spec object, not raw int dimensions.
+IEnumerable<ushort[]> frames = GenerateFramesLazy(2048, 2048, 1000); // 1000 frames
+var spec = new HyperstackData<ushort> { Width = 2048, Height = 2048, Channels = 1, ZSlices = 1, TimePoints = 1000 };
+unsignedHandler.WriteHyperstack("large.ome.tiff", frames, spec);
 
-// 使用例4: 遅延読み込み
+// Example 4: lazy read
 foreach (var frame in unsignedHandler.ReadFramesLazy("large.ome.tiff"))
 {
     ProcessSingleFrame(frame);
 }
 
-// 使用例5: 特定フレームのみアクセス
+// Example 5: read a single frame by index
 var frame50 = unsignedHandler.ReadSingleFrameAt("large.ome.tiff", 49);
 
-// 使用例6: メタデータのみ読み込み
+// Example 6: read metadata only
 var metadata = unsignedHandler.ReadMetadata("data.ome.tiff");
-Console.WriteLine($"サイズ: {metadata.Width}x{metadata.Height}, フレーム数: {metadata.TotalFrames}");
+Console.WriteLine($"Size: {metadata.Width}x{metadata.Height}, Frames: {metadata.TotalFrames}");
 */
 
 #endregion

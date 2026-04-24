@@ -268,22 +268,7 @@ namespace MxPlot.Core.Arithmetic
             where T : unmanaged
         {   
             var result = new MatrixData<T>(source.XCount, source.YCount, resultArrays);
-
-            result.SetXYScale(source.XMin, source.XMax, source.YMin, source.YMax);
-            result.XUnit = source.XUnit;
-            result.YUnit = source.YUnit;
-
-            if (source.Metadata != null)
-            {
-                foreach (var kvp in source.Metadata)
-                    result.Metadata[kvp.Key] = kvp.Value;
-            }
-
-            if (source.Dimensions?.Axes?.Any() == true)
-            {
-                var axes = Axis.CreateFrom(source.Dimensions.Axes.ToArray());
-                result.DefineDimensions(axes);
-            }
+            result.CopyPropertiesFrom(source);
 
             return result;
         }

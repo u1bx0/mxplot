@@ -11,8 +11,10 @@
 This package contains **`MatrixData<T>`**, a high-performance, multi-dimensional data container designed for scientific computing.
 It is kept lightweight with **zero external dependencies**, making it ideal for integration into other libraries or backend systems.
 
+Uniquely, three I/O formats — the native `.mxd` binary, CSV, and FITS — are built into the core package itself as pure managed implementations, so you can read and write real scientific data without installing any extension package.
+
 > 💡 **Recommendation**
-> Most users should install the **[MxPlot](https://www.nuget.org/packages/MxPlot)** metapackage, which includes this core engine along with common I/O extensions.
+> Most users should install the **[MxPlot](https://www.nuget.org/packages/MxPlot)** metapackage, which includes this core engine along with the UI layer and common I/O extensions (OME-TIFF, HDF5, etc.).
 
 ## 📚 Documentation & Usage
 All documentation, architecture designs, and usage examples are centralized in the main repository.

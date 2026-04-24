@@ -169,7 +169,7 @@ namespace MxPlot.Core
         /// <summary>
         /// = Max - Min (都度計算する），取得のみ
         /// </summary>
-        public double Size => Max - Min;
+        public double Range => Max - Min;
 
         /// <summary>
         /// = (Max - Min) / (Count - 1) （都度計算する）Stepを設定するとMax値が変わる
@@ -179,31 +179,31 @@ namespace MxPlot.Core
             get => Count > 1 ? (Max - Min) / (Count - 1) : 0;
             set
             {
-                //Pitchを変える場合はMaxが変わる
+                //Changing Step changes Max, so we set Max here. Step = 0 is allowed when Count = 1, but not when Count > 1
                 Max = Min + value * (Count - 1);
             }
         }
 
 
         /// <summary>
-        /// Nameが変化した場合に通知される
+        /// Notify when the Name property changes.
         /// </summary>
         public event EventHandler? NameChanged;
 
 
 
         /// <summary>
-        /// Index値が変化した場合に通知される
+        /// Notify when the Index property changes. 
         /// </summary>
         public event EventHandler? IndexChanged;
 
         /// <summary>
-        /// AxisのMin, Max が変化した場合に通知される
+        /// Notify when the Min or Max properties change. 
         /// </summary>
         public event EventHandler? ScaleChanged;
 
         /// <summary>
-        /// Axisの単位文字列が変化した場合に通知される
+        /// Notify when the Unit property changes. 
         /// </summary>
         public event EventHandler? UnitChanged;
 
@@ -315,6 +315,9 @@ namespace MxPlot.Core
         [JsonConstructor]
         public Axis(int count, double min, double max, string name = "Series", string unit = "", bool isIndexBased = false)
         {
+            if (count <= 0)
+                throw new ArgumentException("Division number should be >= 1, num = " + count);
+
             this.Count = count;
             this.Name = name;
             this.Unit = unit;
@@ -325,10 +328,9 @@ namespace MxPlot.Core
                 _min = min;
                 _max = max;
             }
-            if (count <= 0)
-                throw new ArgumentException("Division number should be >= 1, num = " + count);
 
-            Step = count > 1 ? (max - min) / (count - 1) : 0;
+            //Stepは都度計算される。Stepに値を入れるとMaxが変わる。以下は不要
+            //Step = count > 1 ? (max - min) / (count - 1) : 0;
         }
 
         /// <summary>

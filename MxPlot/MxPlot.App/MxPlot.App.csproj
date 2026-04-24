@@ -1,0 +1,58 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<Nullable>enable</Nullable>
+		<AssemblyName>MxPlot</AssemblyName>
+		<ApplicationManifest>app.manifest</ApplicationManifest>
+		<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+		<Platforms>AnyCPU</Platforms>
+		<ApplicationIcon>Assets\mxplot_logo_pre.ico</ApplicationIcon>
+
+
+	</PropertyGroup>
+
+	<ItemGroup>
+		<Folder Include="Models\" />
+		<AvaloniaResource Include="Assets\**" />
+		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+		<AvaloniaResource Include="..\..\docs\images\mxplot_logo_pre.png" Link="Assets\mxplot_logo_pre.png">
+			<PackagePath>\</PackagePath>
+			<Pack>true</Pack>
+		</AvaloniaResource>
+	</ItemGroup>
+
+	<ItemGroup>
+		<AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+			<_Parameter1>BuildDate</_Parameter1>
+			<_Parameter2>$([System.DateTime]::Now.ToString("yyyy-MM-dd"))</_Parameter2>
+		</AssemblyAttribute>
+	</ItemGroup>
+
+	<ItemGroup>
+		<Content Include="Assets\mxplot_logo_pre.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Avalonia" Version="11.3.14" />
+		<PackageReference Include="Avalonia.Desktop" Version="11.3.14" />
+		<PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.14" />
+		<PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.14" />
+		<!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
+		<PackageReference Include="Avalonia.Diagnostics" Version="11.3.14">
+			<IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+			<PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+		</PackageReference>
+		<PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
+		<!-- Version pin: Tmds.DBus.Protocol 0.21.2 (via Avalonia.FreeDesktop) has GHSA-xrw6-gwf8-vvr9 (High).
+         Vulnerable ranges: (,0.21.3) and [0.22.0,0.92.0). Safe: 0.21.3, 0.92.0+. -->
+		<PackageReference Include="Tmds.DBus.Protocol" Version="0.92.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\MxPlot.Extensions.Hdf5\MxPlot.Extensions.Hdf5.csproj" />
+		<ProjectReference Include="..\MxPlot.Extensions.Images\MxPlot.Extensions.Images.csproj" />
+		<ProjectReference Include="..\MxPlot.Extensions.Tiff\MxPlot.Extensions.Tiff.csproj" />
+		<ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
+	</ItemGroup>
+</Project>

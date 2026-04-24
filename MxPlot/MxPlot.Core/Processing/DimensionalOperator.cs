@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace MxPlot.Core.Processing
@@ -230,54 +231,7 @@ namespace MxPlot.Core.Processing
             return extracted;
         }
 
-        /// <summary>
-        /// Create a new instance with the frames reordered by the specified order. Important: the order list does not require the complete set of the original frames.
-        /// This method can be used to extract or duplicate specific frames as well. 
-        /// Consequently, the dimension information is totally removed.
-        /// <b>Metadata is not copied to the new instance.</b>
-        /// </summary>
-        /// <param name="order"></param>
-        /// <returns></returns>
-        /// <exception cref="ArgumentException"></exception>
-        public static MatrixData<T> Reorder<T>(this MatrixData<T> src, List<int> order, bool deepCopy = false)
-            where T : unmanaged
-        {
-            int num = order.Count;
-            int max = order.Max();
-            int min = order.Min();
-            if (max >= src.FrameCount || min < 0)
-                throw new ArgumentException($"invalid order: min = {min}, max = {max}, count = {num}");
-
-            var arrays = new List<T[]>();
-            var vminList = new List<List<double>>();
-            var vmaxList = new List<List<double>>();
-
-            foreach (var idx in order)
-            {
-                var array = src.GetArray(idx);
-                var (vmins, vmaxs) = src.GetValueRangeList(idx);
-                if (deepCopy)
-                {
-                    var dst = new T[array.Length];
-                    array.AsSpan().CopyTo(dst);
-                    array = dst;
-                    //For deep copy, min/max value list is  not provided.
-                    vmins = []; //new instance with empy list, indicating invalid min/max values.
-                    vmaxs = [];
-                }
-                arrays.Add(array);
-                vminList.Add(vmins);
-                vmaxList.Add(vmaxs);
-            }
-
-            var md = new MatrixData<T>(src.XCount, src.YCount, arrays, vminList, vmaxList);
-            md.SetXYScale(src.XMin, src.XMax, src.YMin, src.YMax);
-            md.XUnit = src.XUnit;
-            md.YUnit = src.YUnit;
-
-            return md;
-        }
-
+        
         /// <summary>
         /// Reorders frames by rearranging axes in the specified order.
         /// </summary>
@@ -558,12 +512,7 @@ namespace MxPlot.Core.Processing
             }
 
             var result = new MatrixData<TDst>(width, height, convertedArrays.ToList());
-            result.SetXYScale(src.XMin, src.XMax, src.YMin, src.YMax);
-            result.XUnit = src.XUnit;
-            result.YUnit = src.YUnit;
-            foreach (var kvp in src.Metadata) result.Metadata[kvp.Key] = kvp.Value;
-            if (src.Dimensions?.Axes?.Any() == true)
-                result.DefineDimensions(Axis.CreateFrom(src.Dimensions.Axes.ToArray()));
+            result.CopyPropertiesFrom(src);
 
             return result;
         }
@@ -674,12 +623,7 @@ namespace MxPlot.Core.Processing
                     minDoubleValues, maxDoubleValues);
             }
 
-            result.SetXYScale(src.XMin, src.XMax, src.YMin, src.YMax);
-            result.XUnit = src.XUnit;
-            result.YUnit = src.YUnit;
-            foreach (var kvp in src.Metadata) result.Metadata[kvp.Key] = kvp.Value;
-            if (src.Dimensions?.Axes?.Any() == true)
-                result.DefineDimensions(Axis.CreateFrom(src.Dimensions.Axes.ToArray()));
+            result.CopyPropertiesFrom(src);
 
             return result;
         }
@@ -1047,7 +991,8 @@ namespace MxPlot.Core.Processing
         /// // Cropped:  XMin=-5,  XMax=5 (approximately)
         /// </code>
         /// </example>
-        public static MatrixData<T> Crop<T>(this MatrixData<T> source, int x, int y, int width, int height)
+        public static MatrixData<T> Crop<T>(this MatrixData<T> source, int x, int y, int width, int height,
+            IProgress<int>? progress = null, CancellationToken cancellationToken = default)
             where T : unmanaged
         {
             if (source == null)
@@ -1073,7 +1018,7 @@ namespace MxPlot.Core.Processing
             if (source.XCount <= 1 || source.YCount <= 1)
                 throw new ArgumentException("Source matrix must have at least 2 elements in each dimension.");
 
-            double xStep = source.XStep; // 既に計算済みのプロパティを使用
+            double xStep = source.XStep; 
             double yStep = source.YStep;
 
             // Calculate new physical bounds
@@ -1083,45 +1028,51 @@ namespace MxPlot.Core.Processing
             double newYMax = newYMin + (height - 1) * yStep;
 
             // Crop all frames
-            var croppedArrays = new List<T[]>(source.FrameCount);
+            var dstArrays = new T[source.FrameCount][];
+            progress?.Report(-source.FrameCount);
 
-            for (int frame = 0; frame < source.FrameCount; frame++)
+            if (source.FrameCount >= 2)
             {
-                var srcArray = source.GetArray(frame);
-                var dstArray = new T[width * height];
-
-                // Copy ROI row-by-row using Array.Copy for better performance
-                for (int iy = 0; iy < height; iy++)
+                int completed = 0;
+                var options = new ParallelOptions { CancellationToken = cancellationToken };
+                Parallel.For(0, source.FrameCount, options, frame =>
                 {
-                    int srcIndex = (y + iy) * source.XCount + x;
-                    int dstIndex = iy * width;
-                    Array.Copy(srcArray, srcIndex, dstArray, dstIndex, width);
-                }
+                    var srcSpan = source.AsSpan(frame);
+                    var dstArray = new T[width * height];
+                    var dstSpan = dstArray.AsSpan();
 
-                croppedArrays.Add(dstArray);
+                    for (int iy = 0; iy < height; iy++)
+                        srcSpan.Slice((y + iy) * source.XCount + x, width)
+                               .CopyTo(dstSpan.Slice(iy * width));
+
+                    dstArrays[frame] = dstArray;
+                    progress?.Report(Interlocked.Increment(ref completed) - 1);
+                });
             }
+            else
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var srcSpan = source.AsSpan(0);
+                var dstArray = new T[width * height];
+                var dstSpan = dstArray.AsSpan();
+
+                for (int iy = 0; iy < height; iy++)
+                    srcSpan.Slice((y + iy) * source.XCount + x, width)
+                           .CopyTo(dstSpan.Slice(iy * width));
+
+                dstArrays[0] = dstArray;
+                progress?.Report(0);
+            }
+
+            var croppedArrays = new List<T[]>(dstArrays);
 
             // Create new MatrixData with cropped data
             var result = new MatrixData<T>(width, height, croppedArrays);
 
-            // Update physical coordinates
+            // Update physical coordinates (scale differs from source due to cropping)
             result.SetXYScale(newXMin, newXMax, newYMin, newYMax);
-
-            // Copy metadata
-            result.XUnit = source.XUnit;
-            result.YUnit = source.YUnit;
-
-            foreach (var kvp in source.Metadata)
-            {
-                result.Metadata[kvp.Key] = kvp.Value;
-            }
-
-            // Copy dimension structure if exists
-            if (source.Dimensions?.Axes?.Any() == true)
-            {
-                var axes = Axis.CreateFrom(source.Dimensions.Axes.ToArray());
-                result.DefineDimensions(axes);
-            }
+            result.CopyPropertiesFrom(source, copyScale: false);
 
             return result;
         }
@@ -1147,7 +1098,8 @@ namespace MxPlot.Core.Processing
         /// </code>
         /// </example>
         public static MatrixData<T> CropByCoordinates<T>(this MatrixData<T> source,
-            double xMin, double xMax, double yMin, double yMax)
+            double xMin, double xMax, double yMin, double yMax,
+            IProgress<int>? progress = null, CancellationToken cancellationToken = default)
             where T : unmanaged
         {
             if (source == null)
@@ -1178,7 +1130,7 @@ namespace MxPlot.Core.Processing
             width = Math.Max(1, Math.Min(width, source.XCount - x));
             height = Math.Max(1, Math.Min(height, source.YCount - y));
 
-            return source.Crop(x, y, width, height);
+            return source.Crop(x, y, width, height, progress, cancellationToken);
         }
 
         /// <summary>
@@ -1192,7 +1144,8 @@ namespace MxPlot.Core.Processing
         /// <exception cref="ArgumentException">
         /// Thrown if requested dimensions exceed source dimensions.
         /// </exception>
-        public static MatrixData<T> CropCenter<T>(this MatrixData<T> source, int width, int height)
+        public static MatrixData<T> CropCenter<T>(this MatrixData<T> source, int width, int height,
+            IProgress<int>? progress = null, CancellationToken cancellationToken = default)
             where T : unmanaged
         {
             if (source == null)
@@ -1205,10 +1158,8 @@ namespace MxPlot.Core.Processing
             int x = (source.XCount - width) / 2;
             int y = (source.YCount - height) / 2;
 
-            return source.Crop(x, y, width, height);
+            return source.Crop(x, y, width, height, progress, cancellationToken);
         }
-
-        
     }
 
 }

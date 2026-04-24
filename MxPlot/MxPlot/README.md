@@ -14,21 +14,19 @@
 
 ## 📦 Package Structure
 
-MxPlot consists of a modular core and specialized extensions:
+MxPlot consists of a modular core, a cross-platform UI layer, and specialized extensions:
 
 ### Core Package
-- **MxPlot.Core**: The heart of the library. Contains the multi-axis data container (`MatrixData<T>`) and the processing engine. (Dependency-free)
+- **MxPlot.Core**: The heart of the library. Contains the multi-axis data container (`MatrixData<T>`), the processing engine, and built-in I/O formats (`.mxd`, CSV, FITS). (Dependency-free)
+
+### Visualization Layer
+- **MxPlot.UI.Avalonia**: Cross-platform visualization built on [Avalonia UI](https://avaloniaui.net/) 11.3. Includes `MatrixPlotter` (full-featured standalone window), `MxView` (pan/zoom image surface), and `MxPlotHostApplication` for embedding inside WinForms or WPF apps. Runs on Windows, macOS, and Linux.
 
 ### Available Extensions
-- **MxPlot.Extensions.Tiff**: TIFF I/O (OME-TIFF, ImageJ) via *LibTiff.NET*.
+- **MxPlot.Extensions.Tiff**: TIFF I/O (OME-TIFF, ImageJ hyperstack) via *LibTiff.NET*.
 - **MxPlot.Extensions.Hdf5**: HDF5 support via *PureHDF*.
 - **MxPlot.Extensions.Images**: Image loading (PNG, JPEG, BMP, TIFF) via *SkiaSharp*.
-- **MxPlot.Extensions.Fft**: Thin 2D FFT wrapper using *Math Kernel Library*  via *MathNet.Numerics*. (Preliminary implementation)
-
-
-## 🖼️ Visualization Layer (In Development)
-Separated package for UI controls and rendering.
-- **MxPlot.Wpf / MxPlot.WinForms**: Native UI controls for rich data rendering.
+- **MxPlot.Extensions.Fft**: Thin 2D FFT wrapper via *MathNet.Numerics* (pure managed). Optionally accelerated by MKL when `MathNet.Numerics.MKL.Win-x64` is installed. (Preliminary implementation)
 
 ---
 
@@ -36,4 +34,3 @@ Separated package for UI controls and rendering.
 For the complete changelog and version history, please visit the Releases Page on GitHub.
 
 👉 [GitHub Repository: u1bx0/MxPlot](https://github.com/u1bx0/MxPlot)
-

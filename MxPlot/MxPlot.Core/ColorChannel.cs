@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace MxPlot.Core
 {
@@ -14,7 +15,7 @@ namespace MxPlot.Core
     /// </remarks>
     public class ColorChannel : TaggedAxis
     {
-        private uint[]? _assignedColors;
+        private int[]? _assignedColors;
         private double[]? _wavelengths;
 
         /// <summary>
@@ -26,6 +27,19 @@ namespace MxPlot.Core
         /// Occurs when assigned wavelengths are modified.
         /// </summary>
         public event EventHandler? WavelengthAssignChanged;
+
+        /// <summary>
+        /// JSON deserialization constructor.
+        /// <c>tags</c> is passed to <see cref="TaggedAxis"/>; <c>Name</c> is restored via setter.
+        /// </summary>
+        [JsonConstructor]
+        private ColorChannel(IReadOnlyList<string> tags,
+                             IReadOnlyList<int>? assignedColors, IReadOnlyList<double>? wavelengths)
+            : base(tags)
+        {
+            _assignedColors = assignedColors as int[] ?? assignedColors?.ToArray();
+            _wavelengths = wavelengths as double[] ?? wavelengths?.ToArray();
+        }
 
         /// <summary>
         /// Initializes a new <see cref="ColorChannel"/> using the specified channel tags.
@@ -53,7 +67,7 @@ namespace MxPlot.Core
         /// <summary>
         /// Gets the assigned colors, or <c>null</c> if no colors are assigned.
         /// </summary>
-        public IReadOnlyList<uint>? AssignedColors => _assignedColors;
+        public IReadOnlyList<int>? AssignedColors => _assignedColors;
 
         /// <summary>
         /// Gets the assigned wavelengths, or <c>null</c> if no wavelengths are assigned.
@@ -64,7 +78,7 @@ namespace MxPlot.Core
         /// Assigns colors to each channel. The array length must match the number of tags.
         /// Passing <c>null</c> removes any existing assignment.
         /// </summary>
-        public void AssignColors(uint[]? colors)
+        public void AssignColors(int[]? colors)
         {
             if (colors is null)
             {
@@ -83,7 +97,7 @@ namespace MxPlot.Core
         /// <summary>
         /// Sets the color for the specified channel index.
         /// </summary>
-        public void SetColor(int index, uint argb)
+        public void SetColor(int index, int argb)
         {
             EnsureColorsAssigned();
             ValidateIndex(index);
@@ -94,7 +108,7 @@ namespace MxPlot.Core
         /// <summary>
         /// Sets the color for the specified channel tag.
         /// </summary>
-        public void SetColor(string chTag, uint argb)
+        public void SetColor(string chTag, int argb)
         {
             int index = this[chTag];
             if (index == -1)
@@ -103,14 +117,14 @@ namespace MxPlot.Core
             SetColor(index, argb);
         }
 
-        public uint GetColor(int index)
+        public int GetColor(int index)
         {
             EnsureColorsAssigned();
             ValidateIndex(index);
             return _assignedColors![index];
         }
 
-        public uint GetColor(string chTag)
+        public int GetColor(string chTag)
         {
             int index = this[chTag];
             if (index == -1)

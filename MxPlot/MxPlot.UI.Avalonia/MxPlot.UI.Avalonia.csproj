@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+	<OutputType>Library</OutputType>
+	<TargetFrameworks>net10.0;net8.0</TargetFrameworks>
+	<Nullable>enable</Nullable>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+	<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+	<Platforms>AnyCPU</Platforms>
+  </PropertyGroup>
+
+  <ItemGroup>
+	<AvaloniaResource Include="Assets\**" />
+	<AvaloniaResource Include="Themes\**" />
+  </ItemGroup>
+
+	<ItemGroup>
+		<AvaloniaResource Include="..\..\docs\images\mxplot_logo_pre.png" Link="Assets\mxplot_logo_pre.png">
+		  <PackagePath>\</PackagePath>
+		  <Pack>true</Pack>
+		</AvaloniaResource>
+		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+	</ItemGroup>
+
+  <ItemGroup>
+	<PackageReference Include="Avalonia" Version="11.3.14" />
+	<PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.14" />
+	  <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.14" />
+	<PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+	<ProjectReference Include="..\MxPlot.Core\MxPlot.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+	<AvaloniaResource Remove="Views\CacheMonitorWindow.axaml" />
+  </ItemGroup>
+</Project>

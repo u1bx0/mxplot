@@ -8,8 +8,8 @@ namespace MxPlot.Extensions.Tiff;
 /// </summary>
 public class ImageJMetadata
 {
-    public readonly  int ImageJPropertyTag = 50839;
-    public readonly int ImageJPropertyByteCountTag = 50838;
+    //public readonly  int ImageJPropertyTag = 50839;
+    //public readonly int ImageJPropertyByteCountTag = 50838;
 
     public int Images { get; set; }
     public int Channels { get; set; } = 1;

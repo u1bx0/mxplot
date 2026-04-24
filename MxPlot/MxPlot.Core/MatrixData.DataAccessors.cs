@@ -16,13 +16,13 @@ namespace MxPlot.Core
         public double GetValueAt(int ix, int iy, int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            return ToDoubleFrom(_arrayList[frameIndex][iy * _xcount + ix]);
+            return ToDoubleFrom(GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix]);
         }
 
         public T GetValueAtTyped(int ix, int iy, int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            return _arrayList[frameIndex][iy * _xcount + ix];
+            return GetInternalArray(frameIndex, needsInvalidate: false)[iy * _xcount + ix];
         }
 
         public void SetValueAt(int ix, int iy, double v)
@@ -50,8 +50,7 @@ namespace MxPlot.Core
                 return;
             }
 
-            _arrayList[frameIndex][iy * _xcount + ix] = ToValueTypeFrom(v);
-            Invalidate(frameIndex);
+            GetInternalArray(frameIndex, needsInvalidate: true)[iy * _xcount + ix] = ToValueTypeFrom(v);
         }
 
         /// <summary>
@@ -73,23 +72,55 @@ namespace MxPlot.Core
                 return;
             }
 
-            _arrayList[frameIndex][iy * _xcount + ix] = value;
-            Invalidate(frameIndex);
+            GetInternalArray(frameIndex, needsInvalidate: true)[iy * _xcount + ix] = value;
+        }
+
+        /// <summary>
+        /// Returns a read-only span over the elements in the specified frame of the array list.
+        /// This should be used if no modification to the data is needed. This method does not invalidate the cached min/max values.
+        /// </summary>
+        /// <remarks>If the specified frame index is less than zero, this method defaults to using the
+        /// active frame index. This allows callers to easily access the current frame's data without specifying an
+        /// index.</remarks>
+        /// <param name="frameIndex">The zero-based index of the frame from which to retrieve the span. If the value is less than zero, the span
+        /// of the currently active frame is returned.</param>
+        /// <returns>A read-only span containing the elements of the specified frame.</returns>
+        public ReadOnlySpan<T> AsSpan(int frameIndex = -1)
+        {
+            if (frameIndex < 0) frameIndex = _activeIndex;
+            return GetInternalArray(frameIndex, needsInvalidate:false).AsSpan();
+        }
+
+        /// <summary>
+        /// Returns a read-only memory region containing the data for the specified frame. 
+        /// This does not invalidate the cached min/max values, so it can be used for read-only access without affecting the statistics. 
+        /// </summary>
+        /// <remarks>This method enables efficient access to frame data without copying. The returned
+        /// memory is valid as long as the underlying data remains unchanged.</remarks>
+        /// <param name="frameIndex">The zero-based index of the frame to retrieve. If not specified or set to a negative value, the currently
+        /// active frame is used.</param>
+        /// <returns>A read-only memory region representing the data of the specified frame.</returns>
+        public ReadOnlyMemory<T> AsMemory(int frameIndex = -1)
+        {
+            if (frameIndex < 0) frameIndex = _activeIndex;
+            return GetInternalArray(frameIndex, needsInvalidate: false).AsMemory();
         }
 
         /// <summary>
         /// Gets the internal array for the specified frame. If no frame index is provided, the active frame's array is returned.
-        /// This method automatically invalidates the cached min/max values for the specified frame, ensuring that any modifications to the array will trigger a refresh of the statistics when next requested.
+        /// By default (with forceInvalidation = true), this method automatically invalidates the cached min/max values 
+        /// for the specified frame, ensuring that any modifications to the array will trigger a refresh of the statistics when next requested.
         /// However, users should call Invalidate explicitly when further modifying the array kept outside after calling GetValueRange.
         /// </summary>
         /// <param name="frameIndex"></param>
+        /// <param name="forceInvalidation"></param>
         /// <returns></returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T[] GetArray(int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            Invalidate(frameIndex); // Ensure min/max will be recalculated if data is modified through the byte span
-            return _arrayList[frameIndex];
+            bool shouldInvalidate = !_arrayList.IsReadOnly; 
+            return GetInternalArray(frameIndex, shouldInvalidate); 
         }
 
         /// <summary>
@@ -104,7 +135,31 @@ namespace MxPlot.Core
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
 
-            var array = _arrayList[frameIndex];
+            // ── Virtual (writable MMF) path ──────────────────────────────────
+            // WriteDirectly writes srcArray straight to MMF, skipping the cache
+            // read that GetInternalArray would trigger. Flush() commits the pages.
+            // Invalidate() discards any stale cached min/max without a disk round-trip.
+            if (_arrayList is MxPlot.Core.IO.IWritableFrameProvider<T> writable)
+            {
+                writable.WriteDirectly(frameIndex, srcArray); // length guard inside
+                writable.Flush();                             // _accessor.Flush() → disk
+
+                if (minValues != null && maxValues != null
+                    && minValues.Length > 0 && maxValues.Length > 0
+                    && minValues.Length == maxValues.Length)
+                {
+                    if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
+                        range.Set(minValues, maxValues);
+                }
+                else
+                {
+                    Invalidate(frameIndex); // lazy recompute on next GetValueRange
+                }
+                return;
+            }
+
+            // ── InMemory path (original behaviour) ───────────────────────────
+            var array = GetInternalArray(frameIndex, needsInvalidate: true);
             if (srcArray.Length != array.Length)
                 throw new ArgumentException($"Invalid array length: {srcArray.Length}, expected: {array.Length}");
 
@@ -115,15 +170,10 @@ namespace MxPlot.Core
                 && minValues.Length > 0 && maxValues.Length > 0
                 && minValues.Length == maxValues.Length)
             {
-                if (_valueRangeMap.TryGetValue(array, out var range))
+                if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
                 {
                     range.Set(minValues, maxValues);
                 }
-            }
-            else
-            {
-                //RefreshValueRange(frameIndex);
-                Invalidate(frameIndex);
             }
         }
 
@@ -140,13 +190,12 @@ namespace MxPlot.Core
         public T this[int ix, int iy]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[_activeIndex][iy * _xcount + ix];
+            get => GetInternalArray(_activeIndex, needsInvalidate:false)[iy * _xcount + ix];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
-                _arrayList[_activeIndex][iy * _xcount + ix] = value;
-                Invalidate(_activeIndex);
+                GetInternalArray(_activeIndex, needsInvalidate: true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -166,13 +215,12 @@ namespace MxPlot.Core
         public T this[int ix, int iy, int i_axis0]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[i_axis0][iy * _xcount + ix]; //i_axis0 corresponds to frame index directly since there's only one axis
+            get => GetInternalArray(i_axis0, needsInvalidate: false)[iy * _xcount + ix]; //i_axis0 corresponds to frame index directly since there's only one axis
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
-                _arrayList[i_axis0][iy * _xcount + ix] = value;
-                Invalidate(i_axis0);
+                GetInternalArray(i_axis0, needsInvalidate: true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -190,14 +238,13 @@ namespace MxPlot.Core
         public T this[int ix, int iy, int i_axis0, int i_axis1]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1)][iy * _xcount + ix];
+            get => GetInternalArray(Dimensions.GetFrameIndexAt(i_axis0, i_axis1), needsInvalidate:false)[iy * _xcount + ix];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
                 int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1);
-                _arrayList[frameIndex][iy * _xcount + ix] = value;
-                Invalidate(frameIndex);
+                GetInternalArray(frameIndex, needsInvalidate:true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -216,14 +263,13 @@ namespace MxPlot.Core
         public T this[int ix, int iy, int i_axis0, int i_axis1, int i_axis2]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2)][iy * _xcount + ix];
+            get => GetInternalArray(Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2), false)[iy * _xcount + ix];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
                 int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2);
-                _arrayList[frameIndex][iy * _xcount + ix] = value;
-                Invalidate(frameIndex);
+                GetInternalArray(frameIndex, true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -243,14 +289,13 @@ namespace MxPlot.Core
         public T this[int ix, int iy, int i_axis0, int i_axis1, int i_axis2, int i_axis3]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2, i_axis3)][iy * _xcount + ix];
+            get => GetInternalArray(Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2, i_axis3), false)[iy * _xcount + ix];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
                 int frameIndex = Dimensions.GetFrameIndexAt(i_axis0, i_axis1, i_axis2, i_axis3);
-                _arrayList[frameIndex][iy * _xcount + ix] = value;
-                Invalidate(frameIndex);
+                GetInternalArray(frameIndex, needsInvalidate: true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -271,14 +316,13 @@ namespace MxPlot.Core
         public T this[int ix, int iy, params int[] axisIndices]
         {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get => _arrayList[Dimensions.GetFrameIndexAt(axisIndices)][iy * _xcount + ix];
+            get => GetInternalArray(Dimensions.GetFrameIndexAt(axisIndices), false)[iy * _xcount + ix];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             set
             {
                 int frameIndex = Dimensions.GetFrameIndexAt(axisIndices);
-                _arrayList[frameIndex][iy * _xcount + ix] = value;
-                Invalidate(frameIndex);
+                GetInternalArray(frameIndex, true)[iy * _xcount + ix] = value;
             }
         }
 
@@ -288,8 +332,7 @@ namespace MxPlot.Core
         public unsafe ReadOnlySpan<byte> GetRawBytes(int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            var array = _arrayList[frameIndex];
-            Invalidate(frameIndex); // Ensure min/max will be recalculated if data is modified through the byte span
+            var array = GetInternalArray(frameIndex, needsInvalidate:false);
             return MemoryMarshal.AsBytes(array.AsSpan());
         }
 
@@ -302,15 +345,13 @@ namespace MxPlot.Core
         public unsafe void SetFromRawBytes(ReadOnlySpan<byte> bytes, int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            var array = _arrayList[frameIndex];
+            var array = GetInternalArray(frameIndex, needsInvalidate: true);
             var targetSpan = MemoryMarshal.AsBytes(array.AsSpan());
 
             if (bytes.Length != targetSpan.Length)
                 throw new ArgumentException($"Byte length mismatch: {bytes.Length} != {targetSpan.Length}");
 
             bytes.CopyTo(targetSpan);
-            //RefreshValueRange(frameIndex);
-            Invalidate(frameIndex);
         }
 
         /// <summary>
@@ -457,12 +498,12 @@ namespace MxPlot.Core
             {
                 int ix = XIndexOf(x, false);
                 int iy = YIndexOf(y, false);
-                return _arrayList[frameIndex][iy * _xcount + ix];
+                return GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix];
             }
 
             if (this is MatrixData<Complex>) //Special case for Complex type.
             {
-                Complex[] array = (Complex[])(object)_arrayList[frameIndex];
+                Complex[] array = (Complex[])(object)GetInternalArray(frameIndex, needsInvalidate:false);
                 if (array == null)
                     throw new InvalidOperationException("Internal array is null");
 
@@ -531,7 +572,7 @@ namespace MxPlot.Core
                 return _toDouble(GetValue(x, y, frameIndex, false));
             }
             //interpolation is enabled
-            var array = _arrayList[frameIndex];
+            var array = GetInternalArray(frameIndex, needsInvalidate: false);
             if (array == null)
                 throw new InvalidOperationException("Internal array is null");
 
@@ -580,4 +621,5 @@ namespace MxPlot.Core
             SetValueAtTyped(ix, iy, frameIndex, value);
         }
     }
+
 }

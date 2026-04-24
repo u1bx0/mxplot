@@ -3,8 +3,8 @@
 	<!-- Common properties for MxPlot projects -->
 
 	<PropertyGroup>
-		<Version>0.0.5</Version>
-		<PackageVersion>0.0.5</PackageVersion>
+		<Version>0.1.0-beta</Version>
+		<PackageVersion>0.1.0-beta</PackageVersion>
 		<Authors>u1bx0</Authors>
 		<Description>MxPlot: Multi-Axis Matrix Visualization Library for .NET. This project is currently under active development.</Description>
 
@@ -26,7 +26,7 @@
 	
 	<PropertyGroup Condition="'$(Configuration)' == 'Release'">
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-		<PackageOutputPath>$(SolutionDir)..\..\LocalPackages\</PackageOutputPath>
+		<PackageOutputPath>$(SolutionDir)..\LocalPackages\</PackageOutputPath>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="$(MSBuildProjectName.StartsWith('Test'))">

@@ -1,0 +1,150 @@
+﻿<Styles xmlns="https://github.com/avaloniaui"
+		xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+	<Styles.Resources>
+		<ResourceDictionary>
+			<ResourceDictionary.ThemeDictionaries>
+				<ResourceDictionary x:Key="Dark">
+					<SolidColorBrush x:Key="AppWindowBg">#383838</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuPopupBg">#EE242424</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuItemHoverBg">#38FFFFFF</SolidColorBrush>
+					<SolidColorBrush x:Key="ListPanelBorderColor"    Color="#888888"/>
+					<!-- ToggleButton checked — visible against dark background, OS-accent-independent -->
+					<SolidColorBrush x:Key="ToggleCheckedBg"    Color="#3B78E7"/>
+					<SolidColorBrush x:Key="ToggleCheckedBgHov" Color="#5590EF"/>
+					<SolidColorBrush x:Key="ToggleCheckedBgPrs" Color="#2A65D4"/>
+					<!-- ProgressBar — explicit colours so the thin bar stays visible on dark bg -->
+					<SolidColorBrush x:Key="ProgressBarTrackBg" Color="#3A3A3A"/>
+					<SolidColorBrush x:Key="ProgressBarFill"    Color="#42A5F5"/>
+					<!-- Window list selection ring -->
+						<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#42A5F5"/>
+						<!-- Toast notification -->
+						<SolidColorBrush x:Key="ToastNoticeForeground" Color="#FFD54F"/>
+
+					</ResourceDictionary>
+				<ResourceDictionary x:Key="Light">
+					<SolidColorBrush x:Key="AppWindowBg">#F3F3F3</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuPopupBg">#EEF5F5F5</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuItemHoverBg">#20000000</SolidColorBrush>
+					<SolidColorBrush x:Key="ListPanelBorderColor"    Color="#AAAAAA"/>
+					<!-- Lighter selection so black text stays readable on accent background -->
+					<SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="#500078D4"/>
+					<!-- ToggleButton checked — Fluent blue, OS-accent-independent -->
+					<SolidColorBrush x:Key="ToggleCheckedBg"    Color="#0078D4"/>
+					<SolidColorBrush x:Key="ToggleCheckedBgHov" Color="#106EBE"/>
+					<SolidColorBrush x:Key="ToggleCheckedBgPrs" Color="#005A9E"/>
+					<!-- ProgressBar -->
+					<SolidColorBrush x:Key="ProgressBarTrackBg" Color="#DDDDDD"/>
+					<SolidColorBrush x:Key="ProgressBarFill"    Color="#0078D4"/>
+					<!-- Window list selection ring -->
+						<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#4d79ab"/>
+						<!-- Toast notification -->
+						<SolidColorBrush x:Key="ToastNoticeForeground" Color="#92400E"/>
+					</ResourceDictionary>
+			</ResourceDictionary.ThemeDictionaries>
+		</ResourceDictionary>
+	</Styles.Resources>
+	<Style Selector="Window">
+		<Setter Property="Background" Value="{DynamicResource AppWindowBg}"/>
+	</Style>
+	<Style Selector="NumericUpDown.compact">
+		<Setter Property="MinHeight" Value="0"/>
+		<Setter Property="Padding"   Value="0"/>
+	</Style>
+	<Style Selector="NumericUpDown.compact /template/ ButtonSpinner">
+		<Setter Property="MinHeight" Value="0"/>
+	</Style>
+	<Style Selector="NumericUpDown.compact /template/ ButtonSpinner /template/ TextBox">
+		<Setter Property="MinHeight"               Value="0"/>
+		<Setter Property="Padding"                 Value="4,0"/>
+		<Setter Property="VerticalContentAlignment" Value="Center"/>
+	</Style>
+	<Style Selector="NumericUpDown.compact /template/ ButtonSpinner /template/ RepeatButton">
+		<Setter Property="MinWidth"  Value="0"/>
+		<Setter Property="MinHeight" Value="0"/>
+		<Setter Property="Width"     Value="12"/>
+		<Setter Property="Padding"   Value="0"/>
+	</Style>
+	<Style Selector="NumericUpDown.compact /template/ ButtonSpinner /template/ RepeatButton PathIcon">
+		<Setter Property="Width"  Value="8"/>
+		<Setter Property="Height" Value="8"/>
+	</Style>
+	<Style Selector="ComboBox.compact">
+		<Setter Property="MinHeight" Value="0"/>
+		<Setter Property="Padding"   Value="4,0"/>
+		<Setter Property="FontSize"  Value="11"/>
+	</Style>
+	<Style Selector="RadioButton.compact">
+		<Style.Resources>
+			<x:Double x:Key="RadioButtonMinHeight">20</x:Double>
+		</Style.Resources>
+		<Setter Property="MinHeight" Value="20"/>
+		<Setter Property="Padding"   Value="8,0,0,0"/>
+		<Setter Property="FontSize"  Value="11"/>
+	</Style>
+	<Style Selector="RadioButton.compact /template/ Ellipse#OuterEllipse, RadioButton.compact /template/ Ellipse#CheckOuterEllipse">
+		<Setter Property="Width"           Value="14"/>
+		<Setter Property="Height"          Value="14"/>
+		<Setter Property="StrokeThickness" Value="1"/>
+	</Style>
+	<Style Selector="RadioButton.compact /template/ Ellipse#CheckGlyph">
+		<Setter Property="Width"  Value="7"/>
+		<Setter Property="Height" Value="7"/>
+	</Style>
+	<Style Selector="RadioButton.compact /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="VerticalAlignment" Value="Center"/>
+		<Setter Property="Margin" Value="4,0,0,0"/>
+	</Style>
+	<Style Selector="TextBox.grayed">
+		<Setter Property="Foreground" Value="Gray"/>
+	</Style>
+	<Style Selector="TextBlock:disabled">
+		<Setter Property="Opacity" Value="0.38"/>
+	</Style>
+	<Style Selector="ToggleButton.check:disabled">
+		<Setter Property="Opacity" Value="0.38"/>
+	</Style>
+	<Style Selector="Button.menuitem">
+		<Setter Property="Background"      Value="Transparent"/>
+		<Setter Property="BorderThickness" Value="0"/>
+	</Style>
+	<Style Selector="Button.menuitem /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background"   Value="Transparent"/>
+		<Setter Property="CornerRadius" Value="4"/>
+		<Setter Property="Padding"      Value="0"/>
+	</Style>
+	<Style Selector="Button.menuitem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource MenuItemHoverBg}"/>
+	</Style>
+	<!-- ToggleButton checked state — OS accent-colour-independent -->
+	<Style Selector="ToggleButton:checked /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource ToggleCheckedBg}"/>
+		<Setter Property="Foreground" Value="White"/>
+	</Style>
+	<Style Selector="ToggleButton:checked:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource ToggleCheckedBgHov}"/>
+	</Style>
+	<Style Selector="ToggleButton:checked:pressed /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource ToggleCheckedBgPrs}"/>
+	</Style>
+	<!-- ProgressBar — OS accent-colour-independent, visible on both themes -->
+	<Style Selector="ProgressBar">
+		<Setter Property="Background" Value="{DynamicResource ProgressBarTrackBg}"/>
+		<Setter Property="Foreground" Value="{DynamicResource ProgressBarFill}"/>
+	</Style>
+	<!-- Toast notification text -->
+	<Style Selector="TextBlock.toast">
+		<Setter Property="Foreground"  Value="{DynamicResource ToastNoticeForeground}"/>
+		<Setter Property="FontWeight"  Value="SemiBold"/>
+	</Style>
+	<!-- Sync-active button (Unsync): keep red background on hover/press -->
+	<Style Selector="Button.sync-active /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="#E57373"/>
+		<Setter Property="Foreground" Value="White"/>
+	</Style>
+	<Style Selector="Button.sync-active:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="#EF9A9A"/>
+	</Style>
+	<Style Selector="Button.sync-active:pressed /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="#C62828"/>
+	</Style>
+</Styles>

@@ -148,6 +148,10 @@ namespace MxPlot.Extensions.Images
         /// the IMatrixDataReader interface, enabling integration with matrix-based data processing workflows.</remarks>
         public class BitmapImageFormat : IMatrixDataReader
         {
+            public string FormatName => "Bitmap Image";
+
+            public IReadOnlyList<string> Extensions { get; } = [".png", ".jpg", ".jpeg", ".bmp"];
+
             /// <summary>
             /// Gets or sets the divisor used to normalize values in calculations. If 255, the values will be normalized to the range [0, 1]. Default is 1.0 (no normalization).
             /// </summary>
@@ -158,8 +162,10 @@ namespace MxPlot.Extensions.Images
             /// </summary>
             public BitmapReadMode Mode { get; set; } = BitmapReadMode.GrayScale;
 
+            public CancellationToken CancellationToken { get; set; }
+
             /// <summary>
-            /// Provides configuration options and methods for reading bitmap image files and extracting their pixel data as MatrixData&lt;T&gt;. This class is used for the static method of MatrixData.Load and MatrixData.Load&lt;T&gt;. 
+            /// Provides configuration options
             /// </summary>
             /// <remarks>
             /// When this class is called as <br/><br/>
