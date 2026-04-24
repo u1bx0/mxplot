@@ -2,7 +2,7 @@
 
 **HDF5 Export for MatrixData (Powered by PureHDF v2)**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Hdf5?style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Hdf5)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Hdf5?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Hdf5)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 

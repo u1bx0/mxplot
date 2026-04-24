@@ -2,7 +2,7 @@
 
 **Cross-platform UI layer for the [MxPlot Ecosystem](https://github.com/u1bx0/mxplot) — built on [Avalonia UI](https://avaloniaui.net/).**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.UI.Avalonia?style=flat-square)](https://www.nuget.org/packages/MxPlot.UI.Avalonia)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.UI.Avalonia?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.UI.Avalonia)
 [![Downloads](https://img.shields.io/nuget/dt/MxPlot.UI.Avalonia?style=flat-square)](https://www.nuget.org/packages/MxPlot.UI.Avalonia)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Avalonia](https://img.shields.io/badge/Avalonia-11-purple?style=flat-square)](https://avaloniaui.net/)

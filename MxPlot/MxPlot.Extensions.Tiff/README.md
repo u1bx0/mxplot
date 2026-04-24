@@ -2,7 +2,7 @@
 
 **OME-TIFF and ImageJ-compatible hyperstack I/O support for MxPlot**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Tiff?style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Tiff)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Tiff?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Tiff)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 

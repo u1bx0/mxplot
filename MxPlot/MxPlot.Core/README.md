@@ -2,7 +2,7 @@
 
 **The foundational, dependency-free data engine for the [MxPlot Ecosystem](https://github.com/u1bx0/mxplot).**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.Core?style=flat-square)](https://www.nuget.org/packages/MxPlot.Core)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.Core?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.Core)
 [![Downloads](https://img.shields.io/nuget/dt/MxPlot.Core?style=flat-square)](https://www.nuget.org/packages/MxPlot.Core)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)](https://www.nuget.org/packages/MxPlot.Core)

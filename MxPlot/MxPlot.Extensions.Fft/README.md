@@ -2,7 +2,7 @@
 
 **Preliminary 2D FFT Support for MatrixData (Powered by MathNet.Numerics)**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Fft?style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Fft)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Fft?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Fft)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 

@@ -3,7 +3,7 @@
 
 **Multi-Axis Matrix Visualization Library**
 
-[![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
+[![NuGet Version](https://img.shields.io/nuget/v/MxPlot?include_prerelease&style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 

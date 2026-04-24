@@ -2,7 +2,7 @@
 
 **High-Performance Image Loading for MatrixData (Powered by SkiaSharp)**
 
-[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Images?style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Images)
+[![NuGet](https://img.shields.io/nuget/v/MxPlot.Extensions.Images?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.Extensions.Images)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
