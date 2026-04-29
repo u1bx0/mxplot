@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.1.0--beta-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.1.0-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -106,23 +106,23 @@ This ecosystem is provided as several NuGet packages.
 
 - **MxPlot (Recommended)**: For most users. Includes the core engine, UI layer, and common extensions.
 ```bash
-dotnet add package MxPlot --version 0.1.0-beta
+dotnet add package MxPlot --version 0.1.0
 ```
 
 - **MxPlot.Core**: For developers building their own tools without extra dependencies.
 ```bash
-dotnet add package MxPlot.Core --version 0.1.0-beta
+dotnet add package MxPlot.Core --version 0.1.0
 ```
 
 - **MxPlot.UI.Avalonia**: If you only need the visualization layer (e.g., for WinForms/WPF host apps).
 ```bash
-dotnet add package MxPlot.UI.Avalonia --version 0.1.0-beta
+dotnet add package MxPlot.UI.Avalonia --version 0.1.0
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="MxPlot" Version="0.1.0-beta" />
+<PackageReference Include="MxPlot" Version="0.1.0" />
 ```
 
 ### 🛠️ For Developers (Manual Setup)
@@ -484,7 +484,14 @@ MxPlot.App also serves as a reference implementation showing how to build a full
 
 ## 📊 Version History
 
-**v0.1.0-beta** (Major feature release — Virtual frames, plugin I/O, cross-platform UI, and standalone app)
+**v0.1.0** (Documentation and bug-fix release)
+- 🔍 **XML Documentation**: Added comprehensive XML doc comments to public API (`IMatrixData`, `MatrixDataValueConverter`, `FastMinMaxFinder`, `MatrixPlotter`) — now surfaces correctly in IDE IntelliSense from NuGet.
+- 🛠️ **NuGet Doc Fix**: Replaced `IncludeDocumentationFile` with `GenerateDocumentationFile` in `Directory.Build.props` so `.xml` files are reliably included in packages.
+- 🖼️ **MatrixPlotter Accessors**: Added `MainView`, `BottomView`, and `RightView` public getters, enabling event registration (mouse, keyboard, etc.) from WinForms/WPF host apps.
+- 🐛 **CsvHandler Bug Fix**: `CsvHandler.Load` was silently ignoring the `flipY` parameter — loaded data had its Y-axis flipped. Now corrected and covered by regression tests.
+- 📦 **MathNet.Numerics Stabilized**: Downgraded `MxPlot.Extensions.Fft` dependency from `6.0.0-beta2` to the stable `5.0.0`. FFT API is unchanged.
+
+**v0.1.0-beta**
 - 💾 **Virtual Frame Streaming**: Introduced `VirtualFrames<T>` — MMF-backed on-demand frame loading for large files (>2 GB default threshold). Peak memory stays near one frame. Pluggable prefetch strategies keep navigation smooth.
 - 🔌 **Format Plugin Registry**: `FormatRegistry` auto-discovers `MxPlot.Extensions.*.dll` at startup. Built-in formats (`MxBinaryFormat`, `CsvFormat`, `FitsFormat`) are always available; third-party formats are picked up with no explicit registration call.
 - 📐 **New I/O Capability Interfaces**: `IProgressReportable`, `IVirtualLoadable`, `ICompressible` — format handlers declare their capabilities explicitly, enabling generic UI wiring (e.g. attaching a progress bar) without format-specific knowledge.

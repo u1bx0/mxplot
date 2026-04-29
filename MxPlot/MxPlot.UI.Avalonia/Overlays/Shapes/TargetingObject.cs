@@ -21,9 +21,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             PenColor = Color.FromRgb(255,128,128);
         }
 
-        public event EventHandler<(Point Origin, double Width, double Height)>? GeometryChanged;
-
-        // Fraction of max(W, H) used for the arm length beyond the ellipse edge
+        // Fraction of max
         private const double ArmFraction = 0.1;
 
         public override void SetCreationBounds(Point start, Point end)
@@ -146,21 +144,6 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp) =>
             GetResizeCursor(handle, vp);
-
-        public override void Move(double dx, double dy)
-        {
-            X += dx; Y += dy;
-            GeometryChanged?.Invoke(this, (new Point(X, Y), Width, Height));
-        }
-
-        public override void Resize(HandleType handle, Point worldNewPos)
-        {
-            if (CurrentModifiers.HasFlag(KeyModifiers.Control))
-                ResizeBoundingBoxCtrl(handle, worldNewPos);
-            else
-                ResizeBoundingBox(handle, worldNewPos);
-            GeometryChanged?.Invoke(this, (new Point(X, Y), Width, Height));
-        }
 
         public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
         {

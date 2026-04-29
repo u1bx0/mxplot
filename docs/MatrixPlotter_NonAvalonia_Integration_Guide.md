@@ -1,6 +1,7 @@
 ﻿# Hosting MatrixPlotter in WinForms / WPF
 
 **Created**: 2026-04-24  
+**Updated**: 2026-04-29
 **Target version**: `MxPlot.UI.Avalonia` (Avalonia 11.3.14), .NET 10
 
 ---
@@ -35,14 +36,15 @@ Add the following to your WinForms / WPF project `.csproj`.
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
-</ItemGroup>
-
-<ItemGroup>
+  <!-- MxPlot NuGet package (includes MxPlot.UI.Avalonia and MxPlot.Core) -->
+  <PackageReference Include="MxPlot" Version="0.1.0" />
   <!-- Avalonia Windows backend (Win32 + Skia) -->
   <!-- ⚠️ Version must exactly match the Avalonia dependency of MxPlot.UI.Avalonia -->
   <PackageReference Include="Avalonia.Win32" Version="11.3.14" />
   <PackageReference Include="Avalonia.Skia" Version="11.3.14" />
+  <!-- Required for WinForms keyboard event forwarding (WinFormsAvaloniaMessageFilter) -->
+  <!-- Also required for direct MxView embedding (Section 9) -->
+  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.14" />
 </ItemGroup>
 ```
 
@@ -74,7 +76,11 @@ You do **not** need to define your own `Application` subclass in the host projec
 
 ```csharp
 using Avalonia;
+using Avalonia.Win32.Interoperability;
 using MxPlot.UI.Avalonia;
+// Note: do NOT add 'using System.Windows.Forms;' — it causes CS0104 ambiguity with
+// Avalonia.Application vs System.Windows.Forms.Application.
+// Use the fully-qualified name for Application.Run only.
 
 [STAThread]
 static void Main()
@@ -85,12 +91,15 @@ static void Main()
         .UseSkia()
         .SetupWithoutStarting();
 
-    // ② Normal WinForms initialization
-    Application.EnableVisualStyles();
-    Application.SetCompatibleTextRenderingDefault(false);
-    Application.SetHighDpiMode(HighDpiMode.SystemAware);
+    // ② Forward WM_KEYDOWN/WM_CHAR to the Avalonia HWND correctly
+    //    Required for keyboard input to work in MatrixPlotter and any embedded MxView.
+    //    Must be registered before Application.Run.
+    System.Windows.Forms.Application.AddMessageFilter(
+        new WinFormsAvaloniaMessageFilter());
+
+    // ③ Normal WinForms initialization (template default)
     ApplicationConfiguration.Initialize();
-    Application.Run(new MainForm());
+    System.Windows.Forms.Application.Run(new MainForm());
 }
 ```
 
@@ -107,8 +116,9 @@ Write the Avalonia initialization in `OnStartup` inside `App.xaml.cs`.
 // App.xaml.cs
 using Avalonia;
 using MxPlot.UI.Avalonia;
+using System.Windows;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -272,16 +282,23 @@ Set `StartupUri` in `App.xaml` and pass the ViewModel from code-behind:
 
 ```csharp
 // App.xaml.cs
-protected override void OnStartup(StartupEventArgs e)
-{
-    AppBuilder.Configure<MxPlotHostApplication>()
-        .UseWin32()
-        .UseSkia()
-        .SetupWithoutStarting();
+using Avalonia;
+using MxPlot.UI.Avalonia;
+using System.Windows;
 
-    base.OnStartup(e);
-    // When App.xaml StartupUri="MainWindow.xaml" auto-creates the window,
-    // set DataContext in the MainWindow constructor or code-behind.
+public partial class App : System.Windows.Application
+{
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
+
+        base.OnStartup(e);
+        // When App.xaml StartupUri="MainWindow.xaml" auto-creates the window,
+        // set DataContext in the MainWindow constructor or code-behind.
+    }
 }
 ```
 
@@ -356,21 +373,30 @@ public partial class MainViewModel : ObservableObject
 **DI registration (App.xaml.cs)**
 
 ```csharp
-protected override void OnStartup(StartupEventArgs e)
+// App.xaml.cs
+using Avalonia;
+using MxPlot.UI.Avalonia;
+using Microsoft.Extensions.DependencyInjection;
+using System.Windows;
+
+public partial class App : System.Windows.Application
 {
-    AppBuilder.Configure<MxPlotHostApplication>()
-        .UseWin32()
-        .UseSkia()
-        .SetupWithoutStarting();
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
 
-    var services = new ServiceCollection();
-    services.AddSingleton<IMatrixPlotterService, MatrixPlotterService>();
-    services.AddTransient<MainViewModel>();
+        var services = new ServiceCollection();
+        services.AddSingleton<IMatrixPlotterService, MatrixPlotterService>();
+        services.AddTransient<MainViewModel>();
 
-    var provider = services.BuildServiceProvider();
-    new MainWindow { DataContext = provider.GetRequiredService<MainViewModel>() }.Show();
+        var provider = services.BuildServiceProvider();
+        new MainWindow { DataContext = provider.GetRequiredService<MainViewModel>() }.Show();
 
-    base.OnStartup(e);
+        base.OnStartup(e);
+    }
 }
 ```
 
@@ -469,8 +495,9 @@ void OnNewSample(int ix, int iy, float value)
 | Threading | `MatrixPlotter.Create().Show()` must be called from the UI thread. Only `Refresh()` is thread-safe |
 | WPF Dispatcher | WPF's `Application.Current.Dispatcher` and Avalonia's `Dispatcher.UIThread` refer to the same thread |
 | `data.Invalidate()` | Normally not required. The indexer and `GetArray()` automatically invalidate the internal cache |
-| DPI (WinForms) | Always set `Application.SetHighDpiMode(HighDpiMode.SystemAware)` |
+| DPI (WinForms) | `ApplicationConfiguration.Initialize()` handles DPI settings automatically (template default) |
 | Version pinning | `Avalonia.Win32` / `Avalonia.Skia` must match the Avalonia version used by `MxPlot.UI.Avalonia` |
+| `WinFormsAvaloniaMessageFilter` | **WinForms only.** Register with `Application.AddMessageFilter()` before `Application.Run()` to forward `WM_KEYDOWN`/`WM_CHAR` to the Avalonia HWND. Without this, keyboard input in `MatrixPlotter` and embedded `MxView` does not work. Not required for WPF (the WPF message loop handles forwarding automatically) |
 | `Avalonia.Desktop` | **Do not use** (introduces `Tmds.DBus.Protocol` vulnerability GHSA-xrw6-gwf8-vvr9) |
 
 ---
@@ -566,17 +593,18 @@ Avalonia 11.3.x does not provide `WpfAvaloniaHost`. The only approach is a **3-l
 </PropertyGroup>
 ```
 
-**`App.xaml.cs` — namespace collision workaround**
+**`App.xaml.cs`**
 
 ```csharp
 using Avalonia;
 using MxPlot.UI.Avalonia;
+using System.Windows;
 
 namespace MxPlotWPFEmbedTest;
 
 public partial class App : System.Windows.Application
 {
-    protected override void OnStartup(System.Windows.StartupEventArgs e)
+    protected override void OnStartup(StartupEventArgs e)
     {
         // Initialize Avalonia once, before any Avalonia control is created.
         AppBuilder.Configure<MxPlotHostApplication>()
@@ -589,10 +617,10 @@ public partial class App : System.Windows.Application
 }
 ```
 
-> **`using System.Windows;` causes CS0104**  
-> `Avalonia.Application` and `System.Windows.Application` collide.  
-> Omit `using System.Windows;` and use fully-qualified names instead
-> (`System.Windows.Application`, `System.Windows.StartupEventArgs`).
+> **`using System.Windows;` and `Avalonia.Application` coexist safely here**  
+> Although `Avalonia.Application` and `System.Windows.Application` share the same short name `Application`,  
+> explicitly inheriting `System.Windows.Application` in the class declaration resolves the ambiguity.  
+> `StartupEventArgs` and `Window` in the same file resolve to `System.Windows` types without conflict.
 
 **`MainWindow.xaml` — declare `WindowsFormsHost` in XAML**
 

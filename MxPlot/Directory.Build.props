@@ -3,15 +3,15 @@
 	<!-- Common properties for MxPlot projects -->
 
 	<PropertyGroup>
-		<Version>0.1.0-beta</Version>
-		<PackageVersion>0.1.0-beta</PackageVersion>
+		<Version>0.1.0</Version>
+		<PackageVersion>0.1.0</PackageVersion>
 		<Authors>u1bx0</Authors>
 		<Description>MxPlot: Multi-Axis Matrix Visualization Library for .NET. This project is currently under active development.</Description>
 
 		<Copyright>Copyright (c) 2026 u1bx0</Copyright>
 
 		<PackageTags>plot;chart;graph;visualization;matrix;heatmap;multi-axis;dotnet;imaging;hyperstack</PackageTags>
-		
+
 		<PackageProjectUrl>https://github.com/u1bx0/mxplot</PackageProjectUrl>
 		<RepositoryUrl>https://github.com/u1bx0/mxplot</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
@@ -19,11 +19,11 @@
 		<PackageLicenseFile>LICENSE</PackageLicenseFile>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 
-		<IncludeDocumentationFile>true</IncludeDocumentationFile>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<NoWarn>1591</NoWarn>
 
 	</PropertyGroup>
-	
+
 	<PropertyGroup Condition="'$(Configuration)' == 'Release'">
 		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
 		<PackageOutputPath>$(SolutionDir)..\LocalPackages\</PackageOutputPath>
@@ -33,7 +33,7 @@
 		<GeneratePackageOnBuild>false</GeneratePackageOnBuild>
 		<IsPackable>false</IsPackable>
 	</PropertyGroup>
-	
+
 	<ItemGroup>
 		<None Include="README.md" Pack="true" PackagePath="\" />
 	</ItemGroup>

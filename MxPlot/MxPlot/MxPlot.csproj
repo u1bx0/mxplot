@@ -6,6 +6,7 @@
 		<PackageIcon>mxplot_logo_pre.png</PackageIcon>
 		<Platforms>AnyCPU</Platforms>
 		
+		
 	</PropertyGroup>
 	
 	<ItemGroup>

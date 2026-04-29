@@ -1,6 +1,7 @@
 ﻿# WinForms / WPF から Avalonia MxPlotter を使う手順
 
 **作成日**: 2026-4-19  
+**更新日**: 2026-04-29  
 **対象バージョン**: `MxPlot.UI.Avalonia` (Avalonia 11.3.14), .NET 10
 
 ---
@@ -35,14 +36,15 @@ WinForms / WPF プロジェクトの `.csproj` に以下を追加します。
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
-</ItemGroup>
-
-<ItemGroup>
+  <!-- MxPlot NuGet パッケージ（MxPlot.UI.Avalonia および MxPlot.Core を含む）-->
+  <PackageReference Include="MxPlot" Version="0.1.0" />
   <!-- Avalonia Windows バックエンド（Win32 + Skia）-->
   <!-- ⚠️ バージョンは MxPlot.UI.Avalonia の依存 Avalonia と完全に一致させること -->
   <PackageReference Include="Avalonia.Win32" Version="11.3.14" />
   <PackageReference Include="Avalonia.Skia" Version="11.3.14" />
+  <!-- WinForms のキーボードイベント転送に必要（WinFormsAvaloniaMessageFilter）-->
+  <!-- 直接埋め込み（セクション 9）にも必要 -->
+  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.14" />
 </ItemGroup>
 ```
 
@@ -74,7 +76,11 @@ WinForms / WPF プロジェクトの `.csproj` に以下を追加します。
 
 ```csharp
 using Avalonia;
+using Avalonia.Win32.Interoperability;
 using MxPlot.UI.Avalonia;
+// 注意：'using System.Windows.Forms;' を追加すると、
+// Avalonia.Application と System.Windows.Forms.Application が CS0104 で衢突します。
+// Application.Run のみ完全修飾名で記述してください。
 
 [STAThread]
 static void Main()
@@ -85,12 +91,15 @@ static void Main()
         .UseSkia()
         .SetupWithoutStarting();
 
-    // ② WinForms の通常初期化
-    Application.EnableVisualStyles();
-    Application.SetCompatibleTextRenderingDefault(false);
-    Application.SetHighDpiMode(HighDpiMode.SystemAware);
+    // ② WM_KEYDOWN / WM_CHAR を Avalonia HWND に正しく転送
+    //    MatrixPlotter および埋め込み MxView のキーボード入力に必須。
+    //    Application.Run の前に登録する必要があります。
+    System.Windows.Forms.Application.AddMessageFilter(
+        new WinFormsAvaloniaMessageFilter());
+
+    // ③ WinForms の通常初期化（テンプレートのデフォルト）
     ApplicationConfiguration.Initialize();
-    Application.Run(new MainForm());
+    System.Windows.Forms.Application.Run(new MainForm());
 }
 ```
 
@@ -107,8 +116,9 @@ Avalonia の初期化は `App.xaml.cs` の `OnStartup` に書きます。
 // App.xaml.cs
 using Avalonia;
 using MxPlot.UI.Avalonia;
+using System.Windows;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -272,16 +282,23 @@ public partial class MainViewModel : ObservableObject
 
 ```csharp
 // App.xaml.cs
-protected override void OnStartup(StartupEventArgs e)
-{
-    AppBuilder.Configure<MxPlotHostApplication>()
-        .UseWin32()
-        .UseSkia()
-        .SetupWithoutStarting();
+using Avalonia;
+using MxPlot.UI.Avalonia;
+using System.Windows;
 
-    base.OnStartup(e);
-    // StartupUri="MainWindow.xaml" でウィンドウが自動生成される場合、
-    // DataContext は MainWindow のコンストラクタかコードビハインドで設定する
+public partial class App : System.Windows.Application
+{
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
+
+        base.OnStartup(e);
+        // StartupUri="MainWindow.xaml" でウィンドウが自動生成される場合、
+        // DataContext は MainWindow のコンストラクタかコードビハインドで設定する
+    }
 }
 ```
 
@@ -356,21 +373,30 @@ public partial class MainViewModel : ObservableObject
 **DI 登録（App.xaml.cs）**
 
 ```csharp
-protected override void OnStartup(StartupEventArgs e)
+// App.xaml.cs
+using Avalonia;
+using MxPlot.UI.Avalonia;
+using Microsoft.Extensions.DependencyInjection;
+using System.Windows;
+
+public partial class App : System.Windows.Application
 {
-    AppBuilder.Configure<MxPlotHostApplication>()
-        .UseWin32()
-        .UseSkia()
-        .SetupWithoutStarting();
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        AppBuilder.Configure<MxPlotHostApplication>()
+            .UseWin32()
+            .UseSkia()
+            .SetupWithoutStarting();
 
-    var services = new ServiceCollection();
-    services.AddSingleton<IMatrixPlotterService, MatrixPlotterService>();
-    services.AddTransient<MainViewModel>();
+        var services = new ServiceCollection();
+        services.AddSingleton<IMatrixPlotterService, MatrixPlotterService>();
+        services.AddTransient<MainViewModel>();
 
-    var provider = services.BuildServiceProvider();
-    new MainWindow { DataContext = provider.GetRequiredService<MainViewModel>() }.Show();
+        var provider = services.BuildServiceProvider();
+        new MainWindow { DataContext = provider.GetRequiredService<MainViewModel>() }.Show();
 
-    base.OnStartup(e);
+        base.OnStartup(e);
+    }
 }
 ```
 
@@ -469,8 +495,9 @@ void OnNewSample(int ix, int iy, float value)
 | スレッド | `MatrixPlotter.Create().Show()` は UI スレッドから呼ぶ。`Refresh()` のみスレッドセーフ |
 | WPF Dispatcher | WPF の `Application.Current.Dispatcher` と Avalonia の `Dispatcher.UIThread` は同一スレッドを指す |
 | `data.Invalidate()` | 通常不要。インデクサ / `GetArray()` が自動的に内部キャッシュを無効化する |
-| DPI（WinForms） | `Application.SetHighDpiMode(HighDpiMode.SystemAware)` を必ず設定する |
+| DPI（WinForms） | `ApplicationConfiguration.Initialize()` が DPI 設定を自動で処理します（テンプレートのデフォルト）|
 | バージョン固定 | `Avalonia.Win32` / `Avalonia.Skia` は `MxPlot.UI.Avalonia` の Avalonia バージョンと一致させる |
+| `WinFormsAvaloniaMessageFilter` | **WinForms のみ必須**。`Application.AddMessageFilter()` で `Application.Run()` 前に登録する。登録しないと `MatrixPlotter` および埋め込み `MxView` でキーボード入力が機能しない。WPF では WPF メッセージループが自動転送するため不要 |
 | `Avalonia.Desktop` | **使用禁止**（`Tmds.DBus.Protocol` 脆弱性 GHSA-xrw6-gwf8-vvr9 が混入） |
 
 ---
@@ -569,17 +596,18 @@ Avalonia 11.3.x には `WpfAvaloniaHost` が存在しません。唯一の方法
 </PropertyGroup>
 ```
 
-**`App.xaml.cs` — 名前空間の衝突を回避**
+**`App.xaml.cs`**
 
 ```csharp
 using Avalonia;
 using MxPlot.UI.Avalonia;
+using System.Windows;
 
 namespace MxPlotWPFEmbedTest;
 
 public partial class App : System.Windows.Application
 {
-    protected override void OnStartup(System.Windows.StartupEventArgs e)
+    protected override void OnStartup(StartupEventArgs e)
     {
         // Avalonia コントロールを生成する前に 1 回だけ呼ぶ
         AppBuilder.Configure<MxPlotHostApplication>()
@@ -592,9 +620,10 @@ public partial class App : System.Windows.Application
 }
 ```
 
-> **`using System.Windows;` を書くと CS0104 が発生します**  
-> `Avalonia.Application` と `System.Windows.Application` が衝突するためです。  
-> `using System.Windows;` は省略し、継承や引数の型はすべて完全修飾名で記述してください。
+> **`using System.Windows;` と `Avalonia.Application` は共存できます**  
+> `Avalonia.Application` と `System.Windows.Application` は短縮名 `Application` が被りますが、  
+> クラス宣言で `System.Windows.Application` を明示継承することで曖昧さが解消されます。  
+> 同じファイル内の `StartupEventArgs` や `Window` は `System.Windows` の型として解決されます。
 
 **`MainWindow.xaml` — XAML で `WindowsFormsHost` を宣言**
 

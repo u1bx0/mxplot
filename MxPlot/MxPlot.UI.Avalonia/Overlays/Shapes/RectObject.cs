@@ -46,8 +46,6 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             return $"Rect: W={FmtLen(physW)}{xuStr} [{FmtLen(Width)}], H={FmtLen(physH)}{yuStr} [{FmtLen(Height)}]";
         }
 
-        public event EventHandler<(Point Origin, double Width, double Height)>? GeometryChanged;
-
         public override void SetCreationBounds(Point start, Point end)
             => SetCreationBoundsInternal(start, end, forceSquare: false);
 
@@ -90,22 +88,6 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp) =>
             GetResizeCursor(handle, vp);
-
-        public override void Move(double dx, double dy)
-        {
-            X += dx;
-            Y += dy;
-            GeometryChanged?.Invoke(this, (new Point(X, Y), Width, Height));
-        }
-
-        public override void Resize(HandleType handle, Point worldNewPos)
-        {
-            if (CurrentModifiers.HasFlag(KeyModifiers.Control))
-                ResizeBoundingBoxCtrl(handle, worldNewPos);
-            else
-                ResizeBoundingBox(handle, worldNewPos);
-            GeometryChanged?.Invoke(this, (new Point(X, Y), Width, Height));
-        }
 
         public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
         {

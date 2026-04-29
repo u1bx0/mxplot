@@ -172,7 +172,6 @@ namespace MxPlot.Core.IO.CacheStrategies
         /// </summary>
         private int GetFrameIndex(int[] basePos, int targetAxisIdx, int targetVal, int channelVal)
         {
-            // yield の外なので stackalloc が使える！
             Span<int> pos = stackalloc int[_dim.Axes.Count];
             basePos.CopyTo(pos);
 

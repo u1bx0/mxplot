@@ -9,14 +9,11 @@
 > 📦 Pre-built binaries for **Windows x64** and **macOS (Apple Silicon)** are available on the [Releases page](https://github.com/u1bx0/mxplot/releases).
 
 ---
+### 🎥 MxPlot.App Demo
 
-<!-- TODO: Replace with an animated GIF showing the full workflow.
-     Suggested content: drag-drop a file to dashboard, open multiple windows,
-     Tile, Sync, draw overlay, export PNG.
-     Tool: https://www.screentogif.com/ — ~15 fps, keep under 10 MB
-     Then uncomment: -->
-<!-- ![MxPlot.App Demo](https://raw.githubusercontent.com/u1bx0/mxplot/main/docs/images/mxplot_app_demo.gif) -->
-
+<div align="center">
+  <img src="../../docs/images/mxplot-app-demo.gif" width=800 alt="MxPlot.App Demo"> 
+</div>
 ---
 
 ## What is MxPlot.App?

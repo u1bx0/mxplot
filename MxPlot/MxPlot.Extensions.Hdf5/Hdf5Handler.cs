@@ -7,25 +7,24 @@ using System.Runtime.InteropServices;
 namespace MxPlot.Extensions.Hdf5
 {
     /// <summary>
-    /// MatrixData を HDF5 形式でエクスポートするユーティリティ
-    /// PureHDF v2 の超シンプルAPIを使用
-    /// 
-    /// HDF5 構造:
+    /// Utility for exporting MatrixData in HDF5 format using the PureHDF v2 simple API.
+    ///
+    /// HDF5 structure:
     /// /matrix_data/
-    ///     data (Dataset)      - 実データ [Y, X] または [Frame, Y, X]
+    ///     data (Dataset)      - raw data [Y, X] or [Frame, Y, X]
     ///     Attributes:
     ///       - XMin, XMax, YMin, YMax
     ///       - XCount, YCount, FrameCount
     ///       - XUnit, YUnit
     ///       - ValueType
-    /// 
-    /// Python (h5py) での読み込み例:
+    ///
+    /// Example: reading with Python (h5py):
     ///   import h5py
     ///   with h5py.File('data.h5', 'r') as f:
     ///       data = f['/matrix_data/data'][:]
     ///       xmin = f['/matrix_data'].attrs['XMin']
     ///       print(f"Data shape: {data.shape}, X range: [{xmin}, {f['/matrix_data'].attrs['XMax']}]")
-    ///       # ルート属性を表示
+    ///       # Print root attributes
     ///       for key, value in f.attrs.items():
     ///           if 'IMAGE' in key or 'DISPLAY' in key or 'DIMENSION' in key:
     ///               print(f"{key}: {value}")
@@ -33,7 +32,7 @@ namespace MxPlot.Extensions.Hdf5
     public static class Hdf5Handler
     {
         /// <summary>
-        /// MatrixData を HDF5 ファイルにエクスポート
+        /// Exports MatrixData to an HDF5 file.
         /// </summary>
         public static void Save<T>(string filePath, MatrixData<T> data, string groupPath = "matrix_data", bool flipY = true)
             where T : unmanaged
@@ -41,32 +40,32 @@ namespace MxPlot.Extensions.Hdf5
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (string.IsNullOrWhiteSpace(filePath)) throw new ArgumentException("File path cannot be empty", nameof(filePath));
 
-            // 既存ファイルを削除
+            // Delete existing file
             if (File.Exists(filePath)) File.Delete(filePath);
 
             var file = new H5File();
 
             try
             {
-                // 書き込み前に「並び替えインデックス」と「ソート済み軸リスト」を生成
-                // これにより、データの実体(Array)と属性(Attributes)の順序を一致させます。
+                // Before writing, compute the reordered indices and sorted axis list
+                // so that the data array (Array) and attributes (Attributes) share the same ordering.
                 var (reorderedIndices, sortedAxes) = GetReorderedIndices(data);
 
                 var group = new H5Group();
-                // 1. データ配列を書き込み
+                // 1. Write data array
                 WriteDataArray(group, groupPath, data, sortedAxes, reorderedIndices, flipY);
                 file[groupPath] = group;
 
-                // 2. 属性を書き込み
-                // ルート属性として保存
+                // 2. Write attributes
+                // Save as root-level attributes
                 file.Attributes[$"{groupPath}_Creator"] = "MxPlot.External.HDF5.Hdf5Handler";
                 file.Attributes[$"{groupPath}_Version"] = "1.0";
                 file.Attributes[$"{groupPath}_CreatedAt"] = DateTime.Now.ToString("o");
 
-                //groupPathにMatrixData情報を書き込む
+                //Write MatrixData info to groupPath
                 WriteAttributes(group, groupPath, data, sortedAxes, flipY);
                 
-                // 3. ファイルに保存
+                // 3. Write to file
                 file.Write(filePath);
             }
             catch (Exception ex)
@@ -75,7 +74,7 @@ namespace MxPlot.Extensions.Hdf5
             }
         }
 
-        #region Load, GetFileInfo は未実装
+        #region Load, GetFileInfo (not yet implemented)
         public static MatrixData<T> Load<T>(string filePath, string groupPath = "matrix_data") where T : unmanaged
         {
             throw new NotImplementedException("Import functionality is under development.");
@@ -90,14 +89,14 @@ namespace MxPlot.Extensions.Hdf5
         #region Private Helper Methods
 
         /// <summary>
-        /// 【変更点】軸の順序を再計算するメソッド
+        /// Recalculates axis ordering and returns reordered frame indices and sorted axis list.
         /// </summary>
         private static (int[] reorderedIndices, List<Axis> sortedAxes) GetReorderedIndices<T>(MatrixData<T> data) where T : unmanaged
         {
-            // 【重要修正】IReadOnlyListにはIndexOfがないため、ToList()でリスト化します
+            // IReadOnlyList does not expose IndexOf, so convert to List first.
             var originalAxes = data.Dimensions.Axes.ToList();
 
-            // 1. 軸を標準的なHDF5順序にソート
+            // 1. Sort axes into canonical HDF5 order
             var sortedAxes = originalAxes
                 .OrderBy(a => GetAxisPriority(a))
                 .ToList();
@@ -105,7 +104,7 @@ namespace MxPlot.Extensions.Hdf5
             int frameCount = data.FrameCount;
             int[] reorderedIndices = new int[frameCount];
 
-            // 2. カウンター準備
+            // 2. Prepare counters and sorted-to-original index map
             int[] currentCounters = new int[sortedAxes.Count];
             int[] mapSortedToOriginal = new int[sortedAxes.Count];
             for (int i = 0; i < sortedAxes.Count; i++)
@@ -115,21 +114,21 @@ namespace MxPlot.Extensions.Hdf5
 
             int[] originalIndexer = new int[originalAxes.Count];
 
-            // 3. ループ処理
+            // 3. Build reordered index array
             for (int i = 0; i < frameCount; i++)
             {
-                // A. カウンター -> 元の座標
+                // A. Counter -> original coordinates
                 for (int k = 0; k < sortedAxes.Count; k++)
                 {
                     int originalPos = mapSortedToOriginal[k];
                     originalIndexer[originalPos] = currentCounters[k];
                 }
 
-                // B. 元のインデックス取得
+                // B. Resolve original frame index
                 int sourceIndex = data.Dimensions.GetFrameIndexAt(originalIndexer);
                 reorderedIndices[i] = sourceIndex;
 
-                // C. カウンターインクリメント (Innermost loop first)
+                // C. Increment counters (innermost loop first)
                 for (int k = sortedAxes.Count - 1; k >= 0; k--)
                 {
                     currentCounters[k]++;
@@ -166,7 +165,7 @@ namespace MxPlot.Extensions.Hdf5
         }
 
         /// <summary>
-        /// 【修正版】制約をstructに戻し、Unsafeクラスを使ってポインタ操作を実現します。
+        /// Writes the data array into the HDF5 group using unsafe pointer operations.
         /// </summary>
         private static unsafe void WriteDataArray<T>(H5Group group, string groupPath, MatrixData<T> data,
                                                 List<Axis> sortedAxes, int[] reorderedIndices, bool flipY)
@@ -174,7 +173,7 @@ namespace MxPlot.Extensions.Hdf5
         {
             
 
-            // 1. N次元配列の次元サイズを決定
+            // 1. Determine dimension sizes for the N-dimensional array
             long[] dimensions = new long[sortedAxes.Count + 2];
             for (int i = 0; i < sortedAxes.Count; i++)
             {
@@ -183,38 +182,38 @@ namespace MxPlot.Extensions.Hdf5
             dimensions[dimensions.Length - 2] = data.YCount;
             dimensions[dimensions.Length - 1] = data.XCount;
 
-            // 2. 多次元配列を確保
+            // 2. Allocate the multi-dimensional array
             var multiDimArray = Array.CreateInstance(typeof(T), dimensions);
 
-            // 3. 配列をPinしてポインタを取得
+            // 3. Pin the array and obtain a pointer
             GCHandle handle = GCHandle.Alloc(multiDimArray, GCHandleType.Pinned);
 
             try
             {
                 byte* dstBasePtr = (byte*)handle.AddrOfPinnedObject();
 
-                // サイズ計算
+                // Size calculations
                 int pixelSize = Unsafe.SizeOf<T>();
                 long rowSizeBytes = (long)data.XCount * pixelSize;
                 long frameSizeBytes = rowSizeBytes * data.YCount;
 
-                // 4. 書き込みループ
+                // 4. Write loop
                 for (int i = 0; i < data.FrameCount; i++)
                 {
                     byte* dstFramePtr = dstBasePtr + ((long)i * frameSizeBytes);
 
-                    // 元データの取得
+                    // Retrieve source frame data
                     var srcFrame = data.GetArray(reorderedIndices[i]);
 
-                    // 【重要】Tがunmanaged制約でないため、fixed (T* p = srcFrame) は使えません。
-                    // 代わりに Unsafe.As で強引に byte* として扱います。
-                    // これによりジェネリック型制約のエラーを回避しつつ高速コピーが可能です。
+                    // Because T has the unmanaged constraint, fixed (T* p = srcFrame) would work,
+                    // but using Unsafe.As<T, byte> allows bypassing the generic type constraint error
+                    // while still achieving fast copies.
                     if (srcFrame.Length > 0)
                     {
-                        // 配列の先頭要素への参照をbyte型として取得
+                        // Get a reference to the first element reinterpreted as byte
                         ref byte srcRef = ref Unsafe.As<T, byte>(ref srcFrame[0]);
 
-                        // その参照を固定してポインタ化
+                        // Pin that reference and obtain a pointer
                         fixed (byte* srcBasePtr = &srcRef)
                         {
                             for (int y = 0; y < data.YCount; y++)
@@ -224,7 +223,7 @@ namespace MxPlot.Extensions.Hdf5
                                 byte* srcRowPtr = srcBasePtr + ((long)srcY * rowSizeBytes);
                                 byte* dstRowPtr = dstFramePtr + ((long)y * rowSizeBytes);
 
-                                // 高速メモリコピー
+                                // Fast memory copy
                                 Buffer.MemoryCopy(srcRowPtr, dstRowPtr, rowSizeBytes, rowSizeBytes);
                             }
                         }
@@ -255,7 +254,7 @@ namespace MxPlot.Extensions.Hdf5
             group.Attributes["CLASS"] = "IMAGE";
             group.Attributes["IMAGE_VERSION"] = "1.2";
             group.Attributes["IMAGE_SUBCLASS"] = "IMAGE_GRAYSCALE";
-            group.Attributes["DISPLAY_ORIGIN"] = flipY ? "UL" : "LL"; //flipY=trueなら左上原点-> MatrixDataは左下原点
+            group.Attributes["DISPLAY_ORIGIN"] = flipY ? "UL" : "LL"; // flipY=true → upper-left origin; MatrixData uses lower-left origin
             group.Attributes["IMAGE_WIDTH"] = data.XCount;
             group.Attributes["IMAGE_HEIGHT"] = data.YCount;
             if (data.FrameCount > 1) group.Attributes["IMAGE_FRAMES"] = data.FrameCount;
@@ -269,7 +268,7 @@ namespace MxPlot.Extensions.Hdf5
         {
             double pixelSizeX = data.XRange / data.XCount;
             double pixelSizeY = data.YRange / data.YCount;
-            // 注意: 単純な3D表示用。多次元の詳細スケールはWriteDimensionAttributesで処理。
+            // Note: for simple 3D display only. Detailed multi-dimensional scale is handled in WriteDimensionAttributes.
             if (data.FrameCount > 1)
                 groupOrDataset.Attributes["element_size_um"] = new double[] { 1.0, pixelSizeY, pixelSizeX };
             else
@@ -292,14 +291,14 @@ namespace MxPlot.Extensions.Hdf5
         }
 
         /// <summary>
-        /// 【変更点】sortedAxes を受け取るように修正
+        /// Writes MatrixData attributes to the specified HDF5 object, using sortedAxes for dimension ordering.
         /// </summary>
         //private static void WriteAttributes<T>(H5File file, string groupPath, MatrixData<T> data, List<Axis> sortedAxes, bool flipY) where T : struct
         private static void WriteAttributes<T>(H5Object groupOrDataset, string groupPath, MatrixData<T> data, List<Axis> sortedAxes, bool flipY) where T : unmanaged
         {
             string prefix = groupPath.TrimStart('/').Replace('/', '_');
 
-            // ... (ここから下の基本属性は変更なし) ...
+            // ... (basic attributes below are unchanged) ...
             groupOrDataset.Attributes[$"{prefix}_XMin"] = data.XMin;
             groupOrDataset.Attributes[$"{prefix}_XMax"] = data.XMax;
             groupOrDataset.Attributes[$"{prefix}_YMin"] = data.YMin;
@@ -313,12 +312,12 @@ namespace MxPlot.Extensions.Hdf5
             groupOrDataset.Attributes[$"{prefix}_YFlipped"] = flipY;
             groupOrDataset.Attributes[$"{prefix}_CoordinateSystem"] = flipY ? "Image (top-left origin)" : "Mathematical (bottom-left origin)";
             
-            // 【変更点】Dimension情報を保存（sortedAxesを渡す）
+            // Write Dimension info (passing sortedAxes)
             WriteDimensionAttributes(groupOrDataset, prefix, sortedAxes);
         }
 
         /// <summary>
-        /// 【変更点】sortedAxes を受け取り、それに基づいてメタデータを記述
+        /// Writes dimension metadata based on sortedAxes ordering.
         /// </summary>
         //private static void WriteDimensionAttributes(H5File file, string prefix, List<Axis> sortedAxes)
         private static void WriteDimensionAttributes(H5Object groupOrDataset, string prefix, List<Axis> sortedAxes)
@@ -332,13 +331,13 @@ namespace MxPlot.Extensions.Hdf5
             groupOrDataset.Attributes[$"{prefix}_HasDimensions"] = true;
             groupOrDataset.Attributes[$"{prefix}_DimensionCount"] = (double)sortedAxes.Count;
 
-            // sortedAxes の順序でループ
+            // Iterate in sortedAxes order
             for (int i = 0; i < sortedAxes.Count; i++)
             {
                 var axis = sortedAxes[i];
                 string axisPrefix = $"{prefix}_Dim{i}";
 
-                // 基本的なAxis情報
+                // Basic Axis info
                 groupOrDataset.Attributes[$"{axisPrefix}_Name"] = axis.Name;
                 groupOrDataset.Attributes[$"{axisPrefix}_Count"] = (double)axis.Count;
                 groupOrDataset.Attributes[$"{axisPrefix}_Min"] = axis.Min;
@@ -346,7 +345,7 @@ namespace MxPlot.Extensions.Hdf5
                 groupOrDataset.Attributes[$"{axisPrefix}_Unit"] = axis.Unit ?? "";
                 groupOrDataset.Attributes[$"{axisPrefix}_IsIndexBased"] = axis.IsIndexBased;
 
-                // FovAxisかどうかをチェック
+                // Check whether the axis is a FovAxis
                 if (axis is FovAxis fovAxis)
                 {
                     groupOrDataset.Attributes[$"{axisPrefix}_IsFovAxis"] = true;
@@ -363,7 +362,7 @@ namespace MxPlot.Extensions.Hdf5
 
         private static void WriteFovAxisSpecificInfo(H5Object groupOrDataset, string axisPrefix, FovAxis fovAxis)
         {
-            // ... (変更なし) ...
+            // ... (unchanged) ...
             groupOrDataset.Attributes[$"{axisPrefix}_TileLayoutX"] = (double)fovAxis.TileLayout.X;
             groupOrDataset.Attributes[$"{axisPrefix}_TileLayoutY"] = (double)fovAxis.TileLayout.Y;
             groupOrDataset.Attributes[$"{axisPrefix}_TileLayoutZ"] = (double)fovAxis.TileLayout.Z;
@@ -389,7 +388,7 @@ namespace MxPlot.Extensions.Hdf5
         }
 
         /// <summary>
-        /// 【変更点】ソート済みリストを受け取るように変更
+        /// Identifies and tags each dimension with a common type label (FOV, Channel, Time, Z, or Unknown).
         /// </summary>
         private static void IdentifyCommonDimensions(H5Object groupOrDataset, string prefix, List<Axis> axes)
         {
@@ -427,7 +426,7 @@ namespace MxPlot.Extensions.Hdf5
     }
 
     /// <summary>
-    /// HDF5エクスポート例外
+    /// Exception thrown when an HDF5 export operation fails.
     /// </summary>
     public class Hdf5ExportException : Exception
     {
@@ -436,7 +435,7 @@ namespace MxPlot.Extensions.Hdf5
     }
 
     /// <summary>
-    /// HDF5ファイル情報
+    /// Holds metadata about an HDF5 file.
     /// </summary>
     public class Hdf5FileInfo
     {
@@ -451,7 +450,7 @@ namespace MxPlot.Extensions.Hdf5
         public double YMax { get; set; }
         public long FileSize { get; set; }
 
-        // Dimension情報
+        // Dimension info
         public bool HasDimensions { get; set; }
         public int DimensionCount { get; set; }
         public string[]? DimensionNames { get; set; }

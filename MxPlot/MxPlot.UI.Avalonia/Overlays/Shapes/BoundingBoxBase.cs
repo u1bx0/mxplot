@@ -66,6 +66,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// </summary>
         public Color FillColor { get; set; } = Color.FromArgb(80, 0, 255, 224);
 
+        /// <summary>Returns the centre of the bounding box in overlay world space.</summary>
         public override Point? GetApproxWorldCenter() => new Point(X + Width / 2, Y + Height / 2);
 
 
@@ -74,6 +75,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         private double _originalCy;
         private bool _hasResizeState;
 
+        /// <summary>Saves the current centre and aspect ratio so constrained resize can reference them throughout the drag.</summary>
         public override void BeginResize()
         {
             if (Math.Abs(Width) > 0.01 && Math.Abs(Height) > 0.01)
@@ -83,12 +85,18 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             _hasResizeState = true;
         }
 
+        /// <summary>Clears the saved resize state captured by <see cref="BeginResize"/>.</summary>
         public override void ResetResizeState()
         {
             _originalAspect = null;
             _hasResizeState = false;
         }
 
+        /// <summary>
+        /// Returns context menu items for this bounding box.
+        /// When the concrete class implements <see cref="IAnalyzableOverlay"/>, analysis items
+        /// (Find Min/Max, Show Statistics, Use ROI for Value Range) are prepended automatically.
+        /// </summary>
         public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
         {
             if (this is IAnalyzableOverlay evaluable)
@@ -338,6 +346,10 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             }
         }
 
+        /// <summary>
+        /// Resizes with modifier-key constraints applied.
+        /// Shift+Ctrl: aspect-ratio locked, centre fixed. Shift only: aspect-ratio locked, opposite corner anchored.
+        /// </summary>
         public override void ResizeConstrained(HandleType handle, Point worldNewPos)
         {
             const double minSize = 1.0, maxSize = 100000.0;
@@ -477,6 +489,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             };
         }
 
+        /// <summary>Returns a <see cref="Rect"/> with non-negative width and height regardless of drag direction.</summary>
         public Rect GetNormalizedRect()
         {
             double x = Width  >= 0 ? X : X + Width;
@@ -486,5 +499,37 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         private static Point Mid(Point a, Point b) =>
             new((a.X + b.X) / 2, (a.Y + b.Y) / 2);
+
+        // ── GeometryChanged ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Raised after the bounding box position or size changes due to a Move or Resize.
+        /// <c>TopLeft</c> is the top-left corner in overlay world space (left-top origin, Y-down).
+        /// </summary>
+        public event EventHandler<(Point TopLeft, double Width, double Height)>? GeometryChanged;
+
+        /// <summary>Raises <see cref="GeometryChanged"/> with the current position and size.</summary>
+        protected void RaiseGeometryChanged() =>
+            GeometryChanged?.Invoke(this, (new Point(X, Y), Width, Height));
+
+        // ── Move / Resize ─────────────────────────────────────────────────────
+
+        /// <summary>Translates the bounding box by (<paramref name="dx"/>, <paramref name="dy"/>) in overlay world space and raises <see cref="GeometryChanged"/>.</summary>
+        public override void Move(double dx, double dy)
+        {
+            X += dx; Y += dy;
+            RaiseGeometryChanged();
+        }
+
+        /// <summary>Resizes the bounding box by moving the specified <paramref name="handle"/> to <paramref name="worldNewPos"/> and raises <see cref="GeometryChanged"/>.
+        /// Ctrl held at drag time keeps the centre fixed; otherwise the opposite handle is anchored.</summary>
+        public override void Resize(HandleType handle, Point worldNewPos)
+        {
+            if (CurrentModifiers.HasFlag(KeyModifiers.Control))
+                ResizeBoundingBoxCtrl(handle, worldNewPos);
+            else
+                ResizeBoundingBox(handle, worldNewPos);
+            RaiseGeometryChanged();
+        }
     }
 }

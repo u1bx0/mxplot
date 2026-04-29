@@ -16,7 +16,8 @@ namespace MxPlot.UI.Avalonia.Actions
     internal enum CropRole { Leader, Follower }
 
     /// <summary>ROI position and size in data pixel-index space (XIndex=0/YIndex=0 at bottom-left), shared between leader and follower windows.</summary>
-    internal readonly record struct CropRoiBounds(int X, int Y, int Width, int Height, bool ReplaceData = false);
+    internal readonly record struct CropRoiBounds(int X, int Y, int Width, int Height, bool ReplaceData = false,
+        bool ThisFrameOnly = false, int LeaderFrameIndex = 0);
 
     /// <summary>
     /// Interactive crop action.
@@ -109,6 +110,19 @@ namespace MxPlot.UI.Avalonia.Actions
         /// the leader's Replace-data setting (follower panel has no checkbox).
         /// </summary>
         internal bool ReplaceData { get; set; }
+
+        /// <summary>
+        /// For <see cref="CropRole.Follower"/>: set before <see cref="ForceApply"/> to inherit
+        /// the leader's This-frame-only setting.
+        /// </summary>
+        internal bool ThisFrameOnly { get; set; }
+
+        /// <summary>
+        /// For <see cref="CropRole.Follower"/>: the leader's frame index when <see cref="ThisFrameOnly"/> is <c>true</c>.
+        /// The follower will use this as a hint; if the follower's frame count is smaller,
+        /// it falls back to its own <see cref="IMatrixData.ActiveIndex"/>.
+        /// </summary>
+        internal int LeaderFrameIndex { get; set; }
 
         /// <summary>
         /// Raised when the XY ROI position or size changes in <see cref="CropRole.Leader"/> mode.
@@ -442,12 +456,12 @@ namespace MxPlot.UI.Avalonia.Actions
                 Cancelled?.Invoke(this, EventArgs.Empty);
             };
 
-            var btnRow = new Grid 
-            { 
-                Height =28,
+            var btnRow = new Grid
+            {
+                Height = 28,
                 Width = 150,
-                Margin = new Thickness(0, 4, 3, 0), 
-                HorizontalAlignment = HorizontalAlignment.Left ,
+                Margin = new Thickness(0, 4, 3, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
             };
             btnRow.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
             btnRow.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));
@@ -638,13 +652,24 @@ namespace MxPlot.UI.Avalonia.Actions
             int y = _ctx.Data.YCount - bitmapY - h;
 
             bool replaceData = _replaceDataChk?.IsChecked == true || ReplaceData;
-            bool thisFrameOnly = _thisFrameOnlyChk?.IsChecked == true;
+            bool thisFrameOnly = _role == CropRole.Follower
+                ? ThisFrameOnly
+                : _thisFrameOnlyChk?.IsChecked == true;
 
-            // Persist for next invocation.
-            _lastReplaceData = replaceData;
-            _lastThisFrameOnly = thisFrameOnly;
+            // Persist for next invocation (leader only).
+            if (_role != CropRole.Follower)
+            {
+                _lastReplaceData = replaceData;
+                _lastThisFrameOnly = thisFrameOnly;
+            }
 
-            return new CropParameters(x, y, w, h, replaceData, thisFrameOnly);
+            // For follower: encode LeaderFrameIndex as a hint in FrameIndex.
+            // -1 means "resolve to local ActiveIndex" (leader path or ThisFrameOnly=false).
+            // Follower encodes the leader's frame index so ExecuteCropAsync can clamp it
+            // to the follower's own frame count and fall back to ActiveIndex when out of range.
+            int frameIndex = _role == CropRole.Follower && thisFrameOnly ? LeaderFrameIndex : -1;
+
+            return new CropParameters(x, y, w, h, replaceData, thisFrameOnly, frameIndex);
         }
 
         /// <summary>
@@ -713,21 +738,21 @@ namespace MxPlot.UI.Avalonia.Actions
 
             double viewW = mainView.Bounds.Width;
             double viewH = mainView.Bounds.Height;
-            double panelW = _panel.Bounds.Width  > 0 ? _panel.Bounds.Width  : 200;
+            double panelW = _panel.Bounds.Width > 0 ? _panel.Bounds.Width : 200;
             double panelH = _panel.Bounds.Height > 0 ? _panel.Bounds.Height : 120;
             const double Margin = 4.0;
 
             if (_xyRoi == null || _role == CropRole.Follower)
             {
                 Canvas.SetLeft(_panel, pt.X + Margin);
-                Canvas.SetTop(_panel,  pt.Y + Margin);
+                Canvas.SetTop(_panel, pt.Y + Margin);
                 return;
             }
 
             var vp = mainView.GetOverlayViewport();
-            var rTL = vp.WorldToScreen(new Point(_xyRoi.X,               _xyRoi.Y));
+            var rTL = vp.WorldToScreen(new Point(_xyRoi.X, _xyRoi.Y));
             var rTR = vp.WorldToScreen(new Point(_xyRoi.X + _xyRoi.Width, _xyRoi.Y));
-            var rBL = vp.WorldToScreen(new Point(_xyRoi.X,               _xyRoi.Y + _xyRoi.Height));
+            var rBL = vp.WorldToScreen(new Point(_xyRoi.X, _xyRoi.Y + _xyRoi.Height));
             var rBR = vp.WorldToScreen(new Point(_xyRoi.X + _xyRoi.Width, _xyRoi.Y + _xyRoi.Height));
 
             double roiL = pt.X + Math.Min(Math.Min(rTL.X, rTR.X), Math.Min(rBL.X, rBR.X));
@@ -752,7 +777,7 @@ namespace MxPlot.UI.Avalonia.Actions
             }
 
             Canvas.SetLeft(_panel, chosen.X);
-            Canvas.SetTop(_panel,  chosen.Y);
+            Canvas.SetTop(_panel, chosen.Y);
         }
 
         // ── Size-edit dialog (Leader only) ────────────────────────────────────

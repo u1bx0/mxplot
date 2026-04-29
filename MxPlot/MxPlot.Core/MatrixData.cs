@@ -326,15 +326,7 @@ namespace MxPlot.Core
                 count *= axis.Count;
             return count;
         }
-
-
-        /// <summary>
-        /// Sets the minimum and maximum values for the X and Y axes of the coordinate system.
-        /// </summary>
-        /// <param name="xmin">The minimum value for the X axis.</param>
-        /// <param name="xmax">The maximum value for the X axis.</param>
-        /// <param name="ymin">The minimum value for the Y axis.</param>
-        /// <param name="ymax">The maximum value for the Y axis.</param>
+               
 
         public void SetXYScale(double xmin, double xmax, double ymin, double ymax)
         {

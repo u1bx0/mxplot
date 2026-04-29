@@ -102,9 +102,20 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Factory / typed ViewModel accessor
 
         /// <summary>
-        /// Creates a <see cref="MatrixPlotter"/> pre-configured with the supplied data.
+        /// <b>Recommended entry point.</b> Creates a <see cref="MatrixPlotter"/> fully configured
+        /// for use as a standalone window: builds a <see cref="MatrixPlotterViewModel"/>, sets it
+        /// as <see cref="Window.DataContext"/>, and registers the window with
+        /// <see cref="PlotWindowNotifier"/> so it appears in the MxPlot.App window dashboard.
+        /// <para>
         /// The caller is responsible for calling <see cref="Window.Show"/> or
-        /// <see cref="Window.ShowDialog"/>.
+        /// <see cref="Window.ShowDialog"/> to display the window.
+        /// </para>
+        /// <para>
+        /// Use the default constructor instead when you need fine-grained control over the
+        /// ViewModel lifecycle, want to set <see cref="Window.DataContext"/> yourself, or are
+        /// embedding <see cref="MatrixPlotter"/> in a custom application shell that manages
+        /// window registration independently.
+        /// </para>
         /// </summary>
         /// <example>
         /// <code>
@@ -134,6 +145,43 @@ namespace MxPlot.UI.Avalonia.Views
         /// Returns <c>null</c> when no data has been set.
         /// </summary>
         public IMatrixData? MatrixData => _currentData;
+
+        /// <summary>
+        /// The primary (main) view component embedded in this window.
+        /// Use this to subscribe to pointer/keyboard events, access
+        /// <see cref="MxView.OverlayManager"/>, control zoom, and read display state.
+        /// <para>
+        /// <b>Do not set <see cref="MxView.MatrixData"/> directly.</b>
+        /// Use <see cref="SetMatrixData"/> (or assign via <see cref="ViewModel"/>) so that
+        /// axis trackers, orthogonal views, and value-range state are kept in sync.
+        /// This constraint will be resolved architecturally in a future version (0.1.1 / 0.2.0).
+        /// </para>
+        /// </summary>
+        public MxView MainView => _view;
+
+        /// <summary>
+        /// The bottom orthogonal projection view (XZ plane).
+        /// The view component itself is never <c>null</c>, but <see cref="MxView.MatrixData"/>
+        /// is <c>null</c> when orthogonal mode is inactive or the current data is single-frame.
+        /// <see cref="MxView.IsVisible"/> reflects whether the pane is currently shown.
+        /// <para>
+        /// <b>Do not set <see cref="MxView.MatrixData"/> directly</b> — this view's data
+        /// is managed by the internal <c>OrthogonalViewController</c>.
+        /// </para>
+        /// </summary>
+        public MxView BottomView => _orthoPanel.BottomView;
+
+        /// <summary>
+        /// The right orthogonal projection view (YZ plane).
+        /// The view component itself is never <c>null</c>, but <see cref="MxView.MatrixData"/>
+        /// is <c>null</c> when orthogonal mode is inactive or the current data is single-frame.
+        /// <see cref="MxView.IsVisible"/> reflects whether the pane is currently shown.
+        /// <para>
+        /// <b>Do not set <see cref="MxView.MatrixData"/> directly</b> — this view's data
+        /// is managed by the internal <c>OrthogonalViewController</c>.
+        /// </para>
+        /// </summary>
+        public MxView RightView => _orthoPanel.RightView;
 
         /// <summary>
         /// Raised on the UI thread whenever the plotter’s displayed content changes —
@@ -328,6 +376,33 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Constructor ───────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Initializes a <see cref="MatrixPlotter"/> with no data loaded.
+        /// <para>
+        /// This constructor is the MVVM-friendly entry point: set <see cref="Window.DataContext"/>
+        /// to a <see cref="MatrixPlotterViewModel"/> instance to load data and configure the view.
+        /// </para>
+        /// <para>
+        /// For most use cases, prefer the static <see cref="Create"/> factory method, which
+        /// constructs the ViewModel and registers the window with <see cref="PlotWindowNotifier"/>
+        /// in one call. Use this constructor directly when:
+        /// <list type="bullet">
+        ///   <item>You manage the <see cref="MatrixPlotterViewModel"/> lifecycle externally
+        ///         (e.g. DI container, XAML binding).</item>
+        ///   <item>You are embedding <see cref="MatrixPlotter"/> in a custom application shell
+        ///         that handles window registration independently.</item>
+        ///   <item>You want to show the window before data is available and set
+        ///         <see cref="Window.DataContext"/> later.</item>
+        /// </list>
+        /// </para>
+        /// </summary>
+        /// <example>
+        /// <code>
+        /// // MVVM / DI pattern
+        /// var plotter = new MatrixPlotter { DataContext = myViewModel };
+        /// plotter.Show();
+        /// </code>
+        /// </example>
         public MatrixPlotter()
         {
             Width = 580;

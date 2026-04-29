@@ -30,7 +30,7 @@ namespace MxPlot.Core.Processing
 
             int newW = srcH;
             int newH = srcW;
-            
+
             var transposed = new T[frameCount][];
             var vminArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
             var vmaxArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
@@ -38,13 +38,13 @@ namespace MxPlot.Core.Processing
             // 1. Parallel Transpose with Cache Blocking
             Parallel.For(0, frameCount, frameIndex =>
             {
-                var srcArray = src.GetArray(frameIndex); // srcの生データ取得
+                var srcArray = src.GetArray(frameIndex); // Get raw data of src
                 var dstArray = new T[newW * newH];
 
-                // キャッシュブロッキング定数
+                // Cache blocking constant
                 const int BlockSize = 32;
 
-                // srcW, srcH は元の画像の幅・高さ
+                // srcW, srcH are the width and height of the original image
                 for (int xBase = 0; xBase < srcW; xBase += BlockSize)
                 {
                     for (int yBase = 0; yBase < srcH; yBase += BlockSize)
@@ -54,22 +54,22 @@ namespace MxPlot.Core.Processing
 
                         for (int x = xBase; x < xMax; x++)
                         {
-                            // 転置ロジック
+                            // Transpose logic
                             // src: (x, y) -> index = y * srcW + x
                             // dst: (y, x) -> index = x * newW + y  (newW = srcH)
 
-                            // dstの書き込み開始位置 (dstの x 行目 = 元の x 列目)
+                            // Write start position of dst (dst's x row = original x column)
                             int dstBaseIndex = x * newW + yBase;
 
-                            // srcの読み込み開始位置
+                            // Read start position of src
                             int srcBaseIndex = yBase * srcW + x;
 
                             for (int y = yBase; y < yMax; y++)
                             {
                                 dstArray[dstBaseIndex] = srcArray[srcBaseIndex];
 
-                                dstBaseIndex++;     // dstは横(Y)に連続して進む
-                                srcBaseIndex += srcW; // srcは縦(Y)に進むのでWidth分加算
+                                dstBaseIndex++;     // dst advances horizontally (Y) contiguously
+                                srcBaseIndex += srcW; // src advances vertically (Y) by adding Width
                             }
                         }
                     }
@@ -79,11 +79,11 @@ namespace MxPlot.Core.Processing
                 vminArray[frameIndex] = minArray;
                 vmaxArray[frameIndex] = maxArray;
             });
-            
 
-            // 2. 新しいインスタンスの生成
+
+            // 2. Create new instance
             var result = new MatrixData<T>(newW, newH, transposed.ToList(), vminArray, vmaxArray);
-            // 物理スケールと単位の入れ替え
+            // Swap physical scale and units
             // src.XMin -> result.YMin, src.YUnit -> result.XUnit
             result.SetXYScale(src.YMin, src.YMax, src.XMin, src.XMax);
             result.XUnit = src.YUnit;
@@ -437,35 +437,35 @@ namespace MxPlot.Core.Processing
             int height = src.YCount;
             int frameCount = src.FrameCount;
 
-            // 結果格納用配列
+            // Array for storing results
             var convertedArrays = new TDst[frameCount][];
 
-            // システムの論理コア数
+            // Logical core count of the system
             int processorCount = Environment.ProcessorCount;
 
-            // FrameCountがコア数以上なら「フレーム並列」（オーバーヘッド最小・キャッシュ効率最大）
-            // FrameCountが少ないなら「行並列」（リソース総動員）
+            // If FrameCount is >= core count, use "frame parallel" (minimum overhead, max cache efficiency)
+            // If FrameCount is small, use "row parallel" (mobilize all resources)
             if (frameCount >= processorCount)
             {
                 // === Plan A: Frame Parallel ===
                 Parallel.For(0, frameCount, frame =>
                 {
-                    // 配列確保
+                    // Allocate array
                     var srcArray = src.GetArray(frame);
                     var dstArray = new TDst[srcArray.Length];
 
-                    // Span & Ref 取得 (境界チェック回避)
-                    // srcArray.Lengthは width * height と保証されている前提
+                    // Get Span & Ref (avoid bounds checking)
+                    // Assumes srcArray.Length is guaranteed to be width * height
                     ref TSrc srcRef = ref MemoryMarshal.GetReference(srcArray.AsSpan());
                     ref TDst dstRef = ref MemoryMarshal.GetReference(dstArray.AsSpan());
 
                     int index = 0;
-                    // 2重ループ (y, x の順序を守る)
+                    // Double loop (maintain y, x order)
                     for (int iy = 0; iy < height; iy++)
                     {
                         for (int ix = 0; ix < width; ix++)
                         {
-                            // ポインタ演算でアクセス (Unsafe.Add)
+                            // Access via pointer arithmetic (Unsafe.Add)
                             var s = Unsafe.Add(ref srcRef, index);                       
                             var d = converter(s, ix, iy, frame);
                             Unsafe.Add(ref dstRef, index) = d;
@@ -478,30 +478,30 @@ namespace MxPlot.Core.Processing
             else
             {
                 // === Plan B: Row Parallel (Hybrid) ===
-                // フレームループは直列、内部で行(Y)を並列化
+                // Frame loop is sequential, internally parallelize by row (Y)
                 for (int frame = 0; frame < frameCount; frame++)
                 {
                     var srcArray = src.GetArray(frame);
                     var dstArray = new TDst[srcArray.Length];
 
-                    // 行単位で並列化
+                    // Parallelize by row
                     Parallel.For(0, height, iy =>
                     {
-                        // ここでSpan再取得（Parallel内でのref struct利用制約のため）
-                        // コストはほぼゼロ
+                        // Re-acquire Span here (due to ref struct usage restrictions inside Parallel)
+                        // Cost is practically zero
                         ref TSrc srcRefBase = ref MemoryMarshal.GetReference(srcArray.AsSpan());
                         ref TDst dstRefBase = ref MemoryMarshal.GetReference(dstArray.AsSpan());
 
                         int rowStart = iy * width;
 
-                        // 行の先頭アドレスを計算
+                        // Calculate start address of the row
                         ref TSrc rowSrcRef = ref Unsafe.Add(ref srcRefBase, rowStart);
                         ref TDst rowDstRef = ref Unsafe.Add(ref dstRefBase, rowStart);
 
                         for (int ix = 0; ix < width; ix++)
                         {
-                            // 行内はシーケンシャルアクセス
-                            // ix を加算しながらポインタを進める
+                            // Sequential access within the row
+                            // Advance pointer by adding ix
                             var s = Unsafe.Add(ref rowSrcRef, ix);
                             var d = converter(s, ix, iy, frame);
                             Unsafe.Add(ref rowDstRef, ix) = d;
@@ -534,7 +534,7 @@ namespace MxPlot.Core.Processing
 
             var convertedArrays = new TDst[frameCount][];
 
-            // Min/Max 計算用（IComparableチェック付き）
+            // For Min/Max calculation (with IComparable check)
             bool isComparable = typeof(IComparable<TDst>).IsAssignableFrom(typeof(TDst));
             var minValues = isComparable ? new TDst[frameCount] : null;
             var maxValues = isComparable ? new TDst[frameCount] : null;
@@ -544,28 +544,28 @@ namespace MxPlot.Core.Processing
                 var srcArray = src.GetArray(frame);
                 var dstArray = new TDst[srcArray.Length];
 
-                // Span化（配列境界チェックの抑制を期待）
+                // Span usage (expected to suppress array bounds checking)
                 var srcSpan = srcArray.AsSpan();
                 var dstSpan = dstArray.AsSpan();
 
-                // Min/Max 一時変数
+                // Temporary variables for Min/Max
                 var comparer = isComparable ? Comparer<TDst>.Default : null;
                 bool first = true;
                 TDst localMin = default;
                 TDst localMax = default;
 
-                // 2次元ループとして展開（物理座標計算の最適化のため）
-                // index変数を別途管理することで、除算/剰余(i % width)を回避して高速化
+                // Expand as 2D loop (to optimize physical coordinate calculation)
+                // By managing the index variable separately, we avoid division/modulo (i % width) for better performance
                 int index = 0;
                 for (int iy = 0; iy < height; iy++)
                 {
                     for (int ix = 0; ix < width; ix++)
                     {
-                        // ユーザーデリゲート呼び出し
+                        // Invoke user delegate
                         var val = converter(srcSpan[index], ix, iy, frame);
                         dstSpan[index] = val;
 
-                        // Min/Max更新ロジック
+                        // Min/Max update logic
                         if (isComparable)
                         {
                             if (first)
@@ -576,7 +576,7 @@ namespace MxPlot.Core.Processing
                             }
                             else
                             {
-                                // comparerはnullでないことが保証されている
+                                // comparer is guaranteed not to be null
                                 if (comparer!.Compare(val, localMin) < 0) localMin = val;
                                 if (comparer.Compare(val, localMax) > 0) localMax = val;
                             }
@@ -691,8 +691,8 @@ namespace MxPlot.Core.Processing
                 => converter(v, ix, iy, ix * xstep + xmin, iy * ystep + ymin));
         }
 
-        // 【重要】Span<T> を引数に取れる専用の型を定義する
-        // ジェネリックの Func<> は使えないが、直接定義したデリゲートなら .NET Standard 2.1 / .NET Core 2.1 頃から Span を使える
+        // [IMPORTANT] Define a specific delegate that can take Span<T> as a parameter.
+        // Generic Func<> cannot be used, but a directly defined delegate can accept Span starting from .NET Standard 2.1 / .NET Core 2.1.
         /// <summary>
         /// Represents a method that performs a reduction operation using the specified coordinates and values.
         /// </summary>
@@ -721,7 +721,7 @@ namespace MxPlot.Core.Processing
         public delegate T EntireReducerFunc<T>(int ix, int iy, Span<T> values);
 
         /// <summary>
-        /// フレーム軸全体に対する縮約
+        /// Reduces along the entire frame axis.
         /// </summary>
         /// <typeparam name="T"></typeparam>
         /// <param name="src"></param>
@@ -740,11 +740,11 @@ namespace MxPlot.Core.Processing
             var fnum = src.FrameCount;
             var totalPixels = xnum * ynum;
 
-            // 結果格納用配列（1枚の画像になる）
+            // Array for storing the result (it will become a single image)
             var arrayReduced = new T[totalPixels];
 
-            // 高速化: 事前に全フレームの生配列への参照を取得しておく
-            // (GetArrayのオーバーヘッドをループ内で繰り返さないため)
+            // Optimization: Get references to the raw arrays of all frames in advance
+            // (To avoid the overhead of calling GetArray repeatedly inside the loop)
             var allFrames = new T[fnum][];
             for (int f = 0; f < fnum; f++)
             {
@@ -753,14 +753,14 @@ namespace MxPlot.Core.Processing
 
             if (useParallel)
             {
-                // Parallel.Forの「スレッドローカル変数」機能を使用
+                // Use the "thread-local variable" feature of Parallel.For
                 Parallel.For(
                     0,
-                    ynum, // Y行ごとに分割して並列化
-                          // [LocalInit] スレッドごとに1回だけ呼ばれる。作業用バッファを確保。
+                    ynum, // Parallelize by partitioning into Y rows
+                          // [LocalInit] Called only once per thread. Allocates a working buffer.
                     () => new T[fnum],
 
-                    // [Body] ループ本体
+                    // [Body] Loop body
                     (iy, loopState, buffer) =>
                     {
                         int st = iy * xnum;
@@ -768,26 +768,26 @@ namespace MxPlot.Core.Processing
                         {
                             int pos = st + ix;
 
-                            // 全フレームから値を集める
+                            // Gather values from all frames
                             for (int f = 0; f < fnum; f++)
                             {
-                                // キャッシュしておいたフレーム配列から取得
+                                // Retrieve from the cached frame arrays
                                 buffer[f] = allFrames[f][pos];
                             }
 
-                            // Reducerに渡す（Spanでラップして渡すのでゼロコピー）
+                            // Pass to Reducer (wrapped in a Span, so it's zero-copy)
                             arrayReduced[pos] = reducer(ix, iy, new Span<T>(buffer));
                         }
-                        return buffer; // 次のイテレーションにバッファを引き継ぐ
+                        return buffer; // Pass the buffer to the next iteration
                     },
 
                     // [LocalFinally]
-                    (buffer) => { /* 何もしない */ }
+                    (buffer) => { /* Do nothing */ }
                 );
             }
             else
             {
-                // シングルスレッド版
+                // Single-threaded version
                 var buffer = new T[fnum];
                 for (int iy = 0; iy < ynum; iy++)
                 {
@@ -804,10 +804,10 @@ namespace MxPlot.Core.Processing
                 }
             }
 
-            // 結果の生成
+            // Generate the result
             var md = new MatrixData<T>(xnum, ynum, new List<T[]> { arrayReduced });
 
-            // 物理情報の継承
+            // Inherit physical information
             md.SetXYScale(src.XMin, src.XMax, src.YMin, src.YMax);
             md.XUnit = src.XUnit;
             md.YUnit = src.YUnit;
@@ -849,7 +849,7 @@ namespace MxPlot.Core.Processing
             int targetOrder = dims.GetAxisOrder(targetAxisName);
             var targetAxis = dims[targetOrder];
 
-            // --- 1. 地図作り ---
+            // --- 1. Create mapping ---
             var orders = Enumerable.Range(0, dims.AxisCount).ToList();
             orders.Remove(targetOrder);
             orders.Add(targetOrder);
@@ -882,8 +882,8 @@ namespace MxPlot.Core.Processing
             }
             RecursiveLoop(0);
 
-            // --- 2. Reduce実行 ---
-            
+            // --- 2. Execute reduce ---
+
 
             int width = src.XCount;
             int height = src.YCount;
@@ -897,13 +897,13 @@ namespace MxPlot.Core.Processing
                 var resultPixels = new T[width * height];
                 var contextCoords = coords;
 
-                // ★ ここで分岐
+                // ★ Branch here
                 if (useParallel)
                 {
-                    // 【並列モード】
+                    // [Parallel Mode]
                     Parallel.For(0, height, y =>
                     {
-                        // スレッドごとにスタック領域を確保
+                        // Allocate stack space per thread
                         Span<T> valueSpan = stackalloc T[sourceIndices.Length];
                         int rowOffset = y * width;
 
@@ -923,9 +923,9 @@ namespace MxPlot.Core.Processing
                 }
                 else
                 {
-                    // 【シーケンシャルモード】
-                    // シングルスレッドなので、バッファは1つ作って使い回せばOK
-                    // (stackallocではなく普通の配列でも良いが、Spanインターフェース統一のためstackallocか配列を使用)
+                    // [Sequential Mode]
+                    // Since it's single-threaded, we can just create one buffer and reuse it
+                    // (A normal array is fine instead of stackalloc, but we use an array/Span to unify the Span interface)
                     var buffer = new T[sourceIndices.Length];
                     Span<T> valueSpan = buffer;
 
@@ -950,7 +950,7 @@ namespace MxPlot.Core.Processing
                 resultFrames.Add(resultPixels);
             }
 
-            // --- 3. 結果構築 ---
+            // --- 3. Build result ---
             var resultMatrix = new MatrixData<T>(width, height, resultFrames);
             var newAxes = dims.CreateAxesWithout(targetAxisName);
             resultMatrix.DefineDimensions(newAxes);

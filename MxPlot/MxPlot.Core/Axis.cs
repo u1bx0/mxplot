@@ -31,9 +31,9 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// この軸がChannelのようにMin = 0, Max = Count -1 のインデックスベースの軸かどうか
-        /// trueの場合，Min, Maxは変更されない
-        /// IsIndexBasedをtrueにすると自動的にMin = 0, Max = Count -1が設定される
+        /// Whether this axis is index-based (like Channel), where Min = 0 and Max = Count - 1.
+        /// When true, Min and Max cannot be changed externally.
+        /// Setting IsIndexBased to true automatically sets Min = 0 and Max = Count - 1.
         /// </summary>
         public bool IsIndexBased
         {
@@ -54,7 +54,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// この軸の最小値
+        /// The minimum value of this axis.
         /// </summary>
         public virtual double Min
         {
@@ -73,7 +73,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// この軸の最大値
+        /// The maximum value of this axis.
         /// </summary>
         public virtual double Max
         {
@@ -92,7 +92,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// この軸の単位を表す文字列
+        /// A string representing the unit of this axis.
         /// </summary>
         public string Unit
         {
@@ -108,12 +108,12 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// 分割数 = Seriesの要素数：不変
+        /// The number of divisions, equal to the number of elements in the Series. Immutable.
         /// </summary>
         public int Count { get; }
 
         /// <summary>
-        /// 軸の名称
+        /// The name of the axis.
         /// </summary>
         public string Name
         {
@@ -130,7 +130,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// このAxisの現在位置を設定・取得する
+        /// Gets or sets the current position of this axis.
         /// </summary>
         public int Index
         {
@@ -150,8 +150,8 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// 現在のindexにおけるスケール上の位置を設定・取得する
-        /// 設定するときには最も近いindexになる
+        /// Gets or sets the scale position at the current index.
+        /// When setting, the nearest index to the given value is selected.
         /// </summary>
         public virtual double Value
         {
@@ -167,12 +167,12 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// = Max - Min (都度計算する），取得のみ
+        /// = Max - Min (computed on each access). Read-only.
         /// </summary>
         public double Range => Max - Min;
 
         /// <summary>
-        /// = (Max - Min) / (Count - 1) （都度計算する）Stepを設定するとMax値が変わる
+        /// = (Max - Min) / (Count - 1) (computed on each access). Setting Step changes the Max value.
         /// </summary>
         public double Step
         {
@@ -303,15 +303,15 @@ namespace MxPlot.Core
 
         
         /// <summary>
-        /// 最小値・最大値をnumで分割した範囲を定義する
-        /// 領域を変更することができない
+        /// Defines a range divided into <paramref name="count"/> segments between the specified minimum and maximum values.
+        /// The range cannot be changed after construction.
         /// </summary>
         /// <param name="min"></param>
         /// <param name="max"></param>
-        /// <param name="num"></param>
+        /// <param name="count"></param>
         /// <param name="name"></param>
-        /// <param name="unit">軸の単位</param>
-        /// <param name="isIndexBased">インデックスベースの軸かどうか trueの場合はmin = 0, max = num - 1に固定される</param>
+        /// <param name="unit">The unit of the axis.</param>
+        /// <param name="isIndexBased">Whether the axis is index-based. When true, min = 0 and max = count - 1 are enforced.</param>
         [JsonConstructor]
         public Axis(int count, double min, double max, string name = "Series", string unit = "", bool isIndexBased = false)
         {
@@ -322,19 +322,19 @@ namespace MxPlot.Core
             this.Name = name;
             this.Unit = unit;
 
-            this.IsIndexBased = isIndexBased; //trueの場合は自動的にmin, maxが設定される（コンストラクタなので、イベントは発生し得ない）
+            this.IsIndexBased = isIndexBased; // When true, min and max are set automatically (no events fire in the constructor)
             if (!IsIndexBased)
             {
                 _min = min;
                 _max = max;
             }
 
-            //Stepは都度計算される。Stepに値を入れるとMaxが変わる。以下は不要
+            //Step is computed on each access. Setting Step changes Max. The line below is not needed.
             //Step = count > 1 ? (max - min) / (count - 1) : 0;
         }
 
         /// <summary>
-        /// コピーコンストラクタ, Name, Num, Min, Maxがコピーされる
+        /// Copy constructor. Copies Name, Count, Min, Max, Unit, and IsIndexBased.
         /// </summary>
         /// <param name="source"></param>
         public Axis(Axis source)
@@ -350,8 +350,8 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// 指定した値に対応するindex値(0 - (num - 1))を返す
-        /// posが範囲を超えているとクロップされる
+        /// Returns the index value (0 to Count - 1) corresponding to the specified scale value.
+        /// If <paramref name="pos"/> is out of range, the result is clamped.
         /// </summary>
         /// <param name="pos"></param>
         /// <returns></returns>
@@ -374,7 +374,7 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// index値に対応するスケール値を返す
+        /// Returns the scale value corresponding to the specified index.
         /// </summary>
         /// <param name="index"></param>
         /// <returns></returns>

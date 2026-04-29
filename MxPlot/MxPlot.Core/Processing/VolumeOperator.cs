@@ -67,7 +67,7 @@ namespace MxPlot.Core.Processing
             int outH = vol._depth;
             var result = new T[outW * outH];
 
-            // Average用の逆数係数 (double計算用)
+            // Reciprocal coefficient for Average mode (used in double arithmetic)
             double invCount = 1.0 / vol._width;
 
             fixed (T* resBase = result)
@@ -82,7 +82,7 @@ namespace MxPlot.Core.Processing
                         {
                             T* rowPtr = srcBase + y * vol._width;
 
-                            // モードによって最速のループを選択
+                            // Select the fastest loop based on mode
                             if (mode == ProjectionMode.Maximum)
                             {
                                 T maxVal = T.MinValue;
@@ -110,7 +110,7 @@ namespace MxPlot.Core.Processing
                                 {
                                     sum += double.CreateChecked(rowPtr[x]);
                                 }
-                                // T型に戻す (例: intなら切り捨て)
+                                // Convert back to T (e.g., truncation for int)
                                 resPtr[y] = T.CreateChecked(sum * invCount);
                             }
                         }
@@ -232,15 +232,15 @@ namespace MxPlot.Core.Processing
 
             void Proc(int z)
             {
-                // 1. 結果配列の先頭参照を取得 (fixedによるピン留めを完全に排除)
+                // 1. Obtain references to the head of the result arrays (avoids fixed pinning entirely)
                 ref T xzResultRef = ref MemoryMarshal.GetArrayDataReference(xzResult);
                 ref T yzResultRef = ref MemoryMarshal.GetArrayDataReference(yzResult);
 
-                // IList<T[]> を想定。フレームの先頭参照を直接取得
+                // Assumes IList<T[]>. Get a direct reference to the head of the frame.
                 T[] frame = vol._frames[z];
                 ref T frameRef = ref MemoryMarshal.GetArrayDataReference(frame);
 
-                // この z に対応する XZ/YZ 行の先頭参照
+                // Head references to the XZ/YZ rows corresponding to this z
                 ref T xzRowRef = ref Unsafe.Add(ref xzResultRef, z * width);
                 ref T yzRowRef = ref Unsafe.Add(ref yzResultRef, z * height);
 
@@ -248,7 +248,7 @@ namespace MxPlot.Core.Processing
 
                 if (mode == ProjectionMode.Maximum)
                 {
-                    // XZ行を初期化
+                    // Initialize XZ row
                     MemoryMarshal.CreateSpan(ref xzRowRef, width).Fill(T.MinValue);
 
                     for (int y = 0; y < height; y++)
@@ -258,29 +258,29 @@ namespace MxPlot.Core.Processing
                         T rowMax = T.MinValue;
 
                         int x = 0;
-                        // SIMDループ: XZの比較とYZ行内の最大値を同時計算
+                        // SIMD loop: simultaneously compare XZ and compute row-max for YZ
                         if (Vector.IsHardwareAccelerated && width >= vectorCount)
-                        {
-                            for (; x <= width - vectorCount; x += vectorCount)
                             {
-                                Vector<T> vFrame = Vector.LoadUnsafe(ref frameRowRef, (nuint)x);
-                                Vector<T> vXz = Vector.LoadUnsafe(ref xzRowRef, (nuint)x);
+                                for (; x <= width - vectorCount; x += vectorCount)
+                                {
+                                    Vector<T> vFrame = Vector.LoadUnsafe(ref frameRowRef, (nuint)x);
+                                    Vector<T> vXz = Vector.LoadUnsafe(ref xzRowRef, (nuint)x);
 
-                                // XZ更新: Max(現在のXZ, 新しいフレームの行)
-                                Vector.Max(vXz, vFrame).StoreUnsafe(ref xzRowRef, (nuint)x);
+                                    // Update XZ: Max(current XZ, new frame row)
+                                    Vector.Max(vXz, vFrame).StoreUnsafe(ref xzRowRef, (nuint)x);
 
-                                // YZ集計: 行内の最大値をベクトル単位で保持
-                                vYzMax = Vector.Max(vYzMax, vFrame);
+                                    // Accumulate YZ: keep per-row max in vector units
+                                    vYzMax = Vector.Max(vYzMax, vFrame);
+                                }
                             }
-                        }
 
-                        // vYzMax の中からスカラーの最大値を抽出
+                        // Extract the scalar maximum from vYzMax
                         for (int i = 0; i < vectorCount; i++)
                         {
                             if (vYzMax[i] > rowMax) rowMax = vYzMax[i];
                         }
 
-                        // 端数処理
+                        // Handle remaining elements (tail)
                         for (; x < width; x++)
                         {
                             T val = Unsafe.Add(ref frameRowRef, x);
@@ -289,13 +289,13 @@ namespace MxPlot.Core.Processing
                             if (val > rowMax) rowMax = val;
                         }
 
-                        // YZ行への書き込みは1回だけで完了
+                        // Write to YZ row once per y-iteration
                         Unsafe.Add(ref yzRowRef, y) = rowMax;
                     }
                 }
                 else if (mode == ProjectionMode.Minimum)
                 {
-                    // XZ行を初期化
+                    // Initialize XZ row
                     MemoryMarshal.CreateSpan(ref xzRowRef, width).Fill(T.MaxValue);
 
                     for (int y = 0; y < height; y++)
@@ -305,7 +305,7 @@ namespace MxPlot.Core.Processing
                         T rowMin = T.MaxValue;
 
                         int x = 0;
-                        // SIMDループ: XZの比較とYZ行内の最小値を同時計算
+                        // SIMD loop: simultaneously compare XZ and compute row-min for YZ
                         if (Vector.IsHardwareAccelerated && width >= vectorCount)
                         {
                             for (; x <= width - vectorCount; x += vectorCount)
@@ -336,7 +336,7 @@ namespace MxPlot.Core.Processing
                 }
                 else // Average
                 {
-                    // accYZは不要。y方向に進むループ内で合計が確定するため
+                    // accYZ is not needed: the sum is finalized inside the y-loop
                     double[] accXZ = ArrayPool<double>.Shared.Rent(width);
                     ref double accXzRef = ref MemoryMarshal.GetArrayDataReference(accXZ);
                     MemoryMarshal.CreateSpan(ref accXzRef, width).Clear();
@@ -351,7 +351,7 @@ namespace MxPlot.Core.Processing
                             ref T frameRowRef = ref Unsafe.Add(ref frameRef, y * width);
                             double yzRowSum = 0;
 
-                            // INumber<T>制約下での安全なキャストと合計
+                            // Safe cast and accumulation under INumber<T> constraint
                             for (int x = 0; x < width; x++)
                             {
                                 double v = double.CreateChecked(Unsafe.Add(ref frameRowRef, x));
@@ -359,11 +359,11 @@ namespace MxPlot.Core.Processing
                                 yzRowSum += v;
                             }
 
-                            // YZ行への書き込みは1回だけで完了
+                            // Write to YZ row once per y-iteration
                             Unsafe.Add(ref yzRowRef, y) = T.CreateChecked(yzRowSum * invW);
                         }
 
-                        // XZ平均の確定
+                        // Finalize XZ averages
                         for (int x = 0; x < width; x++)
                         {
                             Unsafe.Add(ref xzRowRef, x) = T.CreateChecked(Unsafe.Add(ref accXzRef, x) * invH);
@@ -391,7 +391,7 @@ namespace MxPlot.Core.Processing
                 }
             }
 
-            // 2. メタデータの生成・割り当て
+            // 2. Build and assign metadata
             var scale = vol._scale;
             var axis = vol._axis;
 
@@ -417,15 +417,15 @@ namespace MxPlot.Core.Processing
             int depth = vol._depth;
             var result = new T[width * height];
 
-            // ★ここが最大のポイント
-            // ループの中で毎回 vol._frames[z] を引くと遅いので、
-            // 最初に全フレームをメモリ上に「釘付け(Pin)」にして、その生アドレス(ポインタ)を配列化します。
+            // ★ Key point:
+            // Dereferencing vol._frames[z] on every iteration would be slow,
+            // so all frames are pinned in memory upfront and their raw addresses are stored in a pointer array.
             var handles = new System.Runtime.InteropServices.GCHandle[depth];
             var framePtrs = new T*[depth];
 
             try
             {
-                // 1. 全フレームをPin留めする (コストは一瞬です)
+                // 1. Pin all frames (one-time cost)
                 for (int z = 0; z < depth; z++)
                 {
                     handles[z] = System.Runtime.InteropServices.GCHandle.Alloc(vol._frames[z], System.Runtime.InteropServices.GCHandleType.Pinned);
@@ -435,19 +435,19 @@ namespace MxPlot.Core.Processing
                 fixed (T* resBase = result)
                 {
                     nint resPtrAddr = (nint)resBase;
-                    // 2. Y方向(行)で並列化
+                    // 2. Parallelize along Y (rows)
                     Parallel.For(0, height, y =>
                     {
                         T* resRowPtr = (T*)resPtrAddr + y * width;
                         int rowOffset = y * width;
 
-                        // X方向(列)
+                        // X direction (columns)
                         for (int x = 0; x < width; x++)
                         {
                             int pixelOffset = rowOffset + x;
 
-                            // 3. Z方向(深さ) - ここが最深部ループ
-                            // framePtrs[z] を使うことで、Listアクセスも境界チェックもゼロになります。
+                            // 3. Z direction (depth) — innermost loop
+                            // Using framePtrs[z] eliminates both List access and bounds checks.
                             if (mode == ProjectionMode.Maximum)
                             {
                                 T maxVal = T.MinValue;
@@ -483,7 +483,7 @@ namespace MxPlot.Core.Processing
             }
             finally
             {
-                // 4. 必ず解放する
+                // 4. Always release handles
                 for (int z = 0; z < depth; z++)
                 {
                     if (handles[z].IsAllocated) handles[z].Free();
@@ -534,17 +534,15 @@ namespace MxPlot.Core.Processing
 
             var result = new T[length];
 
-            // GCハンドルとポインタ配列の確保
+            // Allocate GC handles and pointer array
             var handles = new GCHandle[depth];
-            // ポインタ配列自体も固定する必要があるため、これもGCHandleでロックするか、
-            // stackalloc (深さが浅い場合) を使う手もありますが、ここは安全にnative memoryか配列で。
-            // 今回は「ポインタの配列」の中身（各フレームのアドレス）を渡すので、
-            // フレームポインタの配列自体をPinして、そのアドレスを渡します。
+            // The pointer array itself must also be pinned so its address can be passed to parallel lambdas.
+            // Each element holds the pinned address of the corresponding frame's data.
             var framePtrs = new nint[depth];
 
             try
             {
-                // 全フレームをPin留めしてアドレスを nint 配列に格納
+                // Pin all frames and store their addresses in the nint array
                 for (int z = 0; z < depth; z++)
                 {
                     handles[z] = GCHandle.Alloc(vol._frames[z], GCHandleType.Pinned);
@@ -552,44 +550,44 @@ namespace MxPlot.Core.Processing
                 }
 
                 fixed (T* pResBase = result)
-                fixed (nint* pFramePtrsBase = framePtrs) // ポインタ配列の先頭アドレス
+                fixed (nint* pFramePtrsBase = framePtrs) // Head address of the pointer array
                 {
                     nint resBaseAddr = (nint)pResBase;
                     nint framePtrsAddr = (nint)pFramePtrsBase;
 
-                    // ★チューニングパラメータ: BlockSize = 4096
+                    // ★ Tuning parameter: BlockSize = 4096
                     int blockSize = 4096;
 
-                    // Partitionerで範囲を区切る
+                    // Partition the range using Partitioner
                     var rangePartitioner = Partitioner.Create(0, length, blockSize);
 
                     Parallel.ForEach(rangePartitioner, range =>
                     {
-                        // ここは別スレッド。nintからポインタを復元
+                        // Running on a worker thread — restore pointers from nint
                         T* pRes = (T*)resBaseAddr;
-                        nint* pFrames = (nint*)framePtrsAddr; // T*[] ではなく nint[] へのポインタ
+                        nint* pFrames = (nint*)framePtrsAddr; // pointer to nint[] (not T*[])
 
                         int start = range.Item1;
                         int end = range.Item2;
                         int count = end - start;
 
-                        // 該当ブロックの先頭へ移動
+                        // Advance to the start of this block
                         T* pResChunk = pRes + start;
 
-                        // --- モード別処理 ---
+                        // --- Mode-specific processing ---
                         if (mode == ProjectionMode.Maximum)
                         {
-                            // 初期化
+                            // Initialize
                             T minVal = T.MinValue;
-                            // SpanFill的に初期化 (ループ展開されるので高速)
+                            // Initialize span-fill style (loop is unrolled by JIT for speed)
                             new Span<T>(pResChunk, count).Fill(minVal);
 
-                            // Zループ
+                            // Z loop
                             for (int z = 0; z < depth; z++)
                             {
                                 T* pFrameChunk = (T*)pFrames[z] + start;
 
-                                // ブロック内ループ (L1キャッシュヒット)
+                                // Inner block loop (L1 cache hit)
                                 for (int i = 0; i < count; i++)
                                 {
                                     T val = pFrameChunk[i];
@@ -614,9 +612,9 @@ namespace MxPlot.Core.Processing
                         }
                         else if (mode == ProjectionMode.Average)
                         {
-                            // AIP用の一時バッファ (double)
-                            // stackalloc は危険(サイズ不明)なので、配列プールかローカル配列
-                            // count=4096なら new double[4096] (32KB) はコスト軽微
+                            // Temporary accumulator buffer for AIP (double precision)
+                            // stackalloc is unsafe here (unknown size), so use a local array.
+                            // new double[4096] (32 KB) is negligible overhead for count=4096.
                             double[] accBuffer = new double[count];
 
                             fixed (double* pAcc = accBuffer)

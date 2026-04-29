@@ -11,40 +11,64 @@ namespace MxPlot.Extensions.Fft
     public enum ShiftOption
     {
         /// <summary>
-        /// Performs a standard FFT2D/IFFT2D without any coordinate shifting.
-        /// The DC (zero-frequency) component is located at index [0] (corners of the array).
+        /// Performs FFT2D/IFFT2D without any coordinate shifting.
+        /// The DC (zero-frequency) component remains at array index [0] (corner layout) for both input and output.
         /// <para>
-        /// <b>Performance:</b> Fastest (no extra multiplication).<br/>
-        /// <b>Use Case:</b> Best when using pre-shifted transfer functions (where DC is at corners) 
-        /// or when raw performance is prioritized.
+        /// <b>Performance:</b> Fastest — no array swap operations are performed.<br/>
+        /// <b>Use case:</b> Best when transfer functions are already defined in corner layout,
+        /// or when maximum throughput is the priority.
         /// </para>
         /// </summary>
         None,
 
         /// <summary>
-        /// Shifts the component layout by applying a checkerboard phase modulation <b>before</b> the transform.
+        /// Applies a circular array swap (fftshift/ifftshift) to move the DC component between
+        /// corner and center layout on one side of the transform.
+        /// The swap is implemented via index remapping — no checkerboard multiplication is used.
         /// <para>
-        /// <b>FFT:</b> Input origin at index 0 -> Output DC at <b>Logical Center</b> (index: <c>Height/2 * Width + Width/2</c>).<br/>
-        /// (Output contains a phase tilt).<br/>
-        /// <b>IFFT:</b> Input DC at Logical Center -> Output origin at index 0. (Assumes centered input).
+        /// <b>FFT:</b> Input in corner layout (DC at index [0]) →
+        ///   a CornerToCenter swap is applied <i>after</i> the FFT →
+        ///   Output has DC at the logical center (<c>Height/2 * Width + Width/2</c>).
         /// </para>
         /// <para>
-        /// <b>Use Case:</b> Ideal for visualization (magnitude spectrum), or for symmetric round-trips 
-        /// (FFT(Centered) -> Process -> IFFT(Centered)) where the phase tilt cancels out.
+        /// <b>IFFT:</b> Input in center layout (DC at logical center) →
+        ///   a CenterToCorner swap is applied <i>before</i> the IFFT →
+        ///   Output in corner layout (DC at index [0]).
+        /// </para>
+        /// <para>
+        /// <b>FftPipelineWithAction:</b> Spatial input/output remain in corner layout;
+        ///   the action callback receives the frequency-domain array in center layout.
+        /// </para>
+        /// <para>
+        /// <b>Use case:</b> Frequency-domain visualization (centered power spectrum),
+        ///   and round-trip pipelines such as FFT(Centered) → filter action → IFFT(Centered)
+        ///   where corner-layout spatial data is expected.
         /// </para>
         /// </summary>
         Centered,
 
         /// <summary>
-        /// Performs a physically rigorous centered transform by applying phase modulation <b>both before and after</b> the transform.
-        /// This ensures the coordinate origin (0,0) is treated as the array center in both spatial and frequency domains.
+        /// Applies circular array swaps on <b>both</b> sides of the transform, so that
+        /// the coordinate origin is treated as the array center in both spatial and frequency domains.
+        /// The swap is implemented via index remapping — no checkerboard multiplication is used.
         /// <para>
-        /// <b>FFT/IFFT:</b> Input Center -> Output Center (index: <c>Height/2 * Width + Width/2</c>).<br/>
-        /// (Removes the residual phase tilt).
+        /// <b>FFT:</b> Input in center layout →
+        ///   CenterToCorner swap before FFT, CornerToCenter swap after FFT →
+        ///   Output in center layout.
         /// </para>
         /// <para>
-        /// <b>Use Case:</b> Essential for wave-optics simulations (e.g., Angular Spectrum Method) 
-        /// where the exact phase distribution relative to the physical center is critical.
+        /// <b>IFFT:</b> Input in center layout →
+        ///   CenterToCorner swap before IFFT, CornerToCenter swap after IFFT →
+        ///   Output in center layout.
+        /// </para>
+        /// <para>
+        /// <b>FftPipelineWithAction:</b> Spatial input/output and the action callback
+        ///   all operate in center layout.
+        /// </para>
+        /// <para>
+        /// <b>Use case:</b> Wave-optics simulations (e.g., Angular Spectrum Method) where
+        ///   the physical origin must remain at the array center throughout the entire pipeline,
+        ///   such as when the input field and the output propagated field are both center-origin.
         /// </para>
         /// </summary>
         BothCentered
@@ -53,8 +77,9 @@ namespace MxPlot.Extensions.Fft
     public static class Fft2DHelpers
     {
         /// <summary>
-        /// 任意の型のMatrixDataを読み込み、Swap(CenterToCorner)を適用しながらComplex配列に格納します。
-        /// これにより "T -> Complex変換" と "fftshift" を1パスで行います。
+        /// Reads a <see cref="MatrixData{T}"/> frame and writes it into a <see cref="Complex"/> array,
+        /// optionally applying a CenterToCorner circular swap (ifftshift equivalent) during the copy.
+        /// This performs the T-to-Complex conversion and the index remapping in a single pass.
         /// </summary>
         public static unsafe void ImportAndSwap<T>(
             MatrixData<T> src,

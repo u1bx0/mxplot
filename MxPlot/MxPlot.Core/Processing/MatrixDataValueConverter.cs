@@ -23,10 +23,26 @@ namespace MxPlot.Core.Processing
     /// </remarks>
     public static class MatrixDataValueConverter
     {
+        /// <summary>
+        /// Minimum number of elements (XCount × YCount) required to trigger parallel processing.
+        /// Defaults to 256 × 256 = 65,536.
+        /// </summary>
         public static readonly int ParallelThreshold = 256 * 256;
 
         #region ToDouble<T> (T → double)
 
+        /// <summary>
+        /// Converts all frames of <paramref name="src"/> to <c>double</c> using the specified element converter.
+        /// Frames are processed in parallel.
+        /// </summary>
+        /// <typeparam name="T">The source element type.</typeparam>
+        /// <param name="src">Source matrix data.</param>
+        /// <param name="converter">Per-element conversion function.</param>
+        /// <param name="dst">
+        /// Optional pre-allocated destination. When provided it must match the source dimensions exactly;
+        /// otherwise a new instance is created.
+        /// </param>
+        /// <returns>A <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with all frames converted.</returns>
         public static MatrixData<double> ToDoubleAllFrames<T>(this MatrixData<T> src,
             Func<T, double> converter,
             MatrixData<double>? dst = null)
@@ -45,6 +61,18 @@ namespace MxPlot.Core.Processing
             return dst;
         }
 
+        /// <summary>
+        /// Converts a single frame of <paramref name="src"/> to <c>double</c> using the specified element converter.
+        /// </summary>
+        /// <typeparam name="T">The source element type.</typeparam>
+        /// <param name="src">Source matrix data.</param>
+        /// <param name="converter">Per-element conversion function.</param>
+        /// <param name="frameIndex">The frame to convert. If negative, the active frame index is used.</param>
+        /// <param name="dst">
+        /// Optional pre-allocated destination (single-frame, matching XCount/YCount);
+        /// otherwise a new instance is created.
+        /// </param>
+        /// <returns>A single-frame <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with the converted values.</returns>
         public static MatrixData<double> ToDouble<T>(this MatrixData<T> src,
          Func<T, double> converter,
          int frameIndex = -1,
@@ -128,6 +156,16 @@ namespace MxPlot.Core.Processing
 
         #region ToDouble (Complex → double)
 
+        /// <summary>
+        /// Converts a single frame of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
+        /// to <c>double</c> by extracting the specified complex component.
+        /// </summary>
+        /// <param name="src">Source complex matrix data.</param>
+        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
+        /// <param name="applyLog10">When <c>true</c>, applies <c>log₁₀</c> to each output value (with a small epsilon floor to avoid log(0)).</param>
+        /// <param name="frameIndex">The frame to convert. If negative, the active frame index is used.</param>
+        /// <param name="dst">Optional pre-allocated single-frame destination; otherwise a new instance is created.</param>
+        /// <returns>A single-frame <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with the extracted values.</returns>
         public static MatrixData<double> ToDouble(
             this MatrixData<Complex> src,
             ComplexValueMode mode,
@@ -147,6 +185,16 @@ namespace MxPlot.Core.Processing
             return dst;
         }
 
+        /// <summary>
+        /// Converts all frames of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
+        /// to <c>double</c> by extracting the specified complex component.
+        /// Frames are processed in parallel.
+        /// </summary>
+        /// <param name="src">Source complex matrix data.</param>
+        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
+        /// <param name="applyLog10">When <c>true</c>, applies <c>log₁₀</c> to each output value.</param>
+        /// <param name="dst">Optional pre-allocated destination matching source dimensions; otherwise a new instance is created.</param>
+        /// <returns>A <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with all frames converted.</returns>
         public static MatrixData<double> ToDoubleAllFrames(
             this MatrixData<Complex> src,
             ComplexValueMode mode,

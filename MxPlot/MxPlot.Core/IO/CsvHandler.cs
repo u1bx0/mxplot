@@ -153,20 +153,20 @@ namespace MxPlot.Core.IO
 
                 var s = line.TrimStart();
 
-                // 先頭トークンを取る（区切り文字前まで）
+                // Extract the first token (up to the first delimiter)
                 int sep = s.IndexOfAny([',', '\t', ' ']);
                 string token = sep >= 0 ? s[..sep] : s;
 
-                // 先頭文字が + - . 数字
+                // Leading character is +, -, ., or a digit
                 char c = s[0];
                 if (c is '+' or '-' or '.' or >= '0' and <= '9')
                     return true;
 
-                // 特殊値
+                // Special floating-point value
                 if (token.Equals("NaN", StringComparison.OrdinalIgnoreCase))
                     return true;
-                
-                // "--" などの欠損値
+
+                // Missing value sentinel
                 if (token == "--")
                     return true;
 
@@ -175,21 +175,20 @@ namespace MxPlot.Core.IO
 
 
             int xCount = 0;
-            //かなり甘めにチェックする
-            //最初にヘッダーがあるかもしれない、途中にもコメントが有るかもしれない、と仮定
-            //行頭が +,-,.,数字以外は全てスキップ
+            // Use a lenient check: assume optional headers at the top and optional comments in the middle.
+            // Any line whose first token does not look numeric is skipped.
             List<string[]> validLines = [];
             StringBuilder comments = new StringBuilder();
             foreach (string line in csvLines)
             {
-                if (!LooksLikeNumericLine(line)) // 行頭が +, -, ., 数字 以外ならスキップ、ただし最初の数値行まではヘッダーだとして記録する
+                if (!LooksLikeNumericLine(line)) // Skip non-numeric lines; record them as header if no data row has been seen yet
                 {
-                    if(validLines.Count == 0) //まだヘッダー行のはず
+                    if (validLines.Count == 0) // Still in the header region
                         comments.AppendLine(line);
                     continue;
                 }
                 var values = line.Split(new[] { separator }, StringSplitOptions.None);
-                if(values.Length > xCount) xCount = values.Length; // 最も多い列数を採用
+                if (values.Length > xCount) xCount = values.Length; // Use the widest row as the column count
                 validLines.Add(values);
             }
 
@@ -197,7 +196,10 @@ namespace MxPlot.Core.IO
             var array = new T[xCount * yCount];
             for(int iy = 0; iy < yCount; iy++)
             {
-                var line = validLines[iy]; //string[]
+                var line = validLines[iy]; // string[]
+                // When flipY=true the file was written top-to-bottom (highest Y row first),
+                // so reverse the destination row index on read to restore the original Y order.
+                int destIy = flipY ? (yCount - 1 - iy) : iy;
                 for(int ix = 0; ix < xCount; ix++)
                 {
                     
@@ -206,7 +208,7 @@ namespace MxPlot.Core.IO
                         var s = line[ix].Trim();
                         double value;
 
-                        // NaN, -- チェック
+                        // Treat NaN and -- as missing values
                         bool isMissing =
                             string.Equals(s, "NaN", StringComparison.OrdinalIgnoreCase) ||
                             s == "--";
@@ -220,7 +222,7 @@ namespace MxPlot.Core.IO
                             value = double.NaN;
                         }
 
-                        // 整数型の場合は NaN を 0 に正規化
+                        // Normalize NaN to 0 for integer types (NaN has no integer representation)
                         bool isIntegerType =
                             typeof(T) == typeof(int) ||
                             typeof(T) == typeof(long) ||
@@ -228,16 +230,14 @@ namespace MxPlot.Core.IO
                             typeof(T) == typeof(byte);
 
                         if (isIntegerType && double.IsNaN(value))
-                        {
-                            value = 0; // 甘々仕様
-                        }
+                            value = 0;
 
-                        array[iy * xCount + ix] = (T)Convert.ChangeType(value, typeof(T));
+                        array[destIy * xCount + ix] = (T)Convert.ChangeType(value, typeof(T));
                     }
                     else
                     {
-                        // 列数が足りない場合はゼロで埋める
-                        array[iy * xCount + ix] = default;
+                        // Pad missing columns with the default value
+                        array[destIy * xCount + ix] = default;
                     }
                 }
             }
@@ -263,7 +263,6 @@ namespace MxPlot.Core.IO
 
         public IReadOnlyList<string> Extensions { get; } = [".csv"];
 
-        // 設定をプロパティとして持てる！
         public string Separator { get; set; } = ",";
 
         public bool FlipY { get; set; } = true;
@@ -271,9 +270,9 @@ namespace MxPlot.Core.IO
         public int FrameIndex { get; set; } = -1;
 
         public CancellationToken CancellationToken { get; set; }
-        // CsvFormat は軽量フォーマットのためキャンセル未実装。IsCancellable はデフォルト false のまま。
+        // CsvFormat is a lightweight format; cancellation is not implemented and the token is intentionally ignored.
 
-        // インターフェイス実装：静的メソッドへ委譲
+        // Interface implementation: delegate to static helpers
         public void Write<T>(string path, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             CsvHandler.Save(path, data, Separator, FrameIndex, FlipY);
@@ -302,8 +301,7 @@ namespace MxPlot.Core.IO
         
         public IMatrixData ReadFromString(string content)
         {
-            // CsvHandler.Load (非ジェネリック) が内部で Load<double> を呼んでいるのと同様に
-            // ここでも double をデフォルトとして扱う
+            // Mirror the non-generic Load overload which defaults to double
             var lines = content.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
             return CsvHandler.CreateFrom<double>(lines, Separator, FlipY);
         }

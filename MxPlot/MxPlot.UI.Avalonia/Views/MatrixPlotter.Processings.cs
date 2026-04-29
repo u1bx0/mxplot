@@ -61,7 +61,12 @@ namespace MxPlot.UI.Avalonia.Views
 
             // Notify synced windows before executing locally
             if (crop.FinalBounds is { } b)
-                SyncCropCompleted?.Invoke(this, b with { ReplaceData = p.ReplaceData });
+                SyncCropCompleted?.Invoke(this, b with
+                {
+                    ReplaceData = p.ReplaceData,
+                    ThisFrameOnly = p.ThisFrameOnly,
+                    LeaderFrameIndex = p.ThisFrameOnly ? p.FrameIndex : 0,
+                });
 
             await ExecuteCropAsync(p);
         }
@@ -90,18 +95,33 @@ namespace MxPlot.UI.Avalonia.Views
 
             bool isMultiFrame = _currentData.FrameCount > 1;
 
+            // Resolve the frame index for ThisFrameOnly crops.
+            // FrameIndex == -1 means "use local ActiveIndex" (leader, or no hint).
+            // Otherwise it is the leader's frame index (follower path): clamp to local frame count
+            // and fall back to ActiveIndex when out of range.
+            int ResolveFrameIndex()
+            {
+                if (p.FrameIndex < 0)
+                    return _currentData.ActiveIndex;
+                if (p.FrameIndex < _currentData.FrameCount)
+                    return p.FrameIndex;
+                // Leader's frame index is out of range for this follower — use own active index.
+                return _currentData.ActiveIndex;
+            }
+
             if (isMultiFrame)
             {
                 var progress = BeginProgress("Cropping…", blockInput: true);
                 _cropCts?.Dispose();
                 _cropCts = new CancellationTokenSource();
                 var ct = _cropCts.Token;
+                int sourceActiveIndex = _currentData.ActiveIndex;
                 try
                 {
                     IMatrixData result;
                     if (p.ThisFrameOnly)
                     {
-                        int frameIdx = _currentData.ActiveIndex;
+                        int frameIdx = ResolveFrameIndex();
                         p = p with { FrameIndex = frameIdx };
                         result = await Task.Run(() =>
                         {
@@ -113,6 +133,9 @@ namespace MxPlot.UI.Avalonia.Views
                     {
                         result = await Task.Run(() =>
                             _currentData.Apply(new CropOperation(p.X, p.Y, p.Width, p.Height, progress, ct)), ct);
+                        // Preserve the active frame index in the result for all-frames crop.
+                        int clampedIdx = Math.Min(sourceActiveIndex, result.FrameCount - 1);
+                        result.ActiveIndex = clampedIdx;
                     }
 
                     ApplyCropResult(result, p);
@@ -134,7 +157,8 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                // Single frame — synchronous, no progress needed
+                // Single frame — synchronous, no progress needed.
+                // ThisFrameOnly is a no-op for single-frame data; just crop it.
                 try
                 {
                     var result = _currentData.Apply(new CropOperation(p.X, p.Y, p.Width, p.Height));
@@ -217,6 +241,8 @@ namespace MxPlot.UI.Avalonia.Views
             if (_activeAction is CropAction { Role: CropRole.Follower } crop)
             {
                 crop.ReplaceData = finalLeaderBounds.ReplaceData;
+                crop.ThisFrameOnly = finalLeaderBounds.ThisFrameOnly;
+                crop.LeaderFrameIndex = finalLeaderBounds.LeaderFrameIndex;
                 crop.SyncUpdateLeaderBounds(finalLeaderBounds);
                 crop.ForceApply();
             }

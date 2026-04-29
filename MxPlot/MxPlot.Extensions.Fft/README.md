@@ -41,6 +41,104 @@ that `MatrixData<T>` users do not need to change their code.
 Note: the MKL package is optional — the extension works out-of-the-box with the managed backend.
 
 
+## 🚀 Quick Examples
+
+### Forward / Inverse FFT
+
+```csharp
+using MxPlot.Core;
+using MxPlot.Extensions.Fft;
+
+var image = new MatrixData<double>(256, 256);
+image.Set((ix, iy, x, y) => Math.Sin(x) * Math.Cos(y));
+
+// Forward FFT — one call, returns MatrixData<Complex>
+var spectrum = image.Fft2D(ShiftOption.Centered); // DC shifted to center
+
+// Power spectrum statistics
+var (min, max) = spectrum.GetMinMaxValues(0, ComplexValueMode.Power);
+
+// Inverse FFT — back to spatial domain
+var restored = spectrum.InverseFft2D(ShiftOption.Centered);
+```
+
+### FFT Pipeline with In-place Frequency-Domain Processing
+
+`FftPipelineWithAction` performs **FFT → your action → IFFT** in a single optimized call,
+minimizing intermediate allocations and swap operations.
+This is the key feature of this package for frequency-domain filter design.
+
+```csharp
+// Example: Angular Spectrum Propagation (optical wave propagation by distance z)
+double lambda = 0.5e-6;   // wavelength [m]
+double z = 1e-3;          // propagation distance [m]
+
+var field = new MatrixData<Complex>(512, 512);
+// ... set field values ...
+field.SetXYScale(-1e-3, 1e-3, -1e-3, 1e-3); // physical coords [m]
+
+// FFT → apply transfer function → IFFT — all in one call
+// BothCentered: input and output are both in center layout (origin at array center),
+// matching the physical coordinate convention set by SetXYScale.
+var propagated = field.FftPipelineWithAction(
+    action: (buf, scale) =>
+    {
+        // buf is the frequency-domain array with DC at center
+        // scale provides physical frequency coordinates (fx, fy)
+        for (int iy = 0; iy < scale.YCount; iy++)
+        {
+            double fy = scale.YValue(iy);
+            for (int ix = 0; ix < scale.XCount; ix++)
+            {
+                double fx = scale.XValue(ix);
+                double fz2 = 1.0 / (lambda * lambda) - fx * fx - fy * fy;
+
+                Complex h;
+                if (fz2 >= 0)
+                {
+                    // Propagating wave: pure phase shift
+                    double kz = 2 * Math.PI * Math.Sqrt(fz2);
+                    h = Complex.Exp(new Complex(0, kz * z));
+                }
+                else
+                {
+                    // Evanescent wave: exponential decay (near-field only)
+                    double decay = 2 * Math.PI * Math.Sqrt(-fz2) * z;
+                    h = Math.Exp(-decay); // real-valued attenuation
+                }
+
+                buf[iy * scale.XCount + ix] *= h;
+            }
+        }
+    },
+    option: ShiftOption.BothCentered
+);
+
+// MatrixPlotter requires real-valued data; convert to intensity (|E|²) first
+var intensity = propagated.ConvertTo<Complex, double>(z => z.Magnitude * z.Magnitude);
+MatrixPlotter.Create(intensity, title: $"Intensity  z = {z * 1e3:F1} mm").Show();
+```
+
+The same pattern applies to any frequency-domain operation:
+low-pass / high-pass filters, phase masks, aberration correction, and more.
+
+### Multi-Frame FFT
+
+For multi-frame data (e.g. time-series or Z-stacks), apply FFT to all frames at once.
+Each frame is processed independently in parallel:
+
+```csharp
+// 3D data: 256×256, 100 time frames
+var timeSeries = new MatrixData<double>(256, 256, 100);
+// ... fill data ...
+timeSeries.SetXYScale(-1e-3, 1e-3, -1e-3, 1e-3);
+
+var spectra = timeSeries.Fft2DAllFrames(ShiftOption.Centered);
+// spectra: MatrixData<Complex> with 100 frames, frequency-domain scale applied
+
+var restored = spectra.InverseFft2DAllFrames(ShiftOption.Centered);
+```
+
 👉 **[GitHub Repository: u1bx0/MxPlot](https://github.com/u1bx0/mxplot)**
 
 ## 📊 Version History

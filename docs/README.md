@@ -2,9 +2,11 @@
 
 **Last Updated**: 2026-04-24
 
-Detailed guides and technical references for the MxPlot library stack.
+- Detailed guides and technical references for the MxPlot library stack.
+- Content may be updated as the library evolves
 
 > For API overview and quick start, see the main [README.md](../README.md) at the solution level.
+
 
 ---
 
@@ -52,11 +54,13 @@ Detailed guides and technical references for the MxPlot library stack.
 
 ---
 
-## Notes
+## MxPlot.Extensions — Optional Add-ons
 
-- All guides include tested code examples and real-world use cases
-- Performance reports and benchmarks are in separate files (not for distribution)
-- Content may be updated as the library evolves
+### MxPlot.Extensions.Fft
+
+- **[FFT2D ShiftOption Operation](./Extensions_Fft_Shift_Operation.md)**  
+  Detailed reference for `ShiftOption` behavior (`None`, `Centered`, `BothCentered`) and the underlying circular-swap mechanics in `Fft2D` / `InverseFft2D`.  
+  For a broader overview of the FFT extension (pipeline API, usage examples), see the `MxPlot.Extensions.Fft` package README.
 
 ---
 

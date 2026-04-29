@@ -10,9 +10,14 @@ namespace MxPlot.Core
     {
 
        
-
+        /// <summary>
+        /// Gets or sets the maximum value of the X-axis.
+        /// </summary>
         double XMax { get; set; }
 
+        /// <summary>
+        /// Gets or sets the minimum value of the X-axis.
+        /// </summary>
         double XMin { get; set; }
 
         /// <summary>
@@ -30,11 +35,20 @@ namespace MxPlot.Core
         /// </summary>
         double XRange { get; }
 
+        /// <summary>
+        /// Sets or gets the maximum value along the Y axis. 
+        /// </summary>
         double YMax { get; set; }
 
+        /// <summary>
+        /// Sets or gets the minimum value along the Y axis. 
+        /// </summary>
         double YMin { get; set; }
 
-        int YCount{ get; }
+        /// <summary>
+        /// Number of data points along Y axis (immutable)
+        /// </summary>
+        int YCount { get; }
 
         /// <summary>
         ///  = (YMax - YMin) / (YCount - 1) = YRange / (YCount - 1)
@@ -191,22 +205,63 @@ namespace MxPlot.Core
         /// <returns>The maximum value as a double. </returns>
         double GetMaxValue();
 
+        /// <summary>
+        /// Gets the X-axis value at the specified index. As an implementation, this returns  XStep * ix + XMin;
+        /// </summary>
+        /// <param name="ix">The zero-based index of the X-axis value to retrieve.</param>
+        /// <returns>The X-axis value corresponding to the specified index.</returns>
         double XValue(int ix);
         
+        /// <summary>
+        /// Returns the zero-based index of the specified x-coordinate value.
+        /// </summary>
+        /// <remarks>If <paramref name="extendRange"/> is set to <see langword="true"/>, the method
+        /// returns the nearest valid index even if the exact value is not found. This can be useful for interpolation
+        /// or extrapolation scenarios.</remarks>
+        /// <param name="x">The x-coordinate value to locate in the collection.</param>
+        /// <param name="extendRange">If <see langword="true"/>, allows the search to extend beyond the current range to include the nearest valid
+        /// index. If <see langword="false"/>, throw IndexOutOfRangeException if the index is out of bounds..</param>
+        /// <returns>The zero-based index of the specified x-coordinate if found; otherwise, -1 if the value is not present and
+        /// range extension is not allowed.</returns>
         int XIndexOf(double x, bool extendRange = false);
 
+        /// <summary>
+        /// Gets the Y-axis value corresponding to the specified Y index. This returns YStep * iy + YMin;
+        /// </summary>
+        /// <param name="iy">The zero-based index along the Y axis for which to retrieve the value.</param>
+        /// <returns>The Y-axis value at the specified index.</returns>
         double YValue(int iy);
 
+        /// <summary>
+        /// Returns the index of the row corresponding to the specified Y value.
+        /// </summary>
+        /// <param name="y">The Y value for which to find the corresponding row index.</param>
+        /// <param name="extendRange">true to allow indices outside the normal range if y is out of bounds; 
+        /// otherwise (false), throw IndexOutOfRangeException when y is out of bounds.</param>
+        /// 
+        /// <returns>The zero-based index of the row that corresponds to the specified Y value.</returns>
         int YIndexOf(double y, bool extendRange = false);
 
+        /// <summary>
+        /// Sets the minimum and maximum values for the X and Y axes of the coordinate system.
+        /// </summary>
+        /// <param name="xmin">The minimum value for the X axis.</param>
+        /// <param name="xmax">The maximum value for the X axis.</param>
+        /// <param name="ymin">The minimum value for the Y axis.</param>
+        /// <param name="ymax">The maximum value for the Y axis.</param>
         void SetXYScale(double xmin, double xmax, double ymin, double ymax);
 
+        /// <summary>
+        /// Returns the current XY axis scale as a <see cref="Scale2D"/> value containing
+        /// <c>XMin</c>, <c>XMax</c>, <c>YMin</c>, and <c>YMax</c>.
+        /// </summary>
         Scale2D GetScale();
 
         /// <summary>
-        /// Define axes for series data: FrameCount must match the sum of counts in each axis.
+        /// Defines the hyperstack axes for multi-frame data.
+        /// The product of all axis counts must equal <see cref="FrameCount"/>.
         /// </summary>
-        /// <param name="axes"></param>
+        /// <param name="axes">One or more <see cref="Axis"/> objects describing the dimension structure.</param>
         void DefineDimensions(params Axis[] axes);
 
         /// <summary>
@@ -241,22 +296,48 @@ namespace MxPlot.Core
         void Invalidate(int frameIndex);
 
         /// <summary>
-        /// Get the min and max values in the active frame as a tuple (min, max).
+        /// Returns the minimum and maximum values in the active frame.
         /// </summary>
-        /// <returns></returns>
+        /// <returns>A <c>(Min, Max)</c> tuple. Equivalent to <c>GetValueRange(ActiveIndex)</c>.</returns>
         (double Min, double Max) GetValueRange();
 
         /// <summary>
-        /// Get the min and max values in the specific frame as a tuple (min, max).
+        /// Returns the minimum and maximum values in the specified frame.
         /// </summary>
-        /// <param name="index"></param>
-        /// <returns>double[]{min, max}</returns>
+        /// <param name="frameIndex">The zero-based frame index.</param>
+        /// <returns>A <c>(Min, Max)</c> tuple.</returns>
         (double Min, double Max) GetValueRange(int frameIndex);
 
 
+        /// <summary>
+        /// Returns the minimum and maximum values for the specified frame and value mode.
+        /// </summary>
+        /// <remarks>
+        /// <paramref name="valueMode"/> selects a component from structured element types.
+        /// For primitive types (e.g. <c>double</c>, <c>float</c>) use <c>valueMode = 0</c>.
+        /// For <see cref="System.Numerics.Complex"/>, the indices are:
+        /// 0 = Magnitude, 1 = Real, 2 = Imaginary, 3 = Phase, 4 = Power.
+        /// </remarks>
+        /// <param name="frameIndex">The zero-based frame index.</param>
+        /// <param name="valueMode">The component index within the value type.</param>
+        /// <returns>A <c>(Min, Max)</c> tuple, or <c>(NaN, NaN)</c> if the range is unavailable.</returns>
         (double Min, double Max) GetValueRange(int frameIndex, int valueMode);
 
 
+        /// <summary>
+        /// Returns all per-component min/max values for the specified frame as two parallel lists.
+        /// </summary>
+        /// <remarks>
+        /// For primitive element types the lists each contain a single element.
+        /// For <see cref="System.Numerics.Complex"/>, the five components are returned in order:
+        /// Magnitude, Real, Imaginary, Phase, Power.
+        /// Use <see cref="GetValueRange(int, int)"/> when only a single component is needed.
+        /// </remarks>
+        /// <param name="frameIndex">The zero-based frame index.</param>
+        /// <returns>
+        /// A tuple of two lists: <c>MinValues</c> and <c>MaxValues</c>.
+        /// Both lists are empty (or contain <c>NaN</c>) if the range is not yet computed.
+        /// </returns>
         (List<double> MinValues, List<double> MaxValues) GetValueRangeList(int frameIndex);
 
 
@@ -273,12 +354,29 @@ namespace MxPlot.Core
         (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null);
 
 
+        /// <summary>
+        /// Returns the minimum and maximum values along the specified axis for the given value mode,
+        /// optionally fixing the other axis coordinates.
+        /// </summary>
+        /// <param name="targetAxis">The axis to scan.</param>
+        /// <param name="fixedCoordinates">
+        /// Full coordinate array for all axes. The entry at the <paramref name="targetAxis"/> position
+        /// is ignored during iteration. Pass <c>null</c> to aggregate across all positions.
+        /// </param>
+        /// <param name="valueMode">The component index within the value type (see <see cref="GetValueRange(int, int)"/>).</param>
+        /// <returns>A <c>(Min, Max)</c> tuple.</returns>
         (double Min, double Max) GetValueRange(Axis targetAxis, int[]? fixedCoordinates = null, int valueMode = 0);
 
         /// <summary>
-        /// Get the min and max values found in all the frames as a tuple (min, max).
+        /// Returns the global minimum and maximum values across all frames.
         /// </summary>
-        /// <returns>double[]{min, max}</returns>
+        /// <remarks>
+        /// For in-memory data this performs a full scan if any frame has not yet been computed.
+        /// For virtual data, only already-cached frames are considered; use the
+        /// <see cref="GetGlobalValueRange(out List{int}, bool)"/> overload with <c>forceRefresh = true</c>
+        /// to guarantee a complete result.
+        /// </remarks>
+        /// <returns>A <c>(Min, Max)</c> tuple across all frames.</returns>
         (double Min, double Max) GetGlobalValueRange();
 
 
@@ -304,29 +402,30 @@ namespace MxPlot.Core
         (double Min, double Max) GetGlobalValueRange(out List<int> invalids, bool forceRefresh);
 
         /// <summary>
-        /// 
+        /// Sets the element value at the specified pixel coordinates in the active frame.
         /// </summary>
-        /// <param name="ix"></param>
-        /// <param name="iy"></param>
-        /// <param name="v"></param>
+        /// <param name="ix">The zero-based X index.</param>
+        /// <param name="iy">The zero-based Y index.</param>
+        /// <param name="v">The value to write, expressed as a <c>double</c>.</param>
         void SetValueAt(int ix, int iy, double v);
 
 
         /// <summary>
+        /// Sets the element value at the specified pixel coordinates in the given frame.
         /// </summary>
-        /// <param name="ix"></param>
-        /// <param name="iy"></param>
-        /// <param name="indexInSeries"></param>
-        /// <param name="v"></param>
+        /// <param name="ix">The zero-based X index.</param>
+        /// <param name="iy">The zero-based Y index.</param>
+        /// <param name="frameIndex">The zero-based frame index.</param>
+        /// <param name="v">The value to write, expressed as a <c>double</c>.</param>
         void SetValueAt(int ix, int iy, int frameIndex, double v);
 
         /// <summary>
-        /// Get value at (ix, iy) as double
+        /// Returns the element value at the specified pixel coordinates as a <c>double</c>.
         /// </summary>
-        /// <param name="ix"></param>
-        /// <param name="iy"></param>
-        /// <param name="iz">-1の場合は現在のActiveIndex</param>
-        /// <returns></returns>
+        /// <param name="ix">The zero-based X index.</param>
+        /// <param name="iy">The zero-based Y index.</param>
+        /// <param name="frameIndex">The zero-based frame index. Pass <c>-1</c> to use the current <see cref="ActiveIndex"/>.</param>
+        /// <returns>The element value cast to <c>double</c>.</returns>
         double GetValueAt(int ix, int iy, int frameIndex = -1);
 
         /// <summary>
@@ -334,11 +433,14 @@ namespace MxPlot.Core
         /// If frameIndex is -1, the value from the current active frame is returned. 
         /// If interpolate is true, the value is calculated using an interpolation algorithm based on the surrounding data points; otherwise, the value from the nearest data point is returned.
         /// </summary>
-        /// <param name="x"></param>
-        /// <param name="y"></param>
-        /// <param name="frameIndex"></param>
-        /// <param name="interpolate"></param>
-        /// <returns></returns>
+        /// <param name="x">The physical X coordinate.</param>
+        /// <param name="y">The physical Y coordinate.</param>
+        /// <param name="frameIndex">The zero-based frame index. Pass <c>-1</c> to use <see cref="ActiveIndex"/>.</param>
+        /// <param name="interpolate">
+        /// When <c>true</c>, bilinear interpolation is applied.
+        /// When <c>false</c>, the value of the nearest data point is returned.
+        /// </param>
+        /// <returns>The element value at the specified coordinates, cast to <c>double</c>.</returns>
         double GetValueAsDouble(double x, double y, int frameIndex = -1, bool interpolate = false);
 
         /// <summary>
