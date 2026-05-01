@@ -255,6 +255,20 @@ namespace MxPlot.UI.Avalonia.Views
                 crop.ForceCancel();
         }
 
+        /// <summary>
+        /// Cancels any active <see cref="CropAction"/> regardless of role.
+        /// Used when the sync group is dissolved (Unsync or member window closed) while a
+        /// Sync Crop is in progress, to avoid orphaned Leader or Follower ROI panels.
+        /// </summary>
+        internal void CancelActiveCropAction()
+        {
+            if (_activeAction is CropAction crop)
+                crop.ForceCancel();
+        }
+
+        /// <summary><c>true</c> when a <see cref="CropAction"/> (any role) is currently active.</summary>
+        internal bool HasActiveCropAction => _activeAction is CropAction;
+
         private async void OnSyncedCropCompleted(object? sender, IMatrixData? _)
         {
             if (sender is not CropAction crop) return;

@@ -17,16 +17,13 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         // ── IAnalyzableOverlay ────────────────────────────────────
 
-        public event EventHandler? FindMinMaxRequested;
-        public event EventHandler? ToggleShowStatisticsRequested;
-        public event EventHandler? UseRoiForValueRangeRequested;
+        public OverlayMenuEntry FindMinMax { get; } = new("Find Min/Max", icon: null, tooltip: "Set value range to min/max within this region");
+        public OverlayMenuEntry ToggleShowStatistics { get; } = new("Show Statistics", icon: null, tooltip: "Show/hide statistics label");
+        public OverlayMenuEntry UseRoiForValueRange { get; } = new("Use ROI for Value Range", icon: null, tooltip: "Use this region as the value range ROI");
+        public OverlayMenuEntry CopyData { get; } = new("Copy Data", icon: null, tooltip: "Copy data within the rect as image/ascii");
         public bool ShowStatistics { get; set; } = false;
         public RegionStatistics? CachedStatistics { get; set; }
         public bool IsValueRangeRoi { get; set; } = false;
-
-        public void RaiseFindMinMaxRequested() => FindMinMaxRequested?.Invoke(this, EventArgs.Empty);
-        public void RaiseToggleShowStatisticsRequested() => ToggleShowStatisticsRequested?.Invoke(this, EventArgs.Empty);
-        public void RaiseUseRoiForValueRangeRequested() => UseRoiForValueRangeRequested?.Invoke(this, EventArgs.Empty);
 
         public bool ContainsWorldPoint(Point worldPoint) =>
             worldPoint.X >= X && worldPoint.X < X + Width &&
@@ -88,11 +85,5 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp) =>
             GetResizeCursor(handle, vp);
-
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
-        {
-            foreach (var item in base.GetContextMenuItems() ?? [])
-                yield return item;
-        }
     }
 }

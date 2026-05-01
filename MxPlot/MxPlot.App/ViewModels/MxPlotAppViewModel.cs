@@ -34,6 +34,10 @@ namespace MxPlot.App.ViewModels
         [ObservableProperty]
         private bool _hasMultiSelection;
 
+        /// <summary>True when two or more <em>visible</em> windows are selected (required for Tile and Sync).</summary>
+        [ObservableProperty]
+        private bool _hasVisibleMultiSelection;
+
         [ObservableProperty]
         private bool _hasExportableSelection;
 
@@ -316,7 +320,7 @@ namespace MxPlot.App.ViewModels
         [RelayCommand]
         private void TileWindows()
         {
-            var selected = ManagedWindows.Where(m => m.IsSelected).ToList();
+            var selected = ManagedWindows.Where(m => m.IsSelected && m.IsWindowVisible).ToList();
             if (selected.Count == 0) return;
 
             var windows = selected.Select(m => m.Window).ToList();
@@ -470,6 +474,7 @@ namespace MxPlot.App.ViewModels
             var count = ManagedWindows.Count(m => m.IsSelected);
             HasSelection = count > 0;
             HasMultiSelection = count >= 2;
+            HasVisibleMultiSelection = ManagedWindows.Count(m => m.IsSelected && m.IsWindowVisible) >= 2;
             HasExportableSelection = ManagedWindows.Any(m => m.IsSelected && m is IExportableAsImage);
         }
     }

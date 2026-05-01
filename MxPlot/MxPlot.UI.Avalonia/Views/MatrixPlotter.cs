@@ -37,6 +37,8 @@ namespace MxPlot.UI.Avalonia.Views
         // For managing the ActiveIndexChanged subscription across MatrixData swaps
         private IMatrixData? _currentData;
         private EventHandler? _activeIndexHandler;
+        private bool _settingMatrixData; // re-entrancy guard for MainView.MatrixDataChanged → SetMatrixData
+        private readonly Dictionary<string, AxisTracker> _axisTrackers = [];
 
         // Status bar segments
         private readonly TextBlock _infoText;     // "[float]  11.9 GB"
@@ -151,10 +153,10 @@ namespace MxPlot.UI.Avalonia.Views
         /// Use this to subscribe to pointer/keyboard events, access
         /// <see cref="MxView.OverlayManager"/>, control zoom, and read display state.
         /// <para>
-        /// <b>Do not set <see cref="MxView.MatrixData"/> directly.</b>
-        /// Use <see cref="SetMatrixData"/> (or assign via <see cref="ViewModel"/>) so that
-        /// axis trackers, orthogonal views, and value-range state are kept in sync.
-        /// This constraint will be resolved architecturally in a future version (0.1.1 / 0.2.0).
+        /// To replace the displayed data, either assign <see cref="MxView.MatrixData"/> directly
+        /// (recommended for code-behind scenarios) or set <c>ViewModel.MatrixData</c>
+        /// (recommended for MVVM). Both paths keep axis trackers, orthogonal views,
+        /// and value-range state in sync automatically.
         /// </para>
         /// </summary>
         public MxView MainView => _view;
@@ -410,14 +412,22 @@ namespace MxPlot.UI.Avalonia.Views
 
             _orthoPanel = new OrthogonalPanel();
             _view = _orthoPanel.MainView;
+            _view.EnableBuiltInContextMenu = true;
+            _view.MatrixDataChanged += (_, data) =>
+            {
+                if (_settingMatrixData) return; // already inside SetMatrixData — skip
+                SetMatrixData(data);
+            };
             _view.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
             _view.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
             _view.OverlayManager.GhostUpdated += (_, g) => _view.OverlayInfoText = g.GetInfo(_view.MatrixData);
             _view.OverlayManager.GhostCancelled += (_, _) => _view.OverlayInfoText = null;
+            _orthoPanel.BottomView.EnableBuiltInContextMenu = true;
             _orthoPanel.BottomView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
             _orthoPanel.BottomView.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
             _orthoPanel.BottomView.OverlayManager.GhostUpdated += (_, g) => _orthoPanel.BottomView.OverlayInfoText = g.GetInfo(_orthoPanel.BottomView.MatrixData);
             _orthoPanel.BottomView.OverlayManager.GhostCancelled += (_, _) => _orthoPanel.BottomView.OverlayInfoText = null;
+            _orthoPanel.RightView.EnableBuiltInContextMenu = true;
             _orthoPanel.RightView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
             _orthoPanel.RightView.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
             _orthoPanel.RightView.OverlayManager.GhostUpdated += (_, g) => _orthoPanel.RightView.OverlayInfoText = g.GetInfo(_orthoPanel.RightView.MatrixData);
@@ -425,7 +435,9 @@ namespace MxPlot.UI.Avalonia.Views
             _view.CopiedToClipboard += (_, msg) => ShowToast(msg);
             _view.CropRequested += (_, _) => InvokeCropAction();
             _orthoPanel.BottomView.CopiedToClipboard += (_, msg) => ShowToast(msg);
+            _orthoPanel.BottomView.CropRequested += (_, _) => InvokeCropAction();
             _orthoPanel.RightView.CopiedToClipboard += (_, msg) => ShowToast(msg);
+            _orthoPanel.RightView.CropRequested += (_, _) => InvokeCropAction();
             _orthoController = new OrthogonalViewController(_orthoPanel);
             _orthoController.XYProjectionChanged += OnXYProjectionChanged;
             _lutSelector = new LutSelector
@@ -1070,6 +1082,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>
         /// Replaces the displayed <see cref="IMatrixData"/>, rebuilds <see cref="AxisTracker"/>s,
         /// and wires <c>ActiveIndexChanged</c> so tracker interactions update <see cref="MxView.FrameIndex"/>.
+        /// Called internally whenever <see cref="MxView.MatrixData"/> or <c>ViewModel.MatrixData</c> changes.
         /// </summary>
         private void SetMatrixData(IMatrixData? data)
         {
@@ -1105,15 +1118,21 @@ namespace MxPlot.UI.Avalonia.Views
             // stops any running animations cleanly.
             _orthoController.Deactivate();
             _trackerPanel.Children.Clear();
+            _axisTrackers.Clear();
 
             // Reset FrameIndex to 0 BEFORE swapping MatrixData.
             // If the new data has fewer frames than the current FrameIndex (e.g. single-frame
             // result of a "This frame only" crop replacing a multi-frame hyperstack),
             // the view would immediately attempt to render with the stale out-of-range index
             // and throw in BitmapWriter.CheckValidity before the line below corrects it.
-            _view.FrameIndex = 0;
-            _view.MatrixData = data;
-            _view.FrameIndex = data?.ActiveIndex ?? 0;
+            _settingMatrixData = true;
+            try
+            {
+                _view.FrameIndex = 0;
+                _view.MatrixData = data;
+                _view.FrameIndex = data?.ActiveIndex ?? 0;
+            }
+            finally { _settingMatrixData = false; }
             MatrixDataChanged?.Invoke(this, data);
 
             // Sync multi-frame UI first so SetMode sees the correct _isMultiFrame state
@@ -1175,6 +1194,7 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     var tracker = new AxisTracker(axis);
                     _trackerPanel.Children.Add(tracker);
+                    _axisTrackers[axis.Name] = tracker;
                     WireFreezeButton(tracker, axis);
                     tracker.IndexChanged += (_, idx) =>
                     {
@@ -1212,10 +1232,12 @@ namespace MxPlot.UI.Avalonia.Views
         {
             _orthoController.Deactivate();
             _trackerPanel.Children.Clear();
+            _axisTrackers.Clear();
             foreach (var axis in data.Axes)
             {
                 var tracker = new AxisTracker(axis);
                 _trackerPanel.Children.Add(tracker);
+                _axisTrackers[axis.Name] = tracker;
                 WireFreezeButton(tracker, axis);
                 var capturedAxis = axis;
                 tracker.IndexChanged += (_, idx) =>
@@ -1346,6 +1368,10 @@ namespace MxPlot.UI.Avalonia.Views
             };
 
             _infoText.Text = $"[{data.ValueTypeName}]  {sizeStr}";
+            string tooltip = $"{data.XCount}×{data.YCount}";
+            if (data.FrameCount > 1) tooltip += $"  |  {data.FrameCount} frames";
+            tooltip += $"  |  {data.ValueTypeName}";
+            ToolTip.SetTip(_infoText, tooltip);
             _virtualBadge.IsVisible = data.IsVirtual;
             if (data.IsVirtual)
             {

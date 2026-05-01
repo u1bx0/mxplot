@@ -138,8 +138,8 @@ namespace MxPlot.UI.Avalonia.Controls
             _panel.MainView.ShowCrosshairV  = true;
             _panel.ShowRight  = false;
             _panel.ShowBottom = false;
-            _panel.RightView.MatrixData  = null;
-            _panel.BottomView.MatrixData = null;
+            _panel.RightView.SetMatrixDataInternal(null);
+            _panel.BottomView.SetMatrixDataInternal(null);
             _xzProjectionCache = null;
             _yzProjectionCache = null;
             bool hadXYProjection = _xyProjectionMode != null;
@@ -551,8 +551,8 @@ namespace MxPlot.UI.Avalonia.Controls
                         double savedRightTransX = _panel.RightView.RawTransX;
 
                         _isSyncing = true;
-                        _panel.BottomView.MatrixData = xz;
-                        _panel.RightView.MatrixData  = yz;
+                        _panel.BottomView.SetMatrixDataInternal(xz);
+                        _panel.RightView.SetMatrixDataInternal(yz);
                         SyncSidesFromMain();
 
                         // Restore non-shared axis scroll position so the user's Z-axis

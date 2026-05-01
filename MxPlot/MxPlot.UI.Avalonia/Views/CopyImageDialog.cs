@@ -33,7 +33,7 @@ namespace MxPlot.UI.Avalonia.Views
         private static bool _lastOverlays = true;
 
         internal CopyImageDialog(Bitmap? preview, int naturalW, int naturalH, int displayW, int displayH,
-                    Func<bool, Bitmap?>? refreshPreview = null)
+                    Func<bool, Bitmap?>? refreshPreview = null, bool showOverlaysOption = true, bool showCustomSizeOption = true)
                 {
             Title = "Copy to Clipboard";
             SizeToContent = SizeToContent.Height;
@@ -112,6 +112,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             var radioCustom = new RadioButton { GroupName = "CopyMode", Content = customContent };
             radioCustom.Classes.Add("compact");
+            radioCustom.IsVisible = showCustomSizeOption;
             radioCustom.IsCheckedChanged += (_, _) =>
             {
                 bool on = radioCustom.IsChecked == true;
@@ -145,6 +146,7 @@ namespace MxPlot.UI.Avalonia.Views
             var overlayChk = ControlFactory.MakeCheckBox("With overlays", fontSize: FS);
             overlayChk.Margin = new Thickness(0, 0, 0, 0);
             overlayChk.IsChecked = _lastOverlays;
+            overlayChk.IsVisible = showOverlaysOption;
             void UpdateOverlay() => overlayChk.IsEnabled = radioText.IsChecked != true;
             radioNatural.IsCheckedChanged += (_, _) => UpdateOverlay();
             radioCustom.IsCheckedChanged += (_, _) => UpdateOverlay();
@@ -162,7 +164,10 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 case CopyMode.ActualPixelSize: radioNatural.IsChecked = true; break;
                 case CopyMode.Text:            radioText.IsChecked    = true; break;
-                default:                       radioCustom.IsChecked  = true; break;
+                default:
+                    if (showCustomSizeOption) radioCustom.IsChecked  = true;
+                    else                      radioNatural.IsChecked  = true;
+                    break;
             }
             UpdateOverlay();
             if (refreshPreview != null && overlayChk.IsEnabled)

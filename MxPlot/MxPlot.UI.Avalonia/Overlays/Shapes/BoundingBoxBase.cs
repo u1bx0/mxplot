@@ -97,27 +97,15 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// When the concrete class implements <see cref="IAnalyzableOverlay"/>, analysis items
         /// (Find Min/Max, Show Statistics, Use ROI for Value Range) are prepended automatically.
         /// </summary>
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
+        public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
             if (this is IAnalyzableOverlay evaluable)
             {
-                yield return new OverlayMenuItem("Find Min/Max",
-                    evaluable.RaiseFindMinMaxRequested,
-                    icon: MenuIcons.Search,
-                    tooltip: "Apply the region min/max to the main view value range");
-                yield return new OverlayMenuItem(
-                    evaluable.ShowStatistics ? "Hide Statistics" : "Show Statistics",
-                    evaluable.RaiseToggleShowStatisticsRequested,
-                    icon: MenuIcons.LineChart,
-                    tooltip: "Toggle statistics label inside the region");
-                yield return new OverlayMenuItem(
-                    evaluable.IsValueRangeRoi ? "Unset as Value Range ROI" : "Use ROI for Value Range",
-                    evaluable.RaiseUseRoiForValueRangeRequested,
-                    icon: MenuIcons.Roi,
-                    tooltip: evaluable.IsValueRangeRoi
-                        ? "Stop using this region as the value-range ROI"
-                        : "Use this region to determine the min/max value range");
-                yield return OverlayMenuItem.Separator();
+                yield return evaluable.FindMinMax;
+                yield return evaluable.ToggleShowStatistics;
+                yield return evaluable.UseRoiForValueRange;
+                yield return evaluable.CopyData;
+                yield return OverlayMenuEntry.Separator();
             }
             foreach (var item in base.GetContextMenuItems() ?? [])
                 yield return item;

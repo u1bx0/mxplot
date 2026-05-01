@@ -54,6 +54,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── Public API ────────────────────────────────────────────────────────
 
+        /// <summary>The <see cref="Core.Axis"/> this tracker controls.</summary>
+        public Axis Axis => _axis;
+
         /// <summary>The 🧊 orthogonal-view toggle button (right of the indicator).</summary>
         public ToggleButton FreezeButton => _freezeButton;
 

@@ -112,6 +112,9 @@ namespace MxPlot.UI.Avalonia.Overlays
         public void AddObject(OverlayObjectBase obj, bool invalidate = true)
         {
             _objects.Add(obj);
+            obj.DeleteRequested += OnDeleteRequested;
+            obj.CopyRequested += OnCopyOverlay;
+            obj.PasteRequested += OnPasteOverlay;
             ObjectAdded?.Invoke(this, obj);
             if (invalidate) InvalidateVisual();
             Debug.WriteLine($"[OverlayManager] AddObject total={_objects.Count}");
@@ -120,6 +123,9 @@ namespace MxPlot.UI.Avalonia.Overlays
         public void RemoveObject(OverlayObjectBase obj)
         {
             if (!_objects.Remove(obj)) return;
+            obj.DeleteRequested -= OnDeleteRequested;
+            obj.CopyRequested -= OnCopyOverlay;
+            obj.PasteRequested -= OnPasteOverlay;
             if (_activeObj == obj)
             {
                 _activeObj = null;
@@ -273,7 +279,7 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         // ── Context menu
 
-        public IEnumerable<OverlayMenuItem> GetContextMenuItems(Point screenPos)
+        public IEnumerable<OverlayMenuEntry> GetContextMenuItems(Point screenPos)
         {
             var vp = GetViewport?.Invoke() ?? default;
             var target = _objects.LastOrDefault(o =>
@@ -284,15 +290,6 @@ namespace MxPlot.UI.Avalonia.Overlays
             });
 
             if (target == null) yield break;
-
-            target.DeleteRequested -= OnDeleteRequested;
-            target.DeleteRequested += OnDeleteRequested;
-
-            target.CopyRequested -= OnCopyOverlay;
-            target.CopyRequested += OnCopyOverlay;
-
-            target.PasteRequested -= OnPasteOverlay;
-            target.PasteRequested += OnPasteOverlay;
 
             foreach (var item in target.GetContextMenuItems() ?? [])
                 yield return item;
@@ -749,12 +746,7 @@ namespace MxPlot.UI.Avalonia.Overlays
         private void OnDeleteRequested(object? sender, EventArgs e)
         {
             if (sender is OverlayObjectBase obj)
-            {
-                _objects.Remove(obj);
-                obj.DeleteRequested -= OnDeleteRequested;
-                ObjectRemoved?.Invoke(this, obj);
-                InvalidateVisual();
-            }
+                RemoveObject(obj);
         }
 
         private void OnCopyOverlay(object? sender, EventArgs e)

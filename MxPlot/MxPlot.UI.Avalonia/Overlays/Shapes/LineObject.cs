@@ -27,15 +27,19 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         public override void ResetResizeState() => _hasResizeState = false;
 
-        /// <summary>Raised when the user selects "Plot Profile" from the context menu.</summary>
-        public event EventHandler? PlotProfileRequested;
+        /// <summary>
+        /// Menu entry for "Plot Profile".
+        /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
+        /// the entry is hidden when no handler is assigned.
+        /// </summary>
+        public OverlayMenuEntry PlotProfile { get; } = new("Plot Profile", icon: MenuIcons.LineChart, tooltip: "Open profile plotter");
 
         /// <summary>
-        /// Raised when the user selects "Calibrate Scale" from the context menu. 
-        /// The handler should open a dialog to set the scale based on the line endpoints.
-        /// This allows using the line as a reference for physical dimensions in the plot.
+        /// Menu entry for "Calibrate Scale".
+        /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
+        /// the entry is hidden when no handler is assigned.
         /// </summary>
-        public event EventHandler? CalibrateScaleRequested;
+        public OverlayMenuEntry CalibrateScale { get; } = new("Calibrate Scale", icon: MenuIcons.Ruler, tooltip: "Calibrate scale from the two end points.");
 
         public override Point? GetApproxWorldCenter() =>
             new Point((P1.X + P2.X) / 2, (P1.Y + P2.Y) / 2);
@@ -244,16 +248,12 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             GeometryChanged?.Invoke(this, (P1, P2));
         }
 
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
+        public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
-            yield return new OverlayMenuItem("Plot Profile",
-                () => PlotProfileRequested?.Invoke(this, EventArgs.Empty),
-                icon: MenuIcons.LineChart, tooltip: "Open profile plotter");
-            yield return new OverlayMenuItem("Calibrate Scale",
-                () => CalibrateScaleRequested?.Invoke(this, EventArgs.Empty),
-                icon: MenuIcons.Ruler, tooltip: "Calibrate scale from the two end points.");
-            yield return OverlayMenuItem.Separator();
-            foreach (var item in base.GetContextMenuItems() ?? Enumerable.Empty<OverlayMenuItem>())
+            yield return PlotProfile;
+            yield return CalibrateScale;
+            yield return OverlayMenuEntry.Separator();
+            foreach (var item in base.GetContextMenuItems() ?? Enumerable.Empty<OverlayMenuEntry>())
                 yield return item;
         }
 

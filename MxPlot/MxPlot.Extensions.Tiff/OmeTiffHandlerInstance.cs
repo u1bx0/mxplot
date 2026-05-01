@@ -1679,13 +1679,13 @@ namespace MxPlot.Extensions.Tiff
                 data.GlobalOrigins = fovAxis.Origins;
             }
 
-            // Exclude format-header blobs (e.g. FITS_HEADER, OME_XML) and the tracking key
-            // ("mxplot.*" reserved namespace). These describe the source file format and do not
-            // belong in the OME-XML metadata store of a newly written TIFF.
+            // Exclude format-header blobs (e.g. FITS_HEADER, OME_XML) — they describe the
+            // originating file format and should not propagate into a different-format writer.
+            // mxplot.* system metadata (LUT, overlays, view settings) is intentionally kept
+            // so that it round-trips through Save As and is restored by RestoreViewSettings().
             var formatHeaderKeys = md.GetFormatHeaderKeys();
             data.MatrixDataMetadata = md.Metadata
-                .Where(kv => !formatHeaderKeys.Contains(kv.Key) &&
-                             !kv.Key.StartsWith("mxplot.", StringComparison.OrdinalIgnoreCase))
+                .Where(kv => !formatHeaderKeys.Contains(kv.Key))
                 .ToDictionary(kv => kv.Key, kv => kv.Value);
             return data;
         }

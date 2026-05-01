@@ -4,7 +4,6 @@ using Avalonia.Media;
 using MxPlot.Core;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text.RegularExpressions;
 
 namespace MxPlot.UI.Avalonia.Overlays.Shapes
@@ -32,11 +31,15 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// </summary>
         public IMatrixData? DataContext { get; set; }
 
-        /// <summary>Raised when the user selects "Edit…" from the context menu.</summary>
-        public event EventHandler? EditRequested;
+        /// <summary>
+        /// Menu entry for "Edit…".
+        /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
+        /// the entry is hidden when no handler is assigned.
+        /// </summary>
+        public OverlayMenuEntry Edit { get; } = new("Edit…");
 
-        /// <summary>Double-click opens the text editor rather than the pen editor.</summary>
-        public override void OnDoubleClicked() => EditRequested?.Invoke(this, EventArgs.Empty);
+        /// <summary>Double-click invokes the <see cref="Edit"/> handler rather than the pen editor.</summary>
+        public override void OnDoubleClicked() => Edit.Handler?.Invoke();
 
         public TextObject() { PenColor = Colors.Black; }
 
@@ -143,12 +146,11 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp) =>
             GetResizeCursor(handle, vp);
 
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
+        public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
-            yield return new OverlayMenuItem("Edit\u2026",
-                () => EditRequested?.Invoke(this, EventArgs.Empty));
-            yield return OverlayMenuItem.Separator();
-            foreach (var item in base.GetContextMenuItems() ?? Enumerable.Empty<OverlayMenuItem>())
+            yield return Edit;
+            yield return OverlayMenuEntry.Separator();
+            foreach (var item in base.GetContextMenuItems() ?? [])
                 yield return item;
         }
     }

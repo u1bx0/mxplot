@@ -145,9 +145,9 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp) =>
             GetResizeCursor(handle, vp);
 
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems()
+        public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
-            yield return OverlayMenuItem.Separator();
+            yield return OverlayMenuEntry.Separator();
             foreach (var item in base.GetContextMenuItems() ?? [])
                 yield return item;
         }

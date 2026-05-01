@@ -106,6 +106,42 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
+        // ── Public orthogonal-view control ────────────────────────────────────────
+
+        /// <summary>
+        /// Returns the <see cref="AxisTracker"/> that controls the specified axis,
+        /// or <c>null</c> if no tracker with that name exists.
+        /// </summary>
+        /// <param name="axisName">The <see cref="Axis.Name"/> of the target axis.</param>
+        public AxisTracker? GetAxisTracker(string axisName)
+            => _axisTrackers.TryGetValue(axisName, out var t) ? t : null;
+
+        /// <summary>
+        /// Activates the orthogonal side views for the specified axis, or deactivates them
+        /// when <paramref name="axisName"/> is <c>null</c>.
+        /// Equivalent to toggling the 🧊 freeze button on the corresponding <see cref="AxisTracker"/>.
+        /// </summary>
+        /// <param name="axisName">
+        /// The <see cref="Axis.Name"/> of the axis to freeze, or <c>null</c> to deactivate.
+        /// </param>
+        public void SetOrthogonalView(string? axisName)
+        {
+            if (axisName == null)
+            {
+                foreach (var t in _axisTrackers.Values)
+                    t.FreezeButton.IsChecked = false;
+                return;
+            }
+            if (_axisTrackers.TryGetValue(axisName, out var tracker))
+                tracker.FreezeButton.IsChecked = true;
+        }
+
+        /// <summary>
+        /// Gets the name of the axis currently shown in orthogonal side views,
+        /// or <c>null</c> when no orthogonal view is active.
+        /// </summary>
+        public string? OrthogonalViewAxisName => _orthoController.ActiveAxisName;
+
         // ── XY Projection (Z-direction) ─ opens a separate MatrixPlotter window ──
 
         // XY (Z-direction) projection window opened via ProjectionSelector

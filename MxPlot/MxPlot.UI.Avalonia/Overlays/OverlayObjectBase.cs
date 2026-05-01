@@ -5,6 +5,7 @@ using MxPlot.Core;
 using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Overlays
 {
@@ -96,35 +97,29 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         // ── Context menu ──────────────────────────────────────────────────────
 
-        public virtual IEnumerable<OverlayMenuItem>? GetContextMenuItems()
+        public virtual IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
-            yield return new OverlayMenuItem("Snap Mode", new List<OverlayMenuItem>
+            yield return new OverlayMenuEntry("Snap Mode", new List<OverlayMenuEntry>
             {
-                new("None", () => SnapMode = PixelSnapMode.None,   SnapMode == PixelSnapMode.None, tooltip: "Move freely without snapping"),
-                new("Pixel Center", () => SnapMode = PixelSnapMode.Center, SnapMode == PixelSnapMode.Center, tooltip: "Snap to pixel centers"),
-                new("Pixel Edge",  () => SnapMode = PixelSnapMode.Corner, SnapMode == PixelSnapMode.Corner, tooltip: "Snap to pixel edges"),
-                new("Both", () => SnapMode = PixelSnapMode.Both,   SnapMode == PixelSnapMode.Both, tooltip: "Snap to both pixel centers and edges"),
+                new("None",         () => SnapMode = PixelSnapMode.None,   SnapMode == PixelSnapMode.None,   icon: null, tooltip: "Move freely without snapping"),
+                new("Pixel Center", () => SnapMode = PixelSnapMode.Center, SnapMode == PixelSnapMode.Center, icon: null, tooltip: "Snap to pixel centers"),
+                new("Pixel Edge",   () => SnapMode = PixelSnapMode.Corner, SnapMode == PixelSnapMode.Corner, icon: null, tooltip: "Snap to pixel edges"),
+                new("Both",         () => SnapMode = PixelSnapMode.Both,   SnapMode == PixelSnapMode.Both,   icon: null, tooltip: "Snap to both pixel centers and edges"),
             }.AsReadOnly(), icon: MenuIcons.PushPin);
-            yield return new OverlayMenuItem("Copy", OnCopyRequested, icon: MenuIcons.Copy, tooltip: "Copy overlay to clipboard");
-            yield return new OverlayMenuItem("Paste", OnPasteRequested, icon: MenuIcons.Paste, tooltip: "Paste overlay from clipboard");
-            yield return new OverlayMenuItem("Properties\u2026", RequestPenEdit, icon: MenuIcons.Edit, tooltip: "Open overlay property dialog");
+            yield return new OverlayMenuEntry("Copy",  () => CopyRequested?.Invoke(this, EventArgs.Empty),  icon: MenuIcons.Copy,  tooltip: "Copy overlay to clipboard");
+            yield return new OverlayMenuEntry("Paste", () => PasteRequested?.Invoke(this, EventArgs.Empty), icon: MenuIcons.Paste, tooltip: "Paste overlay from clipboard");
+            yield return PenEdit;
             if (!IsDeletable) yield break;
-            yield return new OverlayMenuItem("Delete", OnDeleteRequested, icon: MenuIcons.TrashCan, tooltip: "Delete this overlay");
+            yield return new OverlayMenuEntry("Delete", () => DeleteRequested?.Invoke(this, EventArgs.Empty), icon: MenuIcons.TrashCan, tooltip: "Delete this overlay");
         }
 
         public event EventHandler? DeleteRequested;
-        protected virtual void OnDeleteRequested() =>
-            DeleteRequested?.Invoke(this, EventArgs.Empty);
 
         /// <summary>Raised when the user selects "Copy" from the context menu.</summary>
         public event EventHandler? CopyRequested;
-        private void OnCopyRequested() =>
-            CopyRequested?.Invoke(this, EventArgs.Empty);
 
         /// <summary>Raised when the user selects "Paste" from the context menu.</summary>
         public event EventHandler? PasteRequested;
-        private void OnPasteRequested() =>
-            PasteRequested?.Invoke(this, EventArgs.Empty);
 
         // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -164,18 +159,19 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         // ── Pen editor ────────────────────────────────────────────────────────
 
-        /// <summary>Raised when the user requests the pen-property editor.</summary>
-        public event EventHandler? PenEditRequested;
-
-        /// <summary>Fires <see cref="PenEditRequested"/>.</summary>
-        public void RequestPenEdit() => PenEditRequested?.Invoke(this, EventArgs.Empty);
+        /// <summary>
+        /// Menu entry for the "Properties…" pen-editor dialog.
+        /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
+        /// the entry is hidden when no handler is assigned.
+        /// </summary>
+        public OverlayMenuEntry PenEdit { get; } = new("Properties\u2026", icon: MenuIcons.Edit, tooltip: "Open overlay property dialog");
 
         /// <summary>
         /// Called when the user double-clicks this object.
-        /// The default implementation opens the pen editor (<see cref="RequestPenEdit"/>).
+        /// The default implementation invokes the <see cref="PenEdit"/> handler.
         /// Override to provide a different action (e.g. <see cref="Shapes.TextObject"/> opens the text editor).
         /// </summary>
-        public virtual void OnDoubleClicked() => RequestPenEdit();
+        public virtual void OnDoubleClicked() => PenEdit.Handler?.Invoke();
 
         /// <summary>
         /// Returns an approximate world-coordinate center used to position floating editor windows.

@@ -50,7 +50,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double ItemH = 20;        // textbox height (MinHeight=0 required)
 
         // ── Controls ──────────────────────────────────────────────────────────
-        private readonly Button _modeBtn;     // cycles Fixed → Auto/Current → All on click
+        private readonly Button _modeBtn;     // shows mode-picker flyout on click
         private readonly TextBox _minBox;
         private readonly TextBox _maxBox;
         private readonly Button _searchMinBtn;
@@ -110,7 +110,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 BorderBrush = new SolidColorBrush(Color.FromArgb(120, 160, 160, 160)),
                 BorderThickness = new Thickness(1),
             };
-            ToolTip.SetTip(_modeBtn, "Automatic min/max from current frame");
+            ToolTip.SetTip(_modeBtn, "Click to select value range mode");
+            _modeBtn.ContextMenu = new ContextMenu();
 
             _minBox = MakeTextBox();
             _maxBox = MakeTextBox();
@@ -121,25 +122,12 @@ namespace MxPlot.UI.Avalonia.Controls
             _searchMaxBtn = MakeSearchBtn(isMin: false, "Find max value in current frame");
             
             // ── Wire events ───────────────────────────────────────────────────
-            _modeBtn.Click += (_, _) => SetMode(_mode switch
-            {
-                ValueRangeMode.Fixed   => ValueRangeMode.Current,
-                ValueRangeMode.Current => _isMultiFrame ? ValueRangeMode.All : (_roiAvailable ? ValueRangeMode.Roi : ValueRangeMode.Fixed),
-                ValueRangeMode.All     => _roiAvailable ? ValueRangeMode.Roi : ValueRangeMode.Fixed,
-                _                      => ValueRangeMode.Fixed,   // Roi → Fixed
-            });
+            _modeBtn.Click += (_, _) => OpenModePopup();
             _searchMinBtn.Click += (_, _) => SearchMinRequested?.Invoke(this, EventArgs.Empty);
             _searchMaxBtn.Click += (_, _) => SearchMaxRequested?.Invoke(this, EventArgs.Empty);
 
-            _minBox.GotFocus    += OnMinGotFocus;
-            _minBox.LostFocus   += OnMinLostFocus;
-            _minBox.KeyDown     += OnMinKeyDown;
-            _minBox.TextChanged += OnMinTextChanged;
-
-            _maxBox.GotFocus    += OnMaxGotFocus;
-            _maxBox.LostFocus   += OnMaxLostFocus;
-            _maxBox.KeyDown     += OnMaxKeyDown;
-            _maxBox.TextChanged += OnMaxTextChanged;
+            RegisterBoxEvents(_minBox, isMin: true,  nextFocus: _maxBox);
+            RegisterBoxEvents(_maxBox, isMin: false, nextFocus: _modeBtn);
 
             // ── Layout ────────────────────────────────────────────────────────
             // Grid with Star columns for Min/Max TextBoxes so they shrink with the window.
@@ -214,86 +202,66 @@ namespace MxPlot.UI.Avalonia.Controls
             _updating = false;
         }
 
-        // ── GotFocus: switch to full-precision edit format ────────────────────
+        // ── Box event wiring ──────────────────────────────────────────────────
 
-        private void OnMinGotFocus(object? s, GotFocusEventArgs e)
+        /// <summary>
+        /// Attaches all keyboard/focus/text events for a Min or Max TextBox.
+        /// <paramref name="isMin"/> selects which backing field to read/write.
+        /// <paramref name="nextFocus"/> is the control that receives focus on Enter.
+        /// </summary>
+        private void RegisterBoxEvents(TextBox box, bool isMin, Control nextFocus)
         {
-            if (!IsFixedRange) return;
-            if (!double.IsNaN(_lastMin))
+            box.GotFocus += (_, _) =>
             {
-                _updating = true;
-                _minBox.Text = _lastMin.ToString("G10");
-                _updating = false;
-            }
-            Dispatcher.UIThread.Post(() => _minBox.SelectAll());
-        }
+                if (!IsFixedRange) return;
+                double val = isMin ? _lastMin : _lastMax;
+                if (!double.IsNaN(val))
+                {
+                    _updating = true;
+                    box.Text = val.ToString("G10");
+                    _updating = false;
+                }
+                Dispatcher.UIThread.Post(() => box.SelectAll());
+            };
 
-        private void OnMaxGotFocus(object? s, GotFocusEventArgs e)
-        {
-            if (!IsFixedRange) return;
-            if (!double.IsNaN(_lastMax))
+            box.KeyDown += (_, e) =>
             {
-                _updating = true;
-                _maxBox.Text = _lastMax.ToString("G10");
-                _updating = false;
-            }
-            Dispatcher.UIThread.Post(() => _maxBox.SelectAll());
-        }
+                if (e.Key == Key.Enter)  { nextFocus.Focus(); e.Handled = true; }
+                else if (e.Key == Key.Escape) { Revert(); nextFocus.Focus(); e.Handled = true; }
+                else if ((e.Key == Key.Up || e.Key == Key.Down) && IsFixedRange)
+                {
+                    if (NudgeDigitAtCaret(box, e.Key == Key.Up ? +1 : -1))
+                    {
+                        if (double.TryParse(box.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double v))
+                        {
+                            if (isMin) _lastMin = v; else _lastMax = v;
+                            RangeChanged?.Invoke(this, (_lastMin, _lastMax));
+                        }
+                        e.Handled = true;
+                    }
+                }
+            };
 
-        // ── KeyDown: Enter commits, Escape cancels ────────────────────────────
-
-        private void OnMinKeyDown(object? s, KeyEventArgs e)
-        {
-            if (e.Key == Key.Enter) { _maxBox.Focus(); e.Handled = true; }      // LostFocus will reformat
-            else if (e.Key == Key.Escape) { Revert(); _maxBox.Focus(); e.Handled = true; }
-        }
-
-        private void OnMaxKeyDown(object? s, KeyEventArgs e)
-        {
-            if (e.Key == Key.Enter) { _modeBtn.Focus(); e.Handled = true; }     // LostFocus will reformat
-            else if (e.Key == Key.Escape) { Revert(); _modeBtn.Focus(); e.Handled = true; }
-        }
-
-        // ── TextChanged: live update while typing ─────────────────────────────────
-
-        private void OnMinTextChanged(object? s, TextChangedEventArgs e)
-        {
-            if (!IsFixedRange || _updating) return;
-            if (!double.TryParse(_minBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double vMin)) return;
-            _lastMin = vMin;
-            RangeChanged?.Invoke(this, (_lastMin, _lastMax));
-        }
-
-        private void OnMaxTextChanged(object? s, TextChangedEventArgs e)
-        {
-            if (!IsFixedRange || _updating) return;
-            if (!double.TryParse(_maxBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double vMax)) return;
-            _lastMax = vMax;
-            RangeChanged?.Invoke(this, (_lastMin, _lastMax));
-        }
-
-        private void OnMinLostFocus(object? s, RoutedEventArgs e)
-        {
-            if (!IsFixedRange || _updating) return;
-            if (double.TryParse(_minBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
+            box.TextChanged += (_, _) =>
             {
-                _updating = true;
-                _minBox.Text = FormatValue(_lastMin);
-                _updating = false;
-            }
-            else Revert();
-        }
+                if (!IsFixedRange || _updating) return;
+                if (!double.TryParse(box.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double v)) return;
+                if (isMin) _lastMin = v; else _lastMax = v;
+                RangeChanged?.Invoke(this, (_lastMin, _lastMax));
+            };
 
-        private void OnMaxLostFocus(object? s, RoutedEventArgs e)
-        {
-            if (!IsFixedRange || _updating) return;
-            if (double.TryParse(_maxBox.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
+            box.LostFocus += (_, _) =>
             {
-                _updating = true;
-                _maxBox.Text = FormatValue(_lastMax);
-                _updating = false;
-            }
-            else Revert();
+                if (!IsFixedRange || _updating) return;
+                if (double.TryParse(box.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out _))
+                {
+                    double val = isMin ? _lastMin : _lastMax;
+                    _updating = true;
+                    box.Text = FormatValue(val);
+                    _updating = false;
+                }
+                else Revert();
+            };
         }
 
         // ── Revert ───────────────────────────────────────────────────────────────
@@ -367,7 +335,73 @@ namespace MxPlot.UI.Avalonia.Controls
             ToolTip.SetTip(_modeBtn, tip);
         }
 
+        // ── Mode picker flyout ────────────────────────────────────────────────
+
+        private void OpenModePopup()
+        {
+            var menu = _modeBtn.ContextMenu;
+            if (menu == null) return;
+
+            menu.Items.Clear();
+
+            void AddItem(ValueRangeMode mode, string label, string description)
+            {
+                var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+                header.Children.Add(new TextBlock { Text = label, FontSize = 11, MinWidth = 52 });
+                header.Children.Add(new TextBlock
+                {
+                    Text = description,
+                    FontSize = 10,
+                    Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)),
+                });
+                var item = new MenuItem { Header = header };
+                item.Click += (_, _) => SetMode(mode);
+                menu.Items.Add(item);
+            }
+
+            AddItem(ValueRangeMode.Fixed, "Fixed", "User-specified min/max");
+            AddItem(ValueRangeMode.Current,
+                _isMultiFrame ? "Current" : "Auto",
+                _isMultiFrame ? "Current frame min/max" : "Automatic min/max");
+            if (_isMultiFrame)
+                AddItem(ValueRangeMode.All, _isImperfect ? "All*" : "All", "Global min/max across all frames");
+            if (_roiAvailable)
+                AddItem(ValueRangeMode.Roi, "ROI", "Value range from designated ROI overlay");
+
+            menu.Open(_modeBtn);
+        }
+
         // ── Helpers ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Increments or decrements the decimal digit under the caret in <paramref name="box"/>
+        /// by <paramref name="delta"/> (+1 or -1), with no carry/borrow across digits.
+        /// Returns <c>true</c> if a digit was found and modified.
+        /// </summary>
+        private static bool NudgeDigitAtCaret(TextBox box, int delta)
+        {
+            var text = box.Text ?? string.Empty;
+            int caret = box.CaretIndex;
+
+            // Clamp caret to valid range; treat position after last char as last char.
+            if (text.Length == 0) return false;
+            int pos = Math.Clamp(caret > 0 ? caret - 1 : 0, 0, text.Length - 1);
+
+            // Walk left from caret to find the nearest digit.
+            while (pos >= 0 && !char.IsDigit(text[pos])) pos--;
+            if (pos < 0) return false;
+
+            char original = text[pos];
+            int digit = original - '0';
+            // Clamp without carry: 9+1 stays 9, 0-1 stays 0.
+            digit = Math.Clamp(digit + delta, 0, 9);
+            if (digit == original - '0') return false; // no change (already at boundary)
+
+            var newText = string.Concat(text.AsSpan(0, pos), ((char)('0' + digit)).ToString(), text.AsSpan(pos + 1));
+            box.Text = newText;
+            box.CaretIndex = pos + 1;
+            return true;
+        }
         private static TextBox MakeTextBox() => new TextBox
         {
             // Width is controlled by the parent Grid's Star column (MinWidth..MaxWidth).

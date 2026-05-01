@@ -508,8 +508,8 @@ namespace MxPlot.UI.Avalonia.Controls
             double origW = _bitmap.PixelSize.Width * _zoom * ax;
             double origH = _bitmap.PixelSize.Height * _zoom * ay;
 
-            // Always nearest-neighbor to keep pixel-exact rendering at every zoom level.
-            var interpolation = BitmapInterpolationMode.None;
+            // Nearest-neighbor when magnifying (preserves sharp pixels); bilinear when minifying.
+            var interpolation = ChooseInterpolation(_bitmap.PixelSize.Width, _bitmap.PixelSize.Height, origW, origH);
 
             using (ctx.PushClip(new Rect(Bounds.Size)))
             using (ctx.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = interpolation }))
@@ -559,7 +559,8 @@ namespace MxPlot.UI.Avalonia.Controls
             double scaledW = origW * scale;
             double scaledH = origH * scale;
 
-            using (ctx.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = BitmapInterpolationMode.None }))
+            var interpolation = ChooseInterpolation(_bitmap.PixelSize.Width, _bitmap.PixelSize.Height, width, height);
+            using (ctx.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = interpolation }))
             {
                 if (Transform == ViewTransform.None)
                 {
@@ -1063,22 +1064,16 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <see cref="MatrixData"/> is set; otherwise returns fractional pixel indices.
         /// Y increases upward: screen row 0 (top) maps to <c>YMax</c>,
         /// screen row <c>YCount-1</c> (bottom) maps to <c>YMin</c>.
-        /// Accounts for elastic pan offset during drag.
+        /// Accounts for <see cref="Transform"/>, zoom, and elastic pan offset.
         /// </summary>
         public Point ScreenToData(Point screenPos)
         {
             if (_bitmap == null || _zoom == 0) return screenPos;
-            var (ax, ay) = GetAspectScales();
-            double bmpW = _bitmap.PixelSize.Width * _zoom * ax;
-            double bmpH = _bitmap.PixelSize.Height * _zoom * ay;
-            double rx = GetRenderTrans(_transX, bmpW, Bounds.Width,  true);
-            double ry = GetRenderTrans(_transY, bmpH, Bounds.Height, false);
-            double pixelX = (screenPos.X - rx) / (_zoom * ax);
-            double pixelY = (screenPos.Y - ry) / (_zoom * ay);
+            var (bx, by) = ScreenToBitmapPixel(screenPos);
             var md = MatrixData;
             if (md != null && md.XStep != 0 && md.YStep != 0)
-                return new Point(md.XMin + (pixelX - 0.5) * md.XStep, md.YMax - (pixelY - 0.5) * md.YStep);
-            return new Point(pixelX, pixelY);
+                return new Point(md.XMin + (bx - 0.5) * md.XStep, md.YMax - (by - 0.5) * md.YStep);
+            return new Point(bx, by);
         }
 
         /// <summary>
@@ -1088,29 +1083,39 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <see cref="MatrixData"/> is set; otherwise accepts fractional pixel indices.
         /// Y increases upward: <c>YMax</c> maps to screen row 0 (top),
         /// <c>YMin</c> maps to screen row <c>YCount-1</c> (bottom).
-        /// Accounts for elastic pan offset during drag.
+        /// Accounts for <see cref="Transform"/>, zoom, and elastic pan offset.
         /// </summary>
         public Point DataToScreen(Point dataPos)
         {
             if (_bitmap == null) return dataPos;
             var (ax, ay) = GetAspectScales();
-            double bmpW = _bitmap.PixelSize.Width * _zoom * ax;
-            double bmpH = _bitmap.PixelSize.Height * _zoom * ay;
-            double rx = GetRenderTrans(_transX, bmpW, Bounds.Width,  true);
-            double ry = GetRenderTrans(_transY, bmpH, Bounds.Height, false);
+            var (effW, effH) = GetEffectiveBmpDims();
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             var md = MatrixData;
-            double pixelX, pixelY;
+            double bx, by;
             if (md != null && md.XStep != 0 && md.YStep != 0)
             {
-                pixelX = (dataPos.X - md.XMin) / md.XStep + 0.5;
-                pixelY = (md.YMax - dataPos.Y) / md.YStep + 0.5;
+                bx = (dataPos.X - md.XMin) / md.XStep + 0.5;
+                by = (md.YMax - dataPos.Y) / md.YStep + 0.5;
             }
             else
             {
-                pixelX = dataPos.X;
-                pixelY = dataPos.Y;
+                bx = dataPos.X;
+                by = dataPos.Y;
             }
-            return new Point(pixelX * _zoom * ax + rx, pixelY * _zoom * ay + ry);
+            // Inverse of ScreenToBitmapPixel — one case per ViewTransform.
+            // effW/effH are already swapped for Rotate90CW/CCW/Transpose by GetEffectiveBmpDims.
+            return Transform switch
+            {
+                ViewTransform.FlipH      => new Point(rx + effW - bx * _zoom * ax, by * _zoom * ay + ry),
+                ViewTransform.FlipV      => new Point(bx * _zoom * ax + rx, ry + effH - by * _zoom * ay),
+                ViewTransform.Rotate180  => new Point(rx + effW - bx * _zoom * ax, ry + effH - by * _zoom * ay),
+                ViewTransform.Rotate90CW  => new Point(rx + effW - by * _zoom * ay, bx * _zoom * ax + ry),
+                ViewTransform.Rotate90CCW => new Point(by * _zoom * ay + rx, ry + effH - bx * _zoom * ax),
+                ViewTransform.Transpose  => new Point(by * _zoom * ay + rx, bx * _zoom * ax + ry),
+                _ => new Point(bx * _zoom * ax + rx, by * _zoom * ay + ry),
+            };
         }
 
         // ── Modifier debug overlay ────────────────────────────────────────────
@@ -1385,6 +1390,16 @@ namespace MxPlot.UI.Avalonia.Controls
                              or ViewTransform.Transpose
                 ? (h, w) : (w, h);
         }
+
+        /// <summary>
+        /// Returns the appropriate <see cref="BitmapInterpolationMode"/> for rendering a bitmap
+        /// at the given destination size.
+        /// Magnification (destination larger than source): nearest-neighbor for pixel-exact output.
+        /// Minification (destination smaller than source): low-quality (bilinear) for smoother downscale.
+        /// </summary>
+        private static BitmapInterpolationMode ChooseInterpolation(int srcW, int srcH, double dstW, double dstH)
+            => (dstW >= srcW || dstH >= srcH) ? BitmapInterpolationMode.None
+                                              : BitmapInterpolationMode.LowQuality;
 
         /// <summary>
         /// Returns the aspect scaling factors derived from <see cref="MatrixData"/> step sizes:

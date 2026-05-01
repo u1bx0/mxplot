@@ -1,7 +1,7 @@
 ﻿# MatrixPlotter — Basic Usage Guide
 
 **Created**: 2026-04-22  
-**Updated**: 2026-04-22  
+**Updated**: 2026-04-30
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 ---
@@ -62,14 +62,28 @@ plotter.Refresh();   // safe to call from any thread
 
 ## Replacing the Data
 
-Assign new data through the `ViewModel`:
+There are two supported routes to replace the displayed data:
+
+**Via `ViewModel` (recommended for MVVM)**
 
 ```csharp
 if (plotter.ViewModel is { } vm)
     vm.MatrixData = newData;
 ```
 
-This triggers `SetMatrixData` internally, which rebuilds axis trackers, resets frame index, and reapplies value range defaults.
+**Via `MainView.MatrixData` (code-behind)**
+
+```csharp
+plotter.MainView.MatrixData = newData;
+```
+
+Both paths trigger the same internal synchronisation: axis trackers are rebuilt,
+`FrameIndex` is reset to 0, value-range mode is reapplied (Fixed mode is preserved;
+other modes revert to the appropriate default), and the `MatrixDataChanged` event fires.
+
+> **Note**: `BottomView.MatrixData` and `RightView.MatrixData` are managed by the
+> orthogonal-view controller. Direct assignment to these views throws
+> `InvalidOperationException` by design.
 
 ---
 

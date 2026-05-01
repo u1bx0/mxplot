@@ -46,6 +46,9 @@
 - **[MatrixPlotter Basic Usage Guide](./MatrixPlotter_Usage_Guide.md)**  
   How to open a `MatrixPlotter` window, refresh data, link plotters, and integrate with non-Avalonia hosts.
 
+- **[MxView Coordinate Systems Guide](./MxView_CoordinateSystems_Guide.md)**  
+  Explains the three coordinate layers used by `MxView` (Screen, World/bitmap-pixel, Data/physical), their axis conventions, and how to convert between them using `ScreenToData` / `DataToScreen`. Covers overlay coordinate conventions and `ViewTransform` handling.
+
 - **[MatrixPlotter Metadata Format Guide](./MatrixPlotter_MetadataFormat_Guide.md)** ([日本語](./MatrixPlotter_MetadataFormat_Guide_ja.md))  
   Metadata key conventions used by `MatrixPlotter` for persisting view settings (`mxplot.vr.*`, etc.).
 

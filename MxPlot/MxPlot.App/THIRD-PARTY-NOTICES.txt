@@ -6,6 +6,7 @@ This project (MxPlot.App) incorporates and uses the following third-party
 software. We are grateful to the authors and contributors of these projects
 for their open-source contributions.
 
+
 -------------------------------------------------------------------------
 1. Avalonia UI and related packages
 -------------------------------------------------------------------------

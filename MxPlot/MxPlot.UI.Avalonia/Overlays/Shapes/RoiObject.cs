@@ -257,7 +257,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         // ── No context menu, no pen editor ────────────────────────────────────
 
-        public override IEnumerable<OverlayMenuItem>? GetContextMenuItems() => null;
+        public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems() => null;
 
         /// <summary>
         /// Raised when the user double-clicks the ROI to request a direct size-edit dialog.

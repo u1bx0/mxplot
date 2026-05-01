@@ -50,14 +50,47 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Fired each time the auto value range is computed. Carries (Min, Max).</summary>
         public event EventHandler<(double Min, double Max)>? AutoRangeComputed;
 
+        /// <summary>
+        /// Raised on the UI thread whenever <see cref="MatrixData"/> changes.
+        /// <para>
+        /// <see cref="MatrixPlotter"/> subscribes to this event so that setting
+        /// <c>plotter.MainView.MatrixData = data</c> automatically triggers the same
+        /// axis-tracker / range-bar / orthogonal-view synchronisation as
+        /// <see cref="MatrixPlotter.SetMatrixData"/>.
+        /// </para>
+        /// </summary>
+        public event EventHandler<IMatrixData?>? MatrixDataChanged;
+
         /// <summary>Raised after content is successfully copied to the clipboard via Ctrl+C.</summary>
         public event EventHandler<string>? CopiedToClipboard;
 
         /// <summary>Raised when the user chooses Crop from the surface context menu.</summary>
         public event EventHandler? CropRequested;
 
+        /// <summary>
+        /// Controls whether the built-in surface context menu (Copy Image, Crop, Overlay submenu)
+        /// is shown when right-clicking on an empty area.
+        /// Defaults to <c>false</c>. Set to <c>true</c> in <see cref="Views.MatrixPlotter"/> to
+        /// enable the full context menu for the main view.
+        /// </summary>
+        public bool EnableBuiltInContextMenu { get; set; } = false;
+
         /// <summary>Returns the computed value range for the current frame.</summary>
         public (double Min, double Max) ScanCurrentFrameRange() => _surface.ScanCurrentFrameRange();
+
+        /// <summary>
+        /// Converts a screen position (relative to this <see cref="MxView"/>) to data coordinates.
+        /// Accounts for <see cref="Transform"/> (rotation/flip), zoom, and pan.
+        /// Returns (XMin..XMax, YMin..YMax) scaled values when <see cref="MatrixData"/> is set;
+        /// otherwise returns fractional pixel indices. Y increases upward (YMax = top, YMin = bottom).
+        /// </summary>
+        public Point ScreenToData(Point screenPos) => _surface.ScreenToData(screenPos);
+
+        /// <summary>
+        /// Converts data coordinates to a screen position (relative to this <see cref="MxView"/>).
+        /// Inverse of <see cref="ScreenToData"/>. Accounts for <see cref="Transform"/>, zoom, and pan.
+        /// </summary>
+        public Point DataToScreen(Point dataPos) => _surface.DataToScreen(dataPos);
 
         // ── Avalonia Styled Properties ────────────────────────────────────────
 
@@ -74,7 +107,14 @@ namespace MxPlot.UI.Avalonia.Controls
         public IMatrixData? MatrixData
         {
             get => GetValue(MatrixDataProperty);
-            set => SetValue(MatrixDataProperty, value);
+            set
+            {
+                if (_isDependentView)
+                    throw new InvalidOperationException(
+                        "MatrixData cannot be set directly on a dependent view. " +
+                        "Its data is managed by OrthogonalViewController.");
+                SetValue(MatrixDataProperty, value);
+            }
         }
 
         public LookupTable? Lut
@@ -304,6 +344,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly BusyIndicator _busyIndicator;
 
         private bool _syncingScrollBars;
+        private bool _isDependentView;
 
         /// <summary>
         /// Manages user overlay objects drawn on this view.
@@ -318,6 +359,19 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         internal PixelPoint SurfacePointToScreen(Point surfaceLocalPos) =>
             _surface.PointToScreen(surfaceLocalPos);
+
+        /// <summary>
+        /// Marks this view as a dependent view managed by an external controller (e.g. <see cref="OrthogonalViewController"/>).
+        /// Once set, direct assignment to <see cref="MatrixData"/> from outside the assembly throws
+        /// <see cref="InvalidOperationException"/>. Use <see cref="SetMatrixDataInternal"/> for controller-internal updates.
+        /// </summary>
+        internal void SetAsDependentView() => _isDependentView = true;
+
+        /// <summary>
+        /// Sets <see cref="MatrixData"/> bypassing the dependent-view guard.
+        /// For use by internal controllers (e.g. <see cref="OrthogonalViewController"/>) only.
+        /// </summary>
+        internal void SetMatrixDataInternal(IMatrixData? value) => SetValue(MatrixDataProperty, value);
 
         // ── Constructor (builds layout in code) ───────────────────────────────
 
@@ -408,6 +462,7 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 _surface.Lut = Lut;        // sync LUT first so AllocateBitmap doesn't bail on null
                 _surface.MatrixData = MatrixData;
+                MatrixDataChanged?.Invoke(this, MatrixData);
             }
             else if (change.Property == LutProperty) _surface.Lut = Lut;
             else if (change.Property == FrameIndexProperty) _surface.FrameIndex = FrameIndex;
@@ -561,7 +616,8 @@ namespace MxPlot.UI.Avalonia.Controls
             var thumb = RenderToBitmap(tw, th);
 
             var dlg = new CopyImageDialog(thumb, naturalW, naturalH, displayW, displayH,
-                refreshPreview: ov => RenderToBitmap(tw, th, ov));
+                refreshPreview: ov => RenderToBitmap(tw, th, ov),
+                showOverlaysOption: OverlayManager.Objects.Count > 0);
             await dlg.ShowDialog(owner);
             if (dlg.Result == null) return;
 
@@ -606,6 +662,9 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public static byte[]? LastCopiedPng { get; private set; }
 
+        /// <summary>Sets <see cref="LastCopiedPng"/> from within the assembly (e.g. region copy).</summary>
+        internal static void SetLastCopiedPng(byte[]? bytes) => LastCopiedPng = bytes;
+
         /// <summary>
         /// Copies the current frame data to the clipboard as delimited text.
         /// </summary>
@@ -647,8 +706,12 @@ namespace MxPlot.UI.Avalonia.Controls
             bool hasObjectItems = false;
             foreach (var oi in OverlayManager.GetContextMenuItems(pos))
             {
-                menu.Items.Add(BuildMenuItem(oi));
-                hasObjectItems = true;
+                var item = BuildMenuItem(oi);
+                if (item != null)
+                {
+                    menu.Items.Add(item);
+                    hasObjectItems = true;
+                }
             }
             if (hasObjectItems)
             {
@@ -657,6 +720,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 e.Handled = true;
                 return;
             }
+
+            if (!EnableBuiltInContextMenu) return;
 
             // ② Copy image to clipboard
             var copyItem = new MenuItem { Header = "Copy Image\u2026", FontSize = 11 };
@@ -693,9 +758,10 @@ namespace MxPlot.UI.Avalonia.Controls
             e.Handled = true;
         }
 
-        private static Control BuildMenuItem(OverlayMenuItem oi)
+        private static Control? BuildMenuItem(OverlayMenuEntry oi)
         {
             if (oi.IsSeparator) return new Separator();
+            if (!oi.IsVisible) return null;
 
             var item = new MenuItem { Header = oi.Header, FontSize = 11 };
             if (oi.Icon != null)
@@ -705,9 +771,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
             if (oi.Children != null)
             {
-                // Submenu: populate child items recursively
                 foreach (var child in oi.Children)
-                    item.Items.Add(BuildMenuItem(child));
+                {
+                    var built = BuildMenuItem(child);
+                    if (built != null) item.Items.Add(built);
+                }
             }
             else
             {
@@ -716,7 +784,7 @@ namespace MxPlot.UI.Avalonia.Controls
                     item.ToggleType = MenuItemToggleType.Radio;
                     item.IsChecked = true;
                 }
-                item.Click += (_, _) => oi.Click();
+                item.Click += (_, _) => oi.Handler?.Invoke();
             }
             return item;
         }

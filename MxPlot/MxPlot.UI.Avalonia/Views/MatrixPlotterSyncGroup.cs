@@ -197,10 +197,19 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void OnPlotterClosed(object? sender, EventArgs e)
         {
-            if (sender is MatrixPlotter p)
+            if (sender is not MatrixPlotter closed) return;
+
+            // If the closing plotter had an active Sync Crop, cancel all remaining members
+            // to avoid orphaned Leader/Follower ROI panels in the surviving windows.
+            bool closedHadCrop = closed.HasActiveCropAction;
+            Unsubscribe(closed);
+            _snapshots.Remove(closed);
+            _plotters.Remove(closed);
+
+            if (closedHadCrop)
             {
-                Unsubscribe(p);
-                _snapshots.Remove(p);
+                foreach (var p in _plotters)
+                    p.CancelActiveCropAction();
             }
         }
 
@@ -210,6 +219,10 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_disposed) return;
             _disposed = true;
+            // Cancel any active Sync Crop on all members before disconnecting events,
+            // so neither Leader nor Follower panels are left orphaned after Unsync.
+            foreach (var p in _plotters)
+                p.CancelActiveCropAction();
             foreach (var p in _plotters)
                 Unsubscribe(p);
             _plotters.Clear();

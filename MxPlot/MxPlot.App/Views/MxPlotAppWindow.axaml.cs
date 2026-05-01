@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -162,15 +163,6 @@ namespace MxPlot.App.Views
                         return;
                     }
 
-                    // Remove hidden items from the ListBox selection synchronously.
-                    var toDeselect = _windowList.SelectedItems?
-                        .OfType<WindowListItemViewModel>()
-                        .Where(vm => !vm.IsWindowVisible)
-                        .ToList();
-                    if (toDeselect is { Count: > 0 })
-                        foreach (var h in toDeselect)
-                            _windowList.SelectedItems!.Remove(h);
-
                     var selected = _windowList.SelectedItems;
                     foreach (var item in ViewModel.ManagedWindows)
                         item.IsSelected = false;
@@ -201,6 +193,7 @@ namespace MxPlot.App.Views
             // Double-click: toggle show/hide for the selected window.
             _windowList.DoubleTapped += (_, _) =>
             {
+                if (_isSyncActive) return;
                 if (_windowList.SelectedItem is WindowListItemViewModel item)
                     item.ToggleVisibility();
             };
@@ -243,12 +236,25 @@ namespace MxPlot.App.Views
                 }
             };
 
+            // Tile: after the command runs, deselect hidden items so only visible windows remain selected.
+            // Dispatcher.UIThread.Post ensures this runs after TileWindowsCommand.Execute() completes.
+            var tileBtn = this.FindControl<Button>("TileBtn");
+            if (tileBtn != null)
+            {
+                tileBtn.Click += (_, _) =>
+                    Avalonia.Threading.Dispatcher.UIThread.Post(DeselectHiddenItems);
+            }
+
             _syncBtn = this.FindControl<Button>("SyncBtn")!;
             _syncBtn.Click += (_, _) =>
             {
+                if (!_isSyncActive) DeselectHiddenItems();
                 if ((_windowList.SelectedItems?.Count ?? 0) >= 2)
                     SetSyncActive(!_isSyncActive);
             };
+
+            // ── Window list context menu (dynamic) ────────────────────────────
+            _windowList.ContextRequested += OnWindowListContextRequested;
 
             _toastPanel = this.FindControl<Border>("ToastPanel")!;
             _toastText = this.FindControl<TextBlock>("ToastText")!;
@@ -285,7 +291,7 @@ namespace MxPlot.App.Views
             // Enable/disable depending on clipboard/export availability when the flyout opens
             flyout.Opened += async (_, _) =>
             {
-                clipboardItem.IsEnabled = await ClipboardHasImageAsync();
+                clipboardItem.IsEnabled = await ClipboardHasUsableDataAsync();
                 exportItem.IsEnabled = ViewModel.HasExportableSelection;
                 exportItem.Header = ViewModel.HasMultiSelection
                     ? "Export selected as PNG\u2026"
@@ -904,6 +910,25 @@ namespace MxPlot.App.Views
             catch { return false; }
         }
 
+        private async Task<bool> ClipboardHasUsableDataAsync()
+        {
+            try
+            {
+                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+                if (clipboard == null) return false;
+                var formats = await clipboard.GetFormatsAsync();
+                if (formats == null) return false;
+                if (formats.Any(f => ClipboardImageFormats.Contains(f, StringComparer.OrdinalIgnoreCase)))
+                    return true;
+                // Also check for plain text (potential CSV)
+                return formats.Any(f =>
+                    f.Equals("Text", StringComparison.OrdinalIgnoreCase) ||
+                    f.Equals("text/plain", StringComparison.OrdinalIgnoreCase) ||
+                    f.Equals("public.utf8-plain-text", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { return false; }
+        }
+
         private async Task<Bitmap?> GetClipboardBitmapAsync()
         {
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
@@ -998,13 +1023,28 @@ namespace MxPlot.App.Views
 
         private async void HamburgerOpenFromClipboard_Click(object? sender, RoutedEventArgs e)
         {
+            // Try image first
             var bmp = await GetClipboardBitmapAsync();
-            if (bmp == null)
+            if (bmp != null)
             {
-                await ShowErrorAsync("No image found in clipboard.");
+                await OpenClipboardImageAsync(bmp);
                 return;
             }
 
+            // Try plain text → CSV
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            string? text = clipboard == null ? null : await clipboard.TryGetTextAsync();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                await OpenClipboardCsvAsync(text);
+                return;
+            }
+
+            await ShowErrorAsync("No image or CSV text found in clipboard.");
+        }
+
+        private async Task OpenClipboardImageAsync(Bitmap bmp)
+        {
             try
             {
                 int w = bmp.PixelSize.Width, h = bmp.PixelSize.Height;
@@ -1012,7 +1052,6 @@ namespace MxPlot.App.Views
                 var mode = await ShowClipboardLoadModeAsync(w, h);
                 if (mode == null) return;
 
-                // Extract raw RGBA pixels on UI thread (WriteableBitmap requires it)
                 byte[] raw;
                 int stride;
                 using (var wb = new WriteableBitmap(bmp.PixelSize, bmp.Dpi,
@@ -1036,6 +1075,43 @@ namespace MxPlot.App.Views
             {
                 bmp.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Tries to parse clipboard text as CSV (comma or tab separated).
+        /// Returns the parsed MatrixData and the detected separator, or null if parsing fails.
+        /// </summary>
+        private static (MxPlot.Core.MatrixData<double> Data, string Sep)? TryParseClipboardCsv(string text)
+        {
+            var lines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return null;
+
+            foreach (var sep in new[] { "\t", "," })
+            {
+                try
+                {
+                    var md = MxPlot.Core.IO.CsvHandler.CreateFrom<double>(lines, sep, flipY: true);
+                    // Require at least 2 columns or 2 rows to consider it a valid matrix
+                    if (md.XCount >= 1 && md.YCount >= 1 && (md.XCount >= 2 || md.YCount >= 2))
+                        return (md, sep);
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private async Task OpenClipboardCsvAsync(string text)
+        {
+            var result = await Task.Run(() => TryParseClipboardCsv(text));
+            if (result == null)
+            {
+                await ShowErrorAsync("Clipboard text could not be parsed as CSV (comma or tab separated).");
+                return;
+            }
+            var (md, sep) = result.Value;
+            var sepLabel = sep == "\t" ? "TSV" : "CSV";
+            var title = $"Clipboard  ({sepLabel}  {md.XCount}\u00d7{md.YCount})";
+            MatrixPlotter.Create(md, title: title).Show();
         }
 
         /// <summary>Shows a dialog asking whether to load the clipboard image as Grayscale or Color Channels.</summary>
@@ -1368,14 +1444,17 @@ namespace MxPlot.App.Views
                 _syncBtn.ClearValue(Button.ForegroundProperty);
                 Resources["WindowListSelectedBorder"] = new SolidColorBrush(Color.Parse("#E57373"));
 
+                // Deselect hidden items and non-MatrixPlotter items before building the sync snapshot.
+                DeselectHiddenItems();
+
                 // Save selection so it can be restored on click during Sync.
-                // Only MatrixPlotter windows participate in sync; others are silently excluded.
+                // Only visible MatrixPlotter windows participate in sync.
                 _syncSelectionSnapshot = _windowList.SelectedItems?
                     .OfType<WindowListItemViewModel>()
-                    .Where(m => m.Window is MatrixPlotter)
+                    .Where(m => m.Window is MatrixPlotter && m.IsWindowVisible)
                     .ToList();
 
-                // Deselect any non-MatrixPlotter items so the list reflects the actual sync group.
+                // Deselect any remaining non-MatrixPlotter items.
                 var toDeselect = _windowList.SelectedItems?
                     .OfType<WindowListItemViewModel>()
                     .Where(m => m.Window is not MatrixPlotter)
@@ -1424,6 +1503,129 @@ namespace MxPlot.App.Views
 
                 HideRevertButton();
             }
+        }
+
+        // ── Window list context menu ──────────────────────────────────────
+
+        private void OnWindowListContextRequested(object? sender, ContextRequestedEventArgs e)
+        {
+            // Sync 中はメニューを表示しない
+            if (_isSyncActive) return;
+
+            // 右クリックされた ListBoxItem を特定し、未選択なら選択状態にする
+            var target = (e.Source as Control)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
+            if (target?.DataContext is not WindowListItemViewModel clicked) return;
+
+            if (!clicked.IsSelected)
+            {
+                _windowList.SelectedItem = clicked;
+            }
+
+            var selected = _windowList.SelectedItems?
+                .OfType<WindowListItemViewModel>()
+                .ToList() ?? [];
+            if (selected.Count == 0) return;
+
+            bool multi = selected.Count > 1;
+            bool anyVisible = selected.Any(m => m.IsWindowVisible);
+            bool anyHidden = selected.Any(m => !m.IsWindowVisible);
+
+            var menu = new ContextMenu();
+
+            // ── Rename (単一選択のみ) ─────────────────────────────────────
+            if (!multi)
+            {
+                var renameItem = new MenuItem { Header = "Rename" };
+                renameItem.Click += (_, _) => clicked.RenameCommand.Execute(null);
+                menu.Items.Add(renameItem);
+            }
+
+            // ── Hide / Show ───────────────────────────────────────────────
+            if (!multi)
+            {
+                // 単一選択: 現在の状態に応じてトグル
+                var toggleItem = new MenuItem { Header = clicked.IsWindowVisible ? "Hide" : "Show" };
+                toggleItem.Click += (_, _) => clicked.ToggleVisibility();
+                menu.Items.Add(toggleItem);
+            }
+            else if (anyVisible && !anyHidden)
+            {
+                // 全部 Show → Hide Selected
+                var hideItem = new MenuItem { Header = "Hide Selected" };
+                hideItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(hideItem);
+            }
+            else if (!anyVisible && anyHidden)
+            {
+                // 全部 Hide → Show Selected
+                var showItem = new MenuItem { Header = "Show Selected" };
+                showItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(showItem);
+            }
+            else
+            {
+                // 混在 → Hide Selected と Show Selected を両方
+                var hideItem = new MenuItem { Header = "Hide Selected" };
+                hideItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                var showItem = new MenuItem { Header = "Show Selected" };
+                showItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(hideItem);
+                menu.Items.Add(showItem);
+            }
+
+            // ── Close ─────────────────────────────────────────────────────
+            menu.Items.Add(new Separator());
+            var closeItem = new MenuItem { Header = multi ? "Close Selected" : "Close" };
+            closeItem.Click += (_, _) =>
+            {
+                foreach (var vm in selected.ToList())
+                    vm.Window.Close();
+            };
+            menu.Items.Add(closeItem);
+
+            menu.Open(_windowList);
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// Removes hidden (non-visible) items from the ListBox selection and
+        /// refreshes <see cref="MxPlotAppViewModel.RefreshSelectionState"/>.
+        /// Should be called before Tile or Sync so that only visible windows participate.
+        /// </summary>
+        private void DeselectHiddenItems()
+        {
+            var toDeselect = _windowList.SelectedItems?
+                .OfType<WindowListItemViewModel>()
+                .Where(vm => !vm.IsWindowVisible)
+                .ToList();
+            if (toDeselect is not { Count: > 0 }) return;
+            _processingSelectionChange = true;
+            try
+            {
+                foreach (var vm in toDeselect)
+                {
+                    _windowList.SelectedItems!.Remove(vm);
+                    vm.IsSelected = false;
+                }
+                ViewModel.RefreshSelectionState();
+            }
+            finally { _processingSelectionChange = false; }
         }
 
         /// <summary>Restores the ListBox selection to the sync-group snapshot.</summary>

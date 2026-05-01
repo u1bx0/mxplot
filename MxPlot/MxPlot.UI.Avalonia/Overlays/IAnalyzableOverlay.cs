@@ -1,5 +1,4 @@
 ﻿using Avalonia;
-using System;
 
 namespace MxPlot.UI.Avalonia.Overlays
 {
@@ -21,17 +20,30 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// </summary>
         bool ContainsWorldPoint(Point worldPoint);
 
-        /// <summary>Raised when "Find Min/Max" is selected from the context menu.</summary>
-        event EventHandler? FindMinMaxRequested;
+        /// <summary>
+        /// Menu entry for "Find Min/Max". The host assigns <see cref="OverlayMenuEntry.Handler"/>
+        /// after the object is added; the entry is hidden when no handler is assigned.
+        /// </summary>
+        OverlayMenuEntry FindMinMax { get; }
 
-        /// <summary>Raised when "Show Statistics" toggle is selected from the context menu.</summary>
-        event EventHandler? ToggleShowStatisticsRequested;
+        /// <summary>
+        /// Menu entry for the "Show Statistics" toggle. The host assigns the handler after
+        /// the object is added; the entry is hidden when no handler is assigned.
+        /// </summary>
+        OverlayMenuEntry ToggleShowStatistics { get; }
 
-        /// <summary>Fires <see cref="FindMinMaxRequested"/> from within the implementing class.</summary>
-        void RaiseFindMinMaxRequested();
+        /// <summary>
+        /// Menu entry for "Use ROI for value range". The host assigns the handler after
+        /// the object is added; the entry is hidden when no handler is assigned.
+        /// </summary>
+        OverlayMenuEntry UseRoiForValueRange { get; }
 
-        /// <summary>Fires <see cref="ToggleShowStatisticsRequested"/> from within the implementing class.</summary>
-        void RaiseToggleShowStatisticsRequested();
+        /// <summary>
+        /// Menu entry for copying the data within this region to the clipboard.
+        /// The host assigns the handler after the object is added;
+        /// the entry is hidden when no handler is assigned.
+        /// </summary>
+        OverlayMenuEntry CopyData { get; }
 
         /// <summary>Whether the statistics overlay label is currently visible.</summary>
         bool ShowStatistics { get; set; }
@@ -48,11 +60,5 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// context menu, or by deserialization when restoring saved state.
         /// </summary>
         bool IsValueRangeRoi { get; set; }
-
-        /// <summary>Raised when the user toggles "Use ROI for value range" from the context menu.</summary>
-        event EventHandler? UseRoiForValueRangeRequested;
-
-        /// <summary>Fires <see cref="UseRoiForValueRangeRequested"/> from within the implementing class.</summary>
-        void RaiseUseRoiForValueRangeRequested();
     }
 }

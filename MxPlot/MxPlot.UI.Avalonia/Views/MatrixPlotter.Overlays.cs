@@ -1,12 +1,21 @@
 ﻿using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input.Platform;
+using Avalonia.Layout;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using MxPlot.Core;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -31,13 +40,13 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (obj is LineObject line)
             {
-                line.PlotProfileRequested += OnLinePlotProfileRequested;
-                line.CalibrateScaleRequested += OnLineCalibrateScaleRequested;
+                line.PlotProfile.Handler = () => OnLinePlotProfileRequested(line);
+                line.CalibrateScale.Handler = () => OnLineCalibrateScaleRequested(line);
                 line.GeometryChanged += OnLineGeometryChanged;
             }
             if (obj is TextObject text)
             {
-                text.EditRequested += OnTextEditRequested;
+                text.Edit.Handler = () => OnTextEditRequested(text);
                 text.DataContext = ResolveSourceView(text).MatrixData;
             }
             if (obj is RectObject rect)
@@ -48,12 +57,13 @@ namespace MxPlot.UI.Avalonia.Views
                 target.GeometryChanged += OnBBoxGeometryChanged;
             if (obj is IAnalyzableOverlay evaluable)
             {
-                evaluable.FindMinMaxRequested += OnFindMinMaxRequested;
-                evaluable.ToggleShowStatisticsRequested += OnToggleShowStatisticsRequested;
-                evaluable.UseRoiForValueRangeRequested += OnUseRoiForValueRangeRequested;
+                evaluable.FindMinMax.Handler = () => OnFindMinMaxRequested(evaluable);
+                evaluable.ToggleShowStatistics.Handler = () => OnToggleShowStatisticsRequested(evaluable);
+                evaluable.UseRoiForValueRange.Handler = () => OnUseRoiForValueRangeRequested(evaluable);
+                evaluable.CopyData.Handler = () => _ = OnCopyDataRequestedAsync(evaluable);
             }
             obj.SelectionChanged += OnOverlaySelectionChanged;
-            obj.PenEditRequested += OnPenEditRequested;
+            obj.PenEdit.Handler = () => OnPenEditRequested(obj);
         }
 
         
@@ -62,8 +72,8 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (obj is LineObject line)
             {
-                line.PlotProfileRequested -= OnLinePlotProfileRequested;
-                line.CalibrateScaleRequested -= OnLineCalibrateScaleRequested;
+                line.PlotProfile.Handler = null;
+                line.CalibrateScale.Handler = null;
                 line.GeometryChanged -= OnLineGeometryChanged;
                 if (_lineProfileWindows.Remove(line, out var entry))
                     entry.Window.Close();
@@ -71,7 +81,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (obj is TextObject text)
             {
                 text.DataContext = null;
-                text.EditRequested -= OnTextEditRequested;
+                text.Edit.Handler = null;
                 if (_textEditDialogs.Remove(text, out var dlg))
                     dlg.Close();
             }
@@ -83,17 +93,17 @@ namespace MxPlot.UI.Avalonia.Views
                 target.GeometryChanged -= OnBBoxGeometryChanged;
             if (obj is IAnalyzableOverlay evaluable)
             {
-                evaluable.FindMinMaxRequested -= OnFindMinMaxRequested;
-                evaluable.ToggleShowStatisticsRequested -= OnToggleShowStatisticsRequested;
-                evaluable.UseRoiForValueRangeRequested -= OnUseRoiForValueRangeRequested;
+                evaluable.FindMinMax.Handler = null;
+                evaluable.ToggleShowStatistics.Handler = null;
+                evaluable.UseRoiForValueRange.Handler = null;
+                evaluable.CopyData.Handler = null;
             }
             obj.SelectionChanged -= OnOverlaySelectionChanged;
-            obj.PenEditRequested -= OnPenEditRequested;
+            obj.PenEdit.Handler = null;
             if (_propertyDialogs.Remove(obj, out var propDlg))
                 propDlg.Close();
             if (obj.IsSelected)
                 ClearOverlayInfo();
-            // If the removed object is the active ROI overlay, fall back gracefully
             if (obj is IAnalyzableOverlay removed && ReferenceEquals(removed, _valueRangeOverlay))
             {
                 System.Diagnostics.Debug.WriteLine("[MatrixPlotter] ROI overlay removed — falling back to Current mode.");
@@ -159,9 +169,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Region statistics (FindMinMax / ShowStatistics) ─────────────────────
 
-        private void OnFindMinMaxRequested(object? sender, EventArgs e)
+        private void OnFindMinMaxRequested(IAnalyzableOverlay evaluable)
         {
-            if (sender is not (BoundingBoxBase bbox and IAnalyzableOverlay evaluable)) return;
+            if (evaluable is not BoundingBoxBase bbox) return;
             var sourceView = ResolveSourceView(bbox);
             var md = sourceView.MatrixData;
             if (md == null) return;
@@ -175,9 +185,9 @@ namespace MxPlot.UI.Avalonia.Views
             _rangeBar.SetMode(ValueRangeMode.Fixed);
         }
 
-        private void OnToggleShowStatisticsRequested(object? sender, EventArgs e)
+        private void OnToggleShowStatisticsRequested(IAnalyzableOverlay evaluable)
         {
-            if (sender is not (BoundingBoxBase bbox and IAnalyzableOverlay evaluable)) return;
+            if (evaluable is not BoundingBoxBase bbox) return;
             evaluable.ShowStatistics = !evaluable.ShowStatistics;
 
             if (evaluable.ShowStatistics)
@@ -196,9 +206,8 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── ROI value range ───────────────────────────────────────────────────────
 
-        private void OnUseRoiForValueRangeRequested(object? sender, EventArgs e)
+        private void OnUseRoiForValueRangeRequested(IAnalyzableOverlay evaluable)
         {
-            if (sender is not IAnalyzableOverlay evaluable) return;
 
             if (evaluable.IsValueRangeRoi)
             {
@@ -315,10 +324,10 @@ namespace MxPlot.UI.Avalonia.Views
             IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
             IMatrixData md, int frameIndex)
         {
-            int xMin = Math.Max(0, (int)Math.Floor(bbox.X));
-            int xMax = Math.Min(md.XCount - 1, (int)Math.Ceiling(bbox.X + bbox.Width));
-            int yMin = Math.Max(0, (int)Math.Floor(bbox.Y));
-            int yMax = Math.Min(md.YCount - 1, (int)Math.Ceiling(bbox.Y + bbox.Height));
+            int xMin = Math.Max(0, (int)Math.Ceiling(bbox.X - 0.5 - 1e-10));
+            int xMax = Math.Min(md.XCount - 1, (int)Math.Floor(bbox.X + bbox.Width - 0.5 + 1e-10));
+            int yMin = Math.Max(0, (int)Math.Ceiling(bbox.Y - 0.5 - 1e-10));
+            int yMax = Math.Min(md.YCount - 1, (int)Math.Floor(bbox.Y + bbox.Height - 0.5 + 1e-10));
 
             // Acquire entire frame once (single lock / zero-alloc for double data)
             var frame = md.GetFrameAsDoubleSpan(frameIndex);
@@ -347,9 +356,8 @@ namespace MxPlot.UI.Avalonia.Views
                 : new RegionStatistics(min, max, sum / count, sum, count);
         }
 
-        private void OnLinePlotProfileRequested(object? sender, EventArgs e)
+        private void OnLinePlotProfileRequested(LineObject line)
         {
-            if (sender is not LineObject line) return;
             var sourceView = ResolveSourceView(line);
             var md = sourceView.MatrixData;
             if (md == null || md.XStep == 0 || md.YStep == 0) return;
@@ -411,9 +419,8 @@ namespace MxPlot.UI.Avalonia.Views
         /// to the source <see cref="IMatrixData"/> (XMin/YMin are kept fixed).
         /// Mirrors the Scale tab Wire() pattern: XMax = XMin + step × (N−1).
         /// </summary>
-        private async void OnLineCalibrateScaleRequested(object? sender, EventArgs e)
+        private async void OnLineCalibrateScaleRequested(LineObject line)
         {
-            if (sender is not LineObject line) return;
             var sourceView = ResolveSourceView(line);
             var md = sourceView.MatrixData;
             if (md == null) return;
@@ -468,9 +475,8 @@ namespace MxPlot.UI.Avalonia.Views
             UpdateAllLineProfiles();
         }
 
-        private async void OnTextEditRequested(object? sender, EventArgs e)
+        private async void OnTextEditRequested(TextObject text)
         {
-            if (sender is not TextObject text) return;
 
             if (_textEditDialogs.ContainsKey(text)) return;
 
@@ -493,9 +499,8 @@ namespace MxPlot.UI.Avalonia.Views
             _textEditDialogs.Remove(text);
         }
 
-        private async void OnPenEditRequested(object? sender, EventArgs e)
+        private async void OnPenEditRequested(OverlayObjectBase obj)
         {
-            if (sender is not OverlayObjectBase obj) return;
 
             if (_propertyDialogs.ContainsKey(obj)) return;
 
@@ -605,6 +610,143 @@ namespace MxPlot.UI.Avalonia.Views
             foreach (var (win, _) in _lineProfileWindows.Values.ToArray())
                 win.Close();
             _lineProfileWindows.Clear();
+        }
+
+        // ── Copy Data (rect region → clipboard) ────────────────────────────────────
+
+        private async Task OnCopyDataRequestedAsync(IAnalyzableOverlay evaluable)
+        {
+            if (evaluable is not BoundingBoxBase bbox) return;
+            var sourceView = ResolveSourceView(bbox);
+            var md = sourceView.MatrixData;
+            if (md == null) return;
+
+            var region = ExtractRectRegionData(evaluable, bbox, md, sourceView.FrameIndex);
+            if (region == null)
+            {
+                await ShowMessageDialogAsync("Copy Data", "The selected rectangle has no data points.");
+                return;
+            }
+
+            double vmin = sourceView.IsFixedRange ? sourceView.FixedMin : double.NaN;
+            double vmax = sourceView.IsFixedRange ? sourceView.FixedMax : double.NaN;
+
+            // Physical aspect correction: if XStep != YStep, naturalH is adjusted so that
+            // 1 pixel = 1 data point on the longer physical axis.
+            int naturalW = region.XCount;
+            int naturalH = region.YCount;
+            double xStep = Math.Abs(md.XStep > 0 ? md.XStep : 1.0);
+            double yStep = Math.Abs(md.YStep > 0 ? md.YStep : 1.0);
+            if (Math.Abs(xStep - yStep) > 1e-12)
+            {
+                if (xStep < yStep)
+                    naturalH = Math.Max(1, (int)Math.Round(region.YCount * yStep / xStep));
+                else
+                    naturalW = Math.Max(1, (int)Math.Round(region.XCount * xStep / yStep));
+            }
+
+            // Render the region at natural (aspect-corrected) size for the preview + image copy.
+            WriteableBitmap RenderRegion()
+                => BitmapWriter.CreateBitmap(region, 0, sourceView.Lut, vmin, vmax);
+
+            Bitmap RenderScaled(int w, int h)
+            {
+                var src = RenderRegion();
+                if (w == src.PixelSize.Width && h == src.PixelSize.Height) return src;
+                var rtb = new RenderTargetBitmap(new PixelSize(w, h), new Vector(96, 96));
+                var mode = (w >= src.PixelSize.Width || h >= src.PixelSize.Height)
+                    ? BitmapInterpolationMode.None
+                    : BitmapInterpolationMode.LowQuality;
+                using (var ctx = rtb.CreateDrawingContext())
+                using (ctx.PushRenderOptions(new RenderOptions { BitmapInterpolationMode = mode }))
+                    ctx.DrawImage(src, new Rect(0, 0, w, h));
+                return rtb;
+            }
+
+            // Thumbnail for the dialog preview
+            const double maxThumbW = 78, maxThumbH = 58;
+            double ta = (double)naturalW / naturalH;
+            int tw = ta >= maxThumbW / maxThumbH ? (int)maxThumbW : Math.Max(1, (int)Math.Round(maxThumbH * ta));
+            int th = ta >= maxThumbW / maxThumbH ? Math.Max(1, (int)Math.Round(maxThumbW / ta)) : (int)maxThumbH;
+            var thumb = RenderScaled(tw, th);
+
+            var dlg = new CopyImageDialog(thumb, naturalW, naturalH, naturalW, naturalH,
+                refreshPreview: null, showOverlaysOption: false, showCustomSizeOption: false);
+            await dlg.ShowDialog(this);
+            if (dlg.Result == null) return;
+
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard == null) return;
+
+            var res = dlg.Result;
+            if (res.Mode == CopyMode.Text)
+            {
+                var sb = new StringBuilder();
+                for (int row = region.YCount - 1; row >= 0; row--)
+                {
+                    for (int col = 0; col < region.XCount; col++)
+                    {
+                        if (col > 0) sb.Append(res.Separator);
+                        sb.Append(region.GetValueAt(col, row, 0).ToString("G6", CultureInfo.InvariantCulture));
+                    }
+                    sb.AppendLine();
+                }
+                await clipboard.SetTextAsync(sb.ToString());
+            }
+            else
+            {
+                // ActualPixelSize: render at physical-aspect-corrected size
+                var bmp = RenderScaled(naturalW, naturalH);
+                using var ms = new System.IO.MemoryStream();
+                if (bmp is RenderTargetBitmap rtb2) rtb2.Save(ms);
+                else bmp.Save(ms);
+                MxView.SetLastCopiedPng(ms.ToArray());
+                await clipboard.SetBitmapAsync(bmp);
+            }
+        }
+
+        /// <summary>
+        /// Extracts pixels within <paramref name="bbox"/> into a new single-frame
+        /// <see cref="MatrixData{T}"/> of type <c>double</c>.
+        /// Pixels outside <see cref="IAnalyzableOverlay.ContainsWorldPoint"/> are stored as NaN.
+        /// FlipY is applied so that row 0 of the result corresponds to the top of the display.
+        /// Returns <c>null</c> when the region contains no pixels.
+        /// </summary>
+        private static MatrixData<double>? ExtractRectRegionData(
+            IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
+            IMatrixData md, int frameIndex)
+        {
+            // PixelSnapMode.Corner snaps to pixel edges  (bbox coords are half-integers: 2.5, 9.5…)
+            // PixelSnapMode.Center snaps to pixel centres (bbox coords are integers:       3,  10…)
+            // Pixel wx is inside when:  bbox.X ≤ wx+0.5 < bbox.X+bbox.Width
+            //   → xMin = ⌈ bbox.X − 0.5 ⌉    (first wx whose centre is ≥ bbox.X)
+            //   → xMax = ⌊ bbox.X+W − 0.5 − ε ⌋  (last  wx whose centre is <  bbox.X+W)
+            int xMin = Math.Max(0, (int)Math.Ceiling(bbox.X - 0.5 - 1e-10));
+            int xMax = Math.Min(md.XCount - 1, (int)Math.Floor(bbox.X + bbox.Width - 0.5 - 1e-10));
+            int yMin = Math.Max(0, (int)Math.Ceiling(bbox.Y - 0.5 - 1e-10));
+            int yMax = Math.Min(md.YCount - 1, (int)Math.Floor(bbox.Y + bbox.Height - 0.5 - 1e-10));
+            if (xMax < xMin || yMax < yMin) return null;
+
+            int w = xMax - xMin + 1;
+            int h = yMax - yMin + 1;
+            var frame = md.GetFrameAsDoubleSpan(frameIndex);
+            var arr = new double[w * h];
+
+            for (int wy = yMin; wy <= yMax; wy++)
+            {
+                int dataY = (md.YCount - 1) - wy;
+                int destRow = wy - yMin;
+                for (int wx = xMin; wx <= xMax; wx++)
+                {
+                    double v = evaluable.ContainsWorldPoint(new Point(wx + 0.5, wy + 0.5))
+                        ? frame[dataY * md.XCount + wx]
+                        : double.NaN;
+                    arr[destRow * w + (wx - xMin)] = v;
+                }
+            }
+
+            if (arr.All(double.IsNaN)) return null;
+            return new MatrixData<double>(w, h, arr);
         }
     }
 }

@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.1.0-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.1.1-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -139,6 +139,16 @@ Then add project references to `MxPlot.Core.csproj` and `MxPlot.UI.Avalonia.cspr
 - .NET 10.0 or .NET 8.0
 - `MxPlot.UI.Avalonia` requires **Avalonia 11.3.x** (host projects must pin `Avalonia.Win32` / `Avalonia.Skia` to the same version)
 
+
+## 🖥️ MxPlot.App — Standalone Scientific Viewer
+
+**MxPlot.App** is a standalone data viewer application built on top of `MxPlot.UI.Avalonia`.
+It provides a plug-in-driven open dialog, a multi-window dashboard, metadata editing, ROI statistics, line profile plots, and spatial filters — all without writing any code.
+
+> 📦 **Pre-built binaries** (Windows x64 / macOS Apple Silicon) are available on the [Releases page](https://github.com/u1bx0/mxplot/releases).
+> Source code is included in this repository under `MxPlot.App/`
+
+MxPlot.App also serves as a reference implementation showing how to build a full application on the MxPlot ecosystem.
 
 ## 🗿 Design Concepts and Philosophy
 **MxPlot** is designed not as a general-purpose math library, but as a backend for scientific visualization.
@@ -462,27 +472,27 @@ var medianFiltered = matrix.Apply(new SpatialFilterOperation(new MedianKernel(ra
 var gaussFiltered = matrix.Apply(new SpatialFilterOperation(new GaussianKernel(radius: 2, sigma: 1.5)));
 ```
 
-## 📖 More Detailed Information and Performance Reports
+## 📖 More Detailed Information
 
-The detailed documentation and performance benchmark reports are available in the repository.
+For detailed guides and technical references, see the **[Documentation Index](./docs/README.md)**.
 
-*However, it may be better to consult your AI agent to understand the usage and the ideas behind the implementation.*
-
-> Hey, could you please tell me the details of the following library? - http://github.com/u1bx0/mxplot
-
-
-## 🖥️ MxPlot.App — Standalone Scientific Viewer
-
-**MxPlot.App** is a standalone data viewer application built on top of `MxPlot.UI.Avalonia`.
-It provides a plug-in-driven open dialog, a multi-window dashboard, metadata editing, ROI statistics, line profile plots, and spatial filters — all without writing any code.
-
-> 📦 **Pre-built binaries** (Windows x64 / macOS Apple Silicon) are available on the [Releases page](https://github.com/u1bx0/mxplot/releases).
-> Source code is included in this repository under `MxPlot.App/
-
-MxPlot.App also serves as a reference implementation showing how to build a full application on the MxPlot ecosystem.
+> 💬 **Tip**: The quickest way to explore this library is to open it in your IDE
+> and ask GitHub Copilot (or any AI with codebase access) directly —
+> it can answer usage questions, explain design decisions, and generate working examples.
 
 
 ## 📊 Version History
+
+**v0.1.1** (UI improvements, new public APIs, and bug fixes)
+- 🐛 **Crop Sync Bug Fix**: Fixed incorrect behavior when cropping within a synchronized window group.
+- 🔌 **New Public APIs**: Added `GetAxisTracker(string)`, `SetOrthogonalView(string?)`, and `OrthogonalViewAxisName` to `MatrixPlotter`, enabling external control of axis trackers and orthogonal view switching from host apps.
+- 🗺️ **Unified Coordinate Conversion**: Exposed `ScreenToData` / `DataToScreen` on `MxView`, consolidating all coordinate transform logic into a single authoritative path.
+- 📐 **Orthogonal View Crop Support**: Added context menus and crop operations to the bottom and right orthogonal views, matching the main view experience.
+- 📋 **ROI "Copy Data"**: Rectangle and oval overlays now support copying the enclosed region as an image or as CSV/TSV text to the clipboard.
+- 🪟 **Multi-Window UX Improvements**: Tile/Sync actions now operate only on visible windows; hidden windows are automatically deselected. Clipboard paste extended to support both image and CSV/TSV text. Window list context menu is now dynamically generated based on selection and visibility state.
+- 🎨 **Bitmap Interpolation**: Render surface now automatically switches interpolation mode based on zoom level (nearest-neighbor when zooming in, linear when zooming out).
+- 💅 **Value Range Bar UX**: Keyboard handling improved; mode selection converted to a flyout menu; LUT label opens a dropdown on click.
+- 🔄 **OME-TIFF Metadata Round-trip**: `mxplot.*` system metadata (LUT, overlays, display settings) is now preserved on Save As. Format headers (`OME_XML`, `FITS_HEADER`) are still excluded as before.
 
 **v0.1.0** (Documentation and bug-fix release)
 - 🔍 **XML Documentation**: Added comprehensive XML doc comments to public API (`IMatrixData`, `MatrixDataValueConverter`, `FastMinMaxFinder`, `MatrixPlotter`) — now surfaces correctly in IDE IntelliSense from NuGet.

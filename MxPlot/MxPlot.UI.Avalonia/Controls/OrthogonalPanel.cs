@@ -212,6 +212,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 ContentAlignment = ContentAlignment.Top,
                 FlipY = false,
             };
+            BottomView.SetAsDependentView();
             RightView = new MxView
             {
                 ClipToBounds = true,
@@ -219,6 +220,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 Transform = ViewTransform.Rotate90CCW,
                 ContentAlignment = ContentAlignment.Left,
             };
+            RightView.SetAsDependentView();
 
             _vSplitter = new Border
             {

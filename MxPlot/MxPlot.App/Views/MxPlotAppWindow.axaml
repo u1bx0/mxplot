@@ -78,14 +78,6 @@
 							</StackPanel>
 						</ToolTip>
 					</ToolTip.Tip>
-					<Border.ContextMenu>
-						<ContextMenu>
-							<MenuItem Header="Rename"    Command="{Binding RenameCommand}"/>
-							<MenuItem Header="Duplicate" Command="{Binding DuplicateCommand}"/>
-							<Separator/>
-							<MenuItem Header="Close"   Command="{Binding CloseWindowCommand}"/>
-						</ContextMenu>
-					</Border.ContextMenu>
 					<Grid ColumnDefinitions="52,*">
 						<Border Grid.Column="0" CornerRadius="4" ClipToBounds="True"
 								Width="52" Height="52" Background="#20808080">
@@ -173,14 +165,6 @@
 							</StackPanel>
 						</ToolTip>
 					</ToolTip.Tip>
-					<Border.ContextMenu>
-						<ContextMenu>
-							<MenuItem Header="Rename"    Command="{Binding RenameCommand}"/>
-							<MenuItem Header="Duplicate" Command="{Binding DuplicateCommand}"/>
-							<Separator/>
-							<MenuItem Header="Close"   Command="{Binding CloseWindowCommand}"/>
-						</ContextMenu>
-					</Border.ContextMenu>
 					<StackPanel Spacing="4">
 						<Border CornerRadius="4" ClipToBounds="True"
 								Width="{DynamicResource GridCardThumb}"
@@ -414,14 +398,15 @@
 		<!-- Row 4: Action Bar -->
 		<UniformGrid Grid.Row="4" Columns="3" Margin="8,2,8,8">
 			<Button Content="Tile"
+					Name="TileBtn"
 					Command="{Binding TileWindowsCommand}"
-					IsEnabled="{Binding HasMultiSelection}"
+					IsEnabled="{Binding HasVisibleMultiSelection}"
 					HorizontalAlignment="Stretch"
 					HorizontalContentAlignment="Center"
 					Margin="0,0,3,0"/>
 			<Button Content="Sync"
 					Name="SyncBtn"
-					IsEnabled="{Binding HasMultiSelection}"
+					IsEnabled="{Binding HasVisibleMultiSelection}"
 					HorizontalAlignment="Stretch"
 					HorizontalContentAlignment="Center"
 					Margin="3,0,3,0"/>

@@ -164,6 +164,11 @@ namespace MxPlot.UI.Avalonia.Controls
                 Text = "LUT:",
                 VerticalAlignment = VerticalAlignment.Center,
                 FontSize = 11,
+                Cursor = new global::Avalonia.Input.Cursor(global::Avalonia.Input.StandardCursorType.Hand),
+            };
+            _lutLabel.PointerPressed += (_, _) =>
+            {
+                _comboBox.IsDropDownOpen = true;
             };
 
             var panel = new StackPanel
