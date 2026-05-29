@@ -1,4 +1,6 @@
-﻿using System.IO;
+﻿using System;
+using System.Diagnostics;
+using System.IO;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -51,15 +53,21 @@ namespace MxPlot.UI.Avalonia.Utils
         {
             try
             {
+                Debug.WriteLine($"[StructuredTextUtil.FormatXml] Try to format XML...: {trimmed.Substring(0, Math.Min(128, trimmed.Length))}");
                 var sb = new StringBuilder(trimmed.Length);
                 var settings = new XmlWriterSettings { Indent = true, IndentChars = "  " };
                 using var reader = XmlReader.Create(new StringReader(trimmed));
                 using var writer = XmlWriter.Create(sb, settings);
                 writer.WriteNode(reader, defattr: true);
                 writer.Flush();
+                Debug.WriteLine($"[StructuredTextUtil.FormatXml] Successfully formatted XML.");
                 return sb.ToString();
             }
-            catch { return original; }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[StructuredTextUtil.FormatXml] FormatXml failed: {ex}");
+                return original;
+            }
         }
 
         private static string MinifyXml(string trimmed, string original)
@@ -87,20 +95,46 @@ namespace MxPlot.UI.Avalonia.Utils
         {
             try
             {
+                // Upgrade legacy INF representations to standard Infinity strings to support System.Text.Json.
+                var safeJson = trimmed
+                    .Replace(":INF", ":\"Infinity\"")
+                    .Replace(":-INF", ":\"-Infinity\"")
+                    .Replace(":\"INF\"", ":\"Infinity\"")    // Catch already quoted legacy INF
+                    .Replace(":\"-INF\"", ":\"-Infinity\"")  // Catch already quoted legacy -INF
+                    .Replace(":NaN", ":\"NaN\"");
+                trimmed = safeJson;
+                Debug.WriteLine($"[StructuredTextUtil.FormatJson] Try to format JSON...: {trimmed.Substring(0, Math.Min(128, trimmed.Length))}");
                 using var doc = JsonDocument.Parse(trimmed, _jsonDocOptions);
+                Debug.WriteLine($"[StructuredTextUtil.FormatJson] Successfully formatted JSON.");
                 return JsonSerializer.Serialize(doc.RootElement, _jsonIndented);
             }
-            catch { return original; }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[StructuredTextUtil.FormatJson] FormatJson failed: {ex}");
+                return original;
+            }
         }
 
         private static string MinifyJson(string trimmed, string original)
         {
             try
             {
+                // Upgrade legacy INF representations to standard Infinity strings to support System.Text.Json.
+                var safeJson = trimmed
+                    .Replace(":INF", ":\"Infinity\"")
+                    .Replace(":-INF", ":\"-Infinity\"")
+                    .Replace(":\"INF\"", ":\"Infinity\"")    // Catch already quoted legacy INF
+                    .Replace(":\"-INF\"", ":\"-Infinity\"")  // Catch already quoted legacy -INF
+                    .Replace(":NaN", ":\"NaN\"");
+                trimmed = safeJson;
                 using var doc = JsonDocument.Parse(trimmed, _jsonDocOptions);
                 return JsonSerializer.Serialize(doc.RootElement, _jsonCompact);
             }
-            catch { return original; }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[StructuredText.MinifyJson] MinifyJson failed: {ex}");
+                return original;
+            }
         }
     }
 }

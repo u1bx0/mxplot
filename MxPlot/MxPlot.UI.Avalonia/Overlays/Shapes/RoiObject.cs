@@ -26,7 +26,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public RoiObject()
         {
             IsDeletable = false;
-            SnapMode    = PixelSnapMode.Corner;
+            SnapMode = PixelSnapMode.Corner;
         }
 
         /// <summary>
@@ -58,6 +58,13 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public Color AccentColor { get; set; } = Colors.Yellow;
 
         /// <summary>
+        /// When set, draws a position hint string at the bottom-left corner of the ROI.
+        /// Typically two lines: physical coordinates and pixel indices.
+        /// Set to <c>null</c> to disable.
+        /// </summary>
+        public string? PositionLabel { get; set; }
+
+        /// <summary>
         /// When <c>true</c>, resize handle hit-tests are suppressed — only drag (body hit) is permitted.
         /// <see cref="Resize"/> becomes a no-op; <see cref="GetCursor"/> always returns <see cref="StandardCursorType.SizeAll"/>.
         /// </summary>
@@ -76,17 +83,29 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             DrawRoiMarkers(g);
             // Size label near the top-left corner
             if (ShowLabel) DrawLabel(g);
+            // Position label at the bottom-left corner
+            if (PositionLabel != null) DrawPositionLabel(g);
+        }
+
+        private void DrawPositionLabel(AvaloniaOverlayGraphics g)
+        {
+            if (PositionLabel == null) return;
+            var sBL = g.WorldToScreen(X, Y + Height);
+            g.DrawStringAtScreen(PositionLabel,
+                foreground: Colors.White,
+                background: Color.FromArgb(180, 40, 40, 40),
+                screenPos: new Point(sBL.X + 1, sBL.Y + 1));
         }
 
         private void DrawLabel(AvaloniaOverlayGraphics g)
         {
-            var r    = GetNormalizedRect();
+            var r = GetNormalizedRect();
             var text = $"ROI (px)=[{r.Width:F0}, {r.Height:F0}]";
-            var sTL  = g.WorldToScreen(X, Y);
+            var sTL = g.WorldToScreen(X, Y);
             g.DrawStringAtScreen(text,
                 foreground: Colors.White,
                 background: Color.FromArgb(180, 40, 40, 40),
-                screenPos:  new Point(sTL.X + 4, sTL.Y + 4));
+                screenPos: new Point(sTL.X + 4, sTL.Y + 4));
         }
 
         /// <summary>
@@ -102,12 +121,15 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// </summary>
         private void DrawRoiMarkers(AvaloniaOverlayGraphics g)
         {
-            const double L = 12.0;
+            var sTL = g.WorldToScreen(X, Y);
+            var sTR = g.WorldToScreen(X + Width, Y);
+            var sBL = g.WorldToScreen(X, Y + Height);
+            var sBR = g.WorldToScreen(X + Width, Y + Height);
 
-            var sTL = g.WorldToScreen(X,          Y);
-            var sTR = g.WorldToScreen(X + Width,  Y);
-            var sBL = g.WorldToScreen(X,          Y + Height);
-            var sBR = g.WorldToScreen(X + Width,  Y + Height);
+            double screenW = Math.Sqrt(Math.Pow(sTR.X - sTL.X, 2) + Math.Pow(sTR.Y - sTL.Y, 2));
+            double screenH = Math.Sqrt(Math.Pow(sBL.X - sTL.X, 2) + Math.Pow(sBL.Y - sTL.Y, 2));
+            double L = Math.Min(12.0, Math.Min(screenW, screenH) / 2.0);
+            if (L < 1.0) return;
 
             var h = Norm(sTR - sTL);
             var v = Norm(sBL - sTL);
@@ -171,10 +193,10 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// </summary>
         private HandleType HitTestEdgeDirectional(Point location, AvaloniaViewport vp)
         {
-            var sTL = vp.WorldToScreen(new Point(X,          Y));
-            var sTR = vp.WorldToScreen(new Point(X + Width,  Y));
-            var sBL = vp.WorldToScreen(new Point(X,          Y + Height));
-            var sBR = vp.WorldToScreen(new Point(X + Width,  Y + Height));
+            var sTL = vp.WorldToScreen(new Point(X, Y));
+            var sTR = vp.WorldToScreen(new Point(X + Width, Y));
+            var sBL = vp.WorldToScreen(new Point(X, Y + Height));
+            var sBR = vp.WorldToScreen(new Point(X + Width, Y + Height));
             const double Thresh = 5.0;
             if (SegDist(location, sTL, sTR) <= Thresh) return HandleType.TopCenter;
             if (SegDist(location, sTR, sBR) <= Thresh) return HandleType.MiddleRight;
@@ -218,8 +240,8 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             if (MoveBounds.HasValue)
             {
                 var b = MoveBounds.Value;
-                nx = Math.Clamp(nx, b.Left, b.Right  - Width);
-                ny = Math.Clamp(ny, b.Top,  b.Bottom - Height);
+                nx = Math.Clamp(nx, b.Left, b.Right - Width);
+                ny = Math.Clamp(ny, b.Top, b.Bottom - Height);
             }
             X = nx;
             Y = ny;

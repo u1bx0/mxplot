@@ -6,16 +6,16 @@ using System.Threading.Tasks;
 
 namespace MxPlot.UI.Avalonia.Controls
 {
-    internal enum MetaDirtyResult { Save, Discard }
+    internal enum SaveOnCloseResult { Save, Discard }
 
     /// <summary>
-    /// Modal dialog shown when the user switches metadata keys with unsaved edits.
-    /// Returns <see cref="MetaDirtyResult.Save"/>, <see cref="MetaDirtyResult.Discard"/>,
-    /// or <c>null</c> (Cancel / window closed).
+    /// Modal dialog shown when the user closes a <c>MatrixPlotter</c> with unsaved changes.
+    /// Returns <see cref="SaveOnCloseResult.Save"/>, <see cref="SaveOnCloseResult.Discard"/>,
+    /// or <c>null</c> (Cancel / window closed without choosing).
     /// </summary>
-    internal sealed class MetaDirtyPromptDialog : Window
+    internal sealed class SaveOnCloseDialog : Window
     {
-        private MetaDirtyPromptDialog(string keyName)
+        private SaveOnCloseDialog(string? title, bool isReadOnly)
         {
             Title = "Unsaved Changes";
             CanResize = false;
@@ -23,19 +23,23 @@ namespace MxPlot.UI.Avalonia.Controls
             MinWidth = 260;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
+            string subject = string.IsNullOrEmpty(title) ? "this window" : $"\"{title}\"";
+            string msgText = isReadOnly
+                ? $"The source file of {subject} is read-only and cannot be overwritten.\nSave a copy to a new file, or discard changes?"
+                : $"Save changes to {subject}?";
             var msg = new TextBlock
             {
-                Text = $"Save changes to \"{keyName}\"?",
+                Text = msgText,
                 FontSize = 11,
                 TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 280,
+                MaxWidth = 300,
                 Margin = new Thickness(0, 0, 0, 12),
             };
 
             var saveBtn = new Button
             {
-                Content = "Save",
-                Width = 72,
+                Content = isReadOnly ? "Save a Copy\u2026" : "Save",
+                Width = isReadOnly ? 100 : 72,
                 Height = 26,
                 FontSize = 11,
                 IsDefault = true,
@@ -59,8 +63,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 HorizontalContentAlignment = HorizontalAlignment.Center,
             };
 
-            saveBtn.Click += (_, _) => Close(MetaDirtyResult.Save);
-            discardBtn.Click += (_, _) => Close(MetaDirtyResult.Discard);
+            saveBtn.Click += (_, _) => Close(SaveOnCloseResult.Save);
+            discardBtn.Click += (_, _) => Close(SaveOnCloseResult.Discard);
             cancelBtn.Click += (_, _) => Close();
 
             Content = new StackPanel
@@ -72,10 +76,10 @@ namespace MxPlot.UI.Avalonia.Controls
                     msg,
                     new StackPanel
                     {
-                        Orientation         = Orientation.Horizontal,
-                        Spacing             = 8,
+                        Orientation = Orientation.Horizontal,
+                        Spacing = 8,
                         HorizontalAlignment = HorizontalAlignment.Right,
-                        Children            = { saveBtn, discardBtn, cancelBtn },
+                        Children = { saveBtn, discardBtn, cancelBtn },
                     },
                 },
             };
@@ -84,10 +88,14 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>
         /// Shows the dialog modally. Returns <c>null</c> if the user cancelled or closed the window.
         /// </summary>
-        public static async Task<MetaDirtyResult?> ShowAsync(Window owner, string keyName)
+        /// <param name="isReadOnly">
+        /// When <c>true</c> the source file is read-only; the Save button becomes "Save a Copy…"
+        /// and the message is adjusted to indicate a copy will be saved instead of overwriting.
+        /// </param>
+        public static async Task<SaveOnCloseResult?> ShowAsync(Window owner, string? windowTitle, bool isReadOnly = false)
         {
-            var dlg = new MetaDirtyPromptDialog(keyName);
-            return await dlg.ShowDialog<MetaDirtyResult?>(owner);
+            var dlg = new SaveOnCloseDialog(windowTitle, isReadOnly);
+            return await dlg.ShowDialog<SaveOnCloseResult?>(owner);
         }
     }
 }

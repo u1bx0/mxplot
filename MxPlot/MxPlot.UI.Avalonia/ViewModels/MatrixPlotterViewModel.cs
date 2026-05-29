@@ -25,11 +25,16 @@ namespace MxPlot.UI.Avalonia.ViewModels
 
         /// <summary>
         /// Disposes the previous <see cref="MatrixData"/> when it is replaced, if it requires disposal.
+        /// Also resets <see cref="SourcePath"/> so the new data is not falsely associated with the old path.
+        /// The caller is responsible for setting <see cref="SourcePath"/> to the correct value afterward
+        /// (e.g. <see cref="Create"/> sets it after this call).
         /// </summary>
         partial void OnMatrixDataChanging(IMatrixData? oldValue, IMatrixData? newValue)
         {
             if (oldValue?.RequiresDisposal == true)
                 oldValue.Dispose();
+            if (oldValue != newValue)
+                SourcePath = null;
         }
 
         /// <summary>

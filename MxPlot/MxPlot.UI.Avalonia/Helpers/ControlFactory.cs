@@ -164,7 +164,8 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// </summary>
         internal static Control MakeMenuGroup(string header, Control[] items,
             Geometry? icon = null, double headerFontSize = 12, double arrowFontSize = 10,
-            bool initiallyExpanded = true)
+            bool initiallyExpanded = true, double indent = 0,
+            FontWeight headerFontWeight = default)
         {
             var arrow = new TextBlock
             {
@@ -182,6 +183,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 var hdrBrush = MenuIcons.DefaultBrush(icon);
                 if (hdrBrush != null) hdrIcon.Foreground = hdrBrush;
             }
+            var fw = headerFontWeight == default ? FontWeight.SemiBold : headerFontWeight;
             Control headerContent = hdrIcon != null
                 ? (Control)new StackPanel
                 {
@@ -194,7 +196,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                         {
                             Text = header,
                             FontSize = headerFontSize,
-                            FontWeight = FontWeight.SemiBold,
+                            FontWeight = fw,
                             VerticalAlignment = VerticalAlignment.Center,
                         },
                     }
@@ -203,7 +205,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 {
                     Text = header,
                     FontSize = headerFontSize,
-                    FontWeight = FontWeight.SemiBold,
+                    FontWeight = fw,
                     VerticalAlignment = VerticalAlignment.Center,
                 };
             hdrContent.Children.Add(headerContent);
@@ -213,7 +215,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 FontSize = headerFontSize,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Stretch,
-                Padding = new Thickness(10, 5),
+                Padding = new Thickness(10 + indent, 5),
             };
             hdrBtn.Classes.Add("menuitem");
             var childStack = new StackPanel { Spacing = 1, IsVisible = initiallyExpanded };
@@ -226,7 +228,7 @@ namespace MxPlot.UI.Avalonia.Helpers
             var group = new StackPanel();
             group.Children.Add(hdrBtn);
             group.Children.Add(childStack);
-            group.Margin = new Thickness(0, 2);
+            group.Margin = new Thickness(indent > 0 ? indent : 0, 2, 0, 2);
             return group;
         }
 

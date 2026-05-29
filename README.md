@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.1.1-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.1.2-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -96,9 +96,9 @@ MxPlot.Core handles arbitrary axis combinations while maintaining physical coord
 - 🖼️ **MxView**: Low-level Avalonia image surface — pan, zoom, SkiaSharp bitmap rendering
 - 🔗 **WinForms / WPF Embedding**: `MxPlotHostApplication` lets you open `MatrixPlotter` windows from an existing WinForms or WPF app with minimal setup
 - ✏️ **Interactive Overlays**: Line, Rectangle, Oval, Targeting, and Text shapes — drawn via right-click menu or API, with live statistics and profile plots
-
-**Coming in next release:**
-- 🎨 **Composite Rendering**: Multi-channel display with per-channel LUT — assign independent colors to each channel frame and composite them into a single view, as commonly used in fluorescence microscopy
+- ✂️ **Substack / 3D Crop**: Extract a Z-range substack or crop a full 3D volume region — with sync-group support across linked windows
+- 💾 **File Session Management**: Unsaved-change tracking (`DirtyFlags`), close confirmation dialog, and `SaveAsAsync` / `DuplicateAsync` APIs for programmatic control
+- 🎨 **Composite Rendering** *(beta)*: Multi-channel display with per-channel LUT — assign independent colors to each channel frame and composite them into a single view, as commonly used in fluorescence microscopy
 
 ## 📦 Installation
 
@@ -106,23 +106,23 @@ This ecosystem is provided as several NuGet packages.
 
 - **MxPlot (Recommended)**: For most users. Includes the core engine, UI layer, and common extensions.
 ```bash
-dotnet add package MxPlot --version 0.1.0
+dotnet add package MxPlot --version 0.1.2
 ```
 
 - **MxPlot.Core**: For developers building their own tools without extra dependencies.
 ```bash
-dotnet add package MxPlot.Core --version 0.1.0
+dotnet add package MxPlot.Core --version 0.1.2
 ```
 
 - **MxPlot.UI.Avalonia**: If you only need the visualization layer (e.g., for WinForms/WPF host apps).
 ```bash
-dotnet add package MxPlot.UI.Avalonia --version 0.1.0
+dotnet add package MxPlot.UI.Avalonia --version 0.1.2
 ```
 
 Or add to your project file:
 
 ```xml
-<PackageReference Include="MxPlot" Version="0.1.0" />
+<PackageReference Include="MxPlot" Version="0.1.2" />
 ```
 
 ### 🛠️ For Developers (Manual Setup)
@@ -234,8 +234,22 @@ AppBuilder.Configure<MxPlotHostApplication>()
     .UseWin32().UseSkia()
     .SetupWithoutStarting();
 
-// Then, from any button click or event handler:
-MatrixPlotter.Create(myData, title: "Result").Show();
+// Open a window with initial data:
+var plotter = MatrixPlotter.Create(myData, title: "Result");
+plotter.Show();
+
+// To replace data in an existing window (e.g., live update loop),
+// call SetData on the Avalonia dispatcher thread:
+await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+    plotter.SetData(newData));
+
+// ResumeSettingsEnabled = true carries over axis index and value-range settings
+// when data is replaced, which is useful for continuous data acquisition.
+plotter.ResumeSettingsEnabled = true;
+
+// SaveAsAsync / DuplicateAsync are available for programmatic file operations:
+await plotter.SaveAsAsync("output.ome.tif");
+var clone = await plotter.DuplicateAsync(show: true);
 ```
 
 > **Note on Avalonia versions**: `MxPlot.UI.Avalonia` currently targets **Avalonia 11.3.14**.
@@ -483,7 +497,18 @@ For detailed guides and technical references, see the **[Documentation Index](./
 
 ## 📊 Version History
 
-**v0.1.1** (UI improvements, new public APIs, and bug fixes)
+**v0.1.2** (Crop enhancements, file session management, and bug fixes)
+- ✂️ **Substack / 3D Crop**: New crop modes for hyperstacks — extract a Z-range substack or crop a full 3D volume region, with ROI synchronization across linked windows.
+- 📤 **Extract Frame**: Context menu action on main and orthogonal views to extract the current frame as a new independent window.
+- 💾 **File Session Management**: Unsaved-change tracking via `DirtyFlags` (Lut/Vr/Scale/Overlay/Data), close confirmation dialog, and app-exit confirmation. `SaveAsAsync` and `DuplicateAsync` public APIs added for programmatic control.
+- 🔁 **View Settings Resume**: `ResumeSettingsEnabled` property on `MatrixPlotter` preserves axis indices and value-range settings when data is replaced — useful for live acquisition loops.
+- 🐛 **FrameIndex Sync Fix**: Fixed `FrameIndex` not synchronizing to `ActiveIndex` when `MatrixData` is replaced in `MxView`.
+- 🐛 **Sync Range Fix**: Fixed value-range sync not forcing Fixed mode on peer windows when a fixed range is changed.
+- 🪟 **Window Layout**: Dashboard and plot windows now reposition to avoid overlap on open.
+- 🎨 **Composite Rendering** *(beta)*: `CompositeBitmapWriter` added — multi-channel color compositing with per-layer `BlendRecipe` and parallel rendering.
+- 🔌 **Export API**: Injectable export backend scaffold (`ExportFormatDescriptor`) and "Export as" submenu added to `MatrixPlotter`.
+
+**v0.1.1**
 - 🐛 **Crop Sync Bug Fix**: Fixed incorrect behavior when cropping within a synchronized window group.
 - 🔌 **New Public APIs**: Added `GetAxisTracker(string)`, `SetOrthogonalView(string?)`, and `OrthogonalViewAxisName` to `MatrixPlotter`, enabling external control of axis trackers and orthogonal view switching from host apps.
 - 🗺️ **Unified Coordinate Conversion**: Exposed `ScreenToData` / `DataToScreen` on `MxView`, consolidating all coordinate transform logic into a single authoritative path.

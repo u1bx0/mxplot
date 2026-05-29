@@ -73,6 +73,7 @@ namespace MxPlot.UI.Avalonia.Controls
             set { if (value > 0) _timer.Interval = TimeSpan.FromMilliseconds(value); }
         }
 
+       
         // ── Constructor ───────────────────────────────────────────────────────
 
         public AxisTracker(Axis axis)

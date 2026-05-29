@@ -1,6 +1,6 @@
 ﻿# MxPlot Documentation
 
-**Last Updated**: 2026-04-24
+**Last Updated**: 2026-05-29
 
 - Detailed guides and technical references for the MxPlot library stack.
 - Content may be updated as the library evolves

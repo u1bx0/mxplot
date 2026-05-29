@@ -64,6 +64,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
             obj.SelectionChanged += OnOverlaySelectionChanged;
             obj.PenEdit.Handler = () => OnPenEditRequested(obj);
+            SetDirty(DirtyFlags.Overlay, true);
         }
 
         
@@ -109,6 +110,7 @@ namespace MxPlot.UI.Avalonia.Views
                 System.Diagnostics.Debug.WriteLine("[MatrixPlotter] ROI overlay removed — falling back to Current mode.");
                 DeactivateRoiMode();
             }
+            SetDirty(DirtyFlags.Overlay, true);
         }
 
         /// <summary>Resolves which <see cref="MxView"/> owns the given overlay object.</summary>
@@ -134,6 +136,7 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (sender is LineObject line && line.IsSelected)
                 UpdateNoticeFromOverlay(line);
+            SetDirty(DirtyFlags.Overlay, true);
         }
 
         private void OnRectGeometryChanged(object? sender, (global::Avalonia.Point Origin, double Width, double Height) _)
@@ -143,6 +146,7 @@ namespace MxPlot.UI.Avalonia.Views
             RefreshCachedStatistics(rect);
             if (rect is IAnalyzableOverlay a && ReferenceEquals(a, _valueRangeOverlay))
                 RefreshRoiValueRange();
+            SetDirty(DirtyFlags.Overlay, true);
         }
 
         private void OnBBoxGeometryChanged(object? sender, (global::Avalonia.Point Origin, double Width, double Height) _)
@@ -152,6 +156,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (obj is BoundingBoxBase bbox) RefreshCachedStatistics(bbox);
             if (obj is IAnalyzableOverlay a2 && ReferenceEquals(a2, _valueRangeOverlay))
                 RefreshRoiValueRange();
+            SetDirty(DirtyFlags.Overlay, true);
         }
 
         private void UpdateNoticeFromOverlay(OverlayObjectBase obj)

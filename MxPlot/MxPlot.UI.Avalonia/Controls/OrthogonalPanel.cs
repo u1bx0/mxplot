@@ -307,10 +307,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
             Content = _grid;
 
-            // Update button visibility whenever scroll state changes
-            BottomView.ScrollStateChanged += (_, _) => UpdateAutoResizeButtonVisibility();
-            RightView.ScrollStateChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
-            MainView.ScrollStateChanged   += (_, _) => UpdateAutoResizeButtonVisibility();
+            // Update button visibility whenever view display state changes (zoom/pan/resize,
+            // bitmap rebuild, or scrollbar visibility change after cross-view sync).
+            BottomView.ViewDisplayStateChanged += (_, _) => UpdateAutoResizeButtonVisibility();
+            RightView.ViewDisplayStateChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
+            MainView.ViewDisplayStateChanged   += (_, _) => UpdateAutoResizeButtonVisibility();
         }
 
         // ── Splitter drag wiring ──────────────────────────────────────────────

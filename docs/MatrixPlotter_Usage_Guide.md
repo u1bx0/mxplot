@@ -1,7 +1,7 @@
 ﻿# MatrixPlotter — Basic Usage Guide
 
 **Created**: 2026-04-22  
-**Updated**: 2026-04-30
+**Updated**: 2026-05-29
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 ---
@@ -40,7 +40,13 @@ If the host application is WinForms, WPF, or a console app, initialize Avalonia 
 
 ```csharp
 // Program.cs or startup code — call before any MatrixPlotter.Create()
-MxPlot.UI.Avalonia.MxPlotHost.Initialize();
+using Avalonia;
+using MxPlot.UI.Avalonia;
+
+AppBuilder.Configure<MxPlotHostApplication>()
+    .UseWin32()
+    .UseSkia()
+    .SetupWithoutStarting();
 ```
 
 For detailed setup see [WinForms / WPF Integration Guide](./MatrixPlotter_NonAvalonia_Integration_Guide.md).
@@ -116,7 +122,7 @@ When the parent closes, all linked children are closed automatically.
 
 | Event | Description |
 |---|---|
-| `Refreshed` | Fired after `Refresh()` or `SetMatrixData()` — used for linked plotter sync |
+| `Refreshed` | Fired after `Refresh()` or a `MatrixData` replacement — used for linked plotter sync |
 | `ViewUpdated` | Fired after each bitmap render (LUT, zoom, range change) — use for thumbnails |
 | `MatrixDataChanged` | Fired when `IMatrixData` instance is replaced |
 | `IsModifiedChanged` | Fired when the modified flag changes |
@@ -133,19 +139,25 @@ plotter.ViewUpdated += (_, _) =>
 
 ## Value Range Control
 
-Value range mode is set programmatically via `ViewModel.Lut` or through the inline settings panel.
+Value range mode is set programmatically via the inline settings panel (UI) or by writing to `MainView` properties directly.
 
-To read current display range from plugin code:
+To force a fixed display range:
 
 ```csharp
-var ctx = plotter.CreatePluginContext();
-double min = ctx.DisplayMinValue;
-double max = ctx.DisplayMaxValue;
-
-// Force a fixed range
-ctx.DisplayMinValue = 0;
-ctx.DisplayMaxValue = 4095;
+// Set fixed min/max on the main view (UI thread required)
+plotter.MainView.FixedMin = 0;
+plotter.MainView.FixedMax = 4095;
 ```
+
+To read the currently applied fixed range:
+
+```csharp
+double min = plotter.MainView.FixedMin;
+double max = plotter.MainView.FixedMax;
+```
+
+> **Note**: `FixedMin` / `FixedMax` take effect only when the value-range mode is set to **Fixed**
+> via the settings panel. Writing these properties does not automatically switch the mode.
 
 ---
 
@@ -204,11 +216,23 @@ plotter.SetSyncBorder(null); // remove
 ## Checking State
 
 ```csharp
-bool hasFile     = plotter.HasFile;           // backed by a real file path
-bool isModified  = plotter.IsModified;        // data changed since last open/save
+bool hasFile     = plotter.HasFile;            // backed by a real file path
+bool isModified  = plotter.IsModified;         // data changed since last open/save
 bool shouldAsk   = plotter.ShouldConfirmClose; // HasFile && IsModified
-IMatrixData? data = plotter.MatrixData;       // currently displayed data
+IMatrixData? data = plotter.MatrixData;        // currently displayed data
 ```
+
+## Settings Resume
+
+When `ResumeSettingsEnabled` is `true`, display settings (LUT, value range, axis position)
+are automatically restored when the same data instance is shown again after being replaced:
+
+```csharp
+plotter.ResumeSettingsEnabled = true; // default: false
+```
+
+This is useful when repeatedly updating the same plotter with new scan results
+and wanting to preserve the user's view configuration across updates.
 
 ---
 

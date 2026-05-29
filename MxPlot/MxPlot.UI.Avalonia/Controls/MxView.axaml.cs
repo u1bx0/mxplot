@@ -67,6 +67,15 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Raised when the user chooses Crop from the surface context menu.</summary>
         public event EventHandler? CropRequested;
 
+        /// <summary>Raised when the user chooses Extract Frame from the surface context menu.</summary>
+        public event EventHandler? ExtractFrameRequested;
+
+        /// <summary>
+        /// Controls whether the Extract Frame menu item appears in the built-in context menu.
+        /// Set to <c>true</c> by <see cref="Views.MatrixPlotter"/> when multi-frame data is loaded.
+        /// </summary>
+        public bool ExtractFrameAllowed { get; set; } = false;
+
         /// <summary>
         /// Controls whether the built-in surface context menu (Copy Image, Crop, Overlay submenu)
         /// is shown when right-clicking on an empty area.
@@ -195,6 +204,15 @@ namespace MxPlot.UI.Avalonia.Controls
 
         /// <summary>Fired when zoom, translation, or bitmap size changes.</summary>
         public event EventHandler? ScrollStateChanged;
+
+        /// <summary>
+        /// Fired whenever the view's display state changes in a way that may affect overlay button
+        /// visibility: zoom/pan/resize (<see cref="ScrollStateChanged"/>), bitmap rebuild
+        /// (<see cref="BitmapRefreshed"/>), or scrollbar visibility change after cross-view sync
+        /// (<see cref="ApplyZoomAndTrans"/>). <see cref="OrthogonalPanel"/> subscribes to this
+        /// single event instead of maintaining three separate subscriptions per view.
+        /// </summary>
+        internal event EventHandler? ViewDisplayStateChanged;
 
         // ── Busy indicator ────────────────────────────────────────────────────
 
@@ -424,7 +442,9 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 SyncScrollBars();
                 ScrollStateChanged?.Invoke(this, EventArgs.Empty);
+                ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
             };
+            _surface.BitmapRefreshed += (_, _) => ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
             _surface.AutoRangeComputed += (_, args) => AutoRangeComputed?.Invoke(this, args);
 
             // Scrollbar → surface
@@ -460,6 +480,7 @@ namespace MxPlot.UI.Avalonia.Controls
             base.OnPropertyChanged(change);
             if (change.Property == MatrixDataProperty)
             {
+                FrameIndex = MatrixData?.ActiveIndex ?? 0; // reset frame index to ActiveIndex when it is available, otherwise 0
                 _surface.Lut = Lut;        // sync LUT first so AllocateBitmap doesn't bail on null
                 _surface.MatrixData = MatrixData;
                 MatrixDataChanged?.Invoke(this, MatrixData);
@@ -478,6 +499,8 @@ namespace MxPlot.UI.Avalonia.Controls
         private void SyncScrollBars()
         {
             if (_surface.Bitmap == null) return;
+            bool prevShowH = _hScrollBar.IsVisible;
+            bool prevShowV = _vScrollBar.IsVisible;
             _syncingScrollBars = true;
             try
             {
@@ -511,6 +534,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 _surface.RightInset = showV ? sbW : 0.0;
             }
             finally { _syncingScrollBars = false; }
+            if (_hScrollBar.IsVisible != prevShowH || _vScrollBar.IsVisible != prevShowV)
+                ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
         }
 
         // ── Public helpers ────────────────────────────────────────────────────
@@ -732,6 +757,8 @@ namespace MxPlot.UI.Avalonia.Controls
 
             // ③ Crop shortcut
             menu.Items.Add(MakeItem("Crop", () => CropRequested?.Invoke(this, EventArgs.Empty), MenuIcons.AutoFix));
+            if (ExtractFrameAllowed)
+                menu.Items.Add(MakeItem("Extract Frame", () => ExtractFrameRequested?.Invoke(this, EventArgs.Empty), MenuIcons.Duplicate));
             menu.Items.Add(new Separator());
 
             // ④ Overlay creation submenu

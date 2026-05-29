@@ -26,6 +26,23 @@ namespace MxPlot.UI.Avalonia.Views
         private const string KeyOverlays     = "mxplot.overlays";
 
         /// <summary>
+        /// Serializes current overlay objects into <c>_currentData.Metadata</c>
+        /// (key <c>mxplot.overlays</c>). Call this before taking a data snapshot
+        /// (<see cref="IMatrixData.Clone"/>) when overlay state must survive the clone.
+        /// If there are no overlays the key is removed from Metadata.
+        /// No-op when no data is loaded.
+        /// </summary>
+        public void StoreOverlaysToMetadata()
+        {
+            if (_currentData == null) return;
+            var overlayJson = _view.OverlayManager.SerializeOverlays();
+            if (string.IsNullOrWhiteSpace(overlayJson) || overlayJson == "[]")
+                _currentData.Metadata.Remove(KeyOverlays);
+            else
+                _currentData.Metadata[KeyOverlays] = overlayJson;
+        }
+
+        /// <summary>
         /// Writes the current view settings (LUT, value-range, axis positions)
         /// into <c>_currentData.Metadata</c> so that they are persisted by any
         /// format writer that round-trips the Metadata dictionary.
@@ -34,6 +51,7 @@ namespace MxPlot.UI.Avalonia.Views
         private void SaveViewSettings()
         {
             if (_currentData == null) return;
+            if (_initializingData) return;
             var meta = _currentData.Metadata;
 
             // LUT
@@ -96,8 +114,11 @@ namespace MxPlot.UI.Avalonia.Views
         /// </param>
         private void RestoreViewSettings(IMatrixData data, bool restoreVR = true)
         {
+            _suppressModified = true;
+            try
+            {
             var meta = data.Metadata;
-            Debug.WriteLine($"[MatrixPlotter.RestoreViewSettings] Read Metada, Count = {meta.Count}");
+            Debug.WriteLine($"[MatrixPlotter.RestoreViewSettings] Read Metadat, Count = {meta.Count}");
             // LUT
             if (meta.TryGetValue(KeyLutName, out string? lutName) && !string.IsNullOrEmpty(lutName))
             {
@@ -146,10 +167,12 @@ namespace MxPlot.UI.Avalonia.Views
                     && double.TryParse(maxStr, CultureInfo.InvariantCulture, out double vrMax))
                 {
                     _view.IsFixedRange = true;
-                    _view.FixedMin = vrMin;
-                    _view.FixedMax = vrMax;
                     _rangeBar.SetMode(true);
                     _rangeBar.SetRange(vrMin, vrMax);
+                    // ModeChanged may overwrite FixedMin/Max via DisplayedMinValue or ScanCurrentFrameRange.
+                    // Re-assign after SetMode/SetRange to guarantee the correct persisted values.
+                    _view.FixedMin = vrMin;
+                    _view.FixedMax = vrMax;
                     _suppressModeSync = true;
                     if (_autoRadio != null) _autoRadio.IsChecked = false;
                     if (_fixedRadio != null) _fixedRadio.IsChecked = true;
@@ -220,6 +243,8 @@ namespace MxPlot.UI.Avalonia.Views
                     Debug.WriteLine("[MatrixPlotter.RestoreViewSettings] ROI mode in metadata but no ROI overlay found — staying in current mode.");
                 }
             }
+            } // end try
+            finally { _suppressModified = false; }
         }
     }
 }

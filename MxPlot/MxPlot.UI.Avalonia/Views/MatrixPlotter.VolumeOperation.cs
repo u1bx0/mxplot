@@ -49,6 +49,8 @@ namespace MxPlot.UI.Avalonia.Views
                     // Capture sizes BEFORE deactivating (panels are hidden after Deactivate)
                     var (deltaW, deltaH) = _orthoPanel.GetCurrentSideSizes();
                     _orthoController.Deactivate();
+                    // Notify any active action that orthogonal views are no longer available.
+                    _activeAction?.NotifyContextChanged(CreateActionContext());
 
                     // Reset to neighbour strategy only when no axis is frozen
                     bool anyFrozen = false;

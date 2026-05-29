@@ -79,6 +79,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             _scaleTabBody.Children.Add(BuildAxisInfoGrid(data));
+            UpdateScaleRevertButton();
             RefreshMetaTab();
         }
 
@@ -132,10 +133,10 @@ namespace MxPlot.UI.Avalonia.Views
             };
             TextBox Ed(string t, bool readOnly = false)
             {
-                // macOS adds a native scroll-view inset (~4-5 px) that clips right-aligned text.
-                var padding = OperatingSystem.IsMacOS()
-                    ? new Thickness(7, 1, 12, 1)
-                    : new Thickness(7, 1);
+                // macOS TextBox clips right-aligned text when using HorizontalContentAlignment.
+                // TextAlignment operates at the text-renderer level and is unaffected by the
+                // inner ScrollViewer, so it works correctly on all platforms.
+                var padding = new Thickness(7, 1);
                 var tb = new TextBox
                 {
                     Text = t,
@@ -145,9 +146,10 @@ namespace MxPlot.UI.Avalonia.Views
                     MinHeight = 0,
                     MinWidth = 0,
                     IsReadOnly = readOnly,
-                    HorizontalContentAlignment = HorizontalAlignment.Right,
+                    TextAlignment = TextAlignment.Right,
                     VerticalContentAlignment = VerticalAlignment.Center,
                 };
+                ScrollViewer.SetHorizontalScrollBarVisibility(tb, ScrollBarVisibility.Disabled);
                 if (readOnly)
                 {
                     tb.Background = Brushes.Transparent;
@@ -162,6 +164,7 @@ namespace MxPlot.UI.Avalonia.Views
                 void Refresh()
                 {
                     apply();
+                    SetScaleDirty(true);
                     if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
                     _orthoController.RefreshCrosshairAndSlices();
                 }
@@ -398,6 +401,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             RefreshInfoTab();
+            SetScaleDirty(true);
         }
 
         // ── Metadata tab ─────────────────────────────────────────────────────
@@ -572,6 +576,7 @@ namespace MxPlot.UI.Avalonia.Views
                     _metaNewKeyBox.Text = string.Empty;
                     _metaNewKeyBox.Watermark = "New key\u2026";
                 }
+                SetDirty(DirtyFlags.Data, true);
                 RefreshMetaTab(newKey);
             };
             Action cancelAdd = () =>
@@ -610,6 +615,7 @@ namespace MxPlot.UI.Avalonia.Views
                 var delKey = ResolveMetaKey(delRawKey);
                 if (IsDisplayKeyReadOnly(delRawKey, _currentData)) return;
                 _currentData.Metadata.Remove(delKey);
+                SetDirty(DirtyFlags.Data, true);
                 RefreshMetaTab();
             };
 
@@ -700,6 +706,7 @@ namespace MxPlot.UI.Avalonia.Views
             var minified = StructuredTextUtil.TryMinify(newVal);
             _currentData.Metadata[key] = minified;
             _metaRawValue = minified;
+            SetDirty(DirtyFlags.Data, true);
 
             var formatted = StructuredTextUtil.TryFormat(minified);
             _metaDisplayedValue = formatted;   // set before Text to keep Apply disabled

@@ -144,6 +144,102 @@ namespace MxPlot.Core.Processing
         }
 
         /// <summary>
+        /// Extracts a contiguous range of indices along the specified axis, preserving all other axes (Hyperstack-safe).
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="SelectBy{T}"/>, which collapses a single index and removes the axis,
+        /// this method keeps the target axis but reduces its Count to <paramref name="count"/>.
+        /// All other axes (e.g., Channel, Time) are left intact, so the result is still a full Hyperstack.
+        /// <para>
+        /// Internally, <see cref="DimensionStructure.GetIndicesForSlice"/> is called for each index in the range,
+        /// collecting all frames that include the other-axis combinations — the same pattern used by <see cref="SelectBy{T}"/>.
+        /// </para>
+        /// </remarks>
+        /// <typeparam name="T">The element type of the matrix. Must be an unmanaged type.</typeparam>
+        /// <param name="src">The source matrix.</param>
+        /// <param name="axisName">The name of the axis to substack (e.g., "Z").</param>
+        /// <param name="start">The zero-based start index along the specified axis (inclusive).</param>
+        /// <param name="count">The number of indices to include.</param>
+        /// <param name="deepCopy">true to create an independent copy; false for a shallow view. Default is true.</param>
+        /// <returns>
+        /// A new MatrixData with the target axis Count reduced to <paramref name="count"/> and
+        /// its physical Min/Max updated accordingly. All other axes are unchanged.
+        /// </returns>
+        /// <exception cref="ArgumentException">Thrown if <paramref name="axisName"/> does not exist.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown if the range exceeds the axis bounds.</exception>
+        public static MatrixData<T> Substack<T>(this MatrixData<T> src, string axisName, int start, int count, bool deepCopy = true)
+            where T : unmanaged
+        {
+            if (!src.Dimensions.Contains(axisName))
+                throw new ArgumentException($"Axis '{axisName}' does not exist in the current dimensions.");
+
+            var targetAxis = src.Dimensions[axisName]!;
+            if (start < 0 || count <= 0 || start + count > targetAxis.Count)
+                throw new ArgumentOutOfRangeException(
+                    $"start={start}, count={count} is out of range for axis '{axisName}' (Count={targetAxis.Count}).");
+
+            // Collect frame indices for all zi in [start, start+count),
+            // preserving the full cross-product of the remaining axes.
+            var order = new List<int>(count * (src.FrameCount / targetAxis.Count));
+            for (int zi = start; zi < start + count; zi++)
+                order.AddRange(src.Dimensions.GetIndicesForSlice(axisName, zi));
+            order.Sort();
+
+            var result = src.Reorder(order, deepCopy);
+
+            // Rebuild axis array: shrink the target axis, leave all others as-is.
+            var newAxes = src.Dimensions.Axes
+                .Select(a =>
+                {
+                    if (a.Name != axisName) return a.Clone();
+                    double newMin = a.Min;
+                    double newMax = a.Max;
+                    if (a.Step != 0)
+                    {
+                        newMin = a.Min + start * a.Step;
+                        newMax = newMin + (count - 1) * a.Step;
+                    }
+                    return new Axis(count, newMin, newMax, a.Name, a.Unit, a.IsIndexBased);
+                })
+                .ToArray();
+            result.DefineDimensions(newAxes);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Crops a rectangular XY region and a contiguous range along the specified axis in a single operation
+        /// (Substack → XY Crop). Hyperstack-safe: all axes other than the target are preserved.
+        /// </summary>
+        /// <remarks>
+        /// The operation order is Substack first, then XY Crop, which is more efficient than the reverse
+        /// because the XY crop is applied only to the already-reduced frame set.
+        /// </remarks>
+        /// <typeparam name="T">The element type of the matrix. Must be an unmanaged type.</typeparam>
+        /// <param name="src">The source matrix.</param>
+        /// <param name="axisName">The name of the axis to substack (e.g., "Z").</param>
+        /// <param name="zStart">The zero-based start index along the specified axis (inclusive).</param>
+        /// <param name="zCount">The number of indices to include along the axis.</param>
+        /// <param name="x">The starting X pixel index of the crop region (inclusive).</param>
+        /// <param name="y">The starting Y pixel index of the crop region (inclusive).</param>
+        /// <param name="width">The width in pixels of the crop region.</param>
+        /// <param name="height">The height in pixels of the crop region.</param>
+        /// <param name="progress">Optional progress reporter.</param>
+        /// <param name="cancellationToken">Optional cancellation token.</param>
+        /// <returns>A new MatrixData with both the axis range and XY region reduced.</returns>
+        public static MatrixData<T> VolumeCrop<T>(
+            this MatrixData<T> src,
+            string axisName, int zStart, int zCount,
+            int x, int y, int width, int height,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+        {
+            var substacked = src.Substack(axisName, zStart, zCount, deepCopy: true);
+            return substacked.Crop(x, y, width, height, progress, cancellationToken);
+        }
+
+        /// <summary>
         /// Extract a single frame as a MatrixData<typeparamref name="T"/> specified by frameIndex.
         /// </summary>
         /// <typeparam name="T"></typeparam>

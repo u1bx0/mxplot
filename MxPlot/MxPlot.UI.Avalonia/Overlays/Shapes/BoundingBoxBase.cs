@@ -297,8 +297,21 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
                 case HandleType.BottomLeft:   X  = worldNewPos.X; y2 = worldNewPos.Y; break;
                 case HandleType.MiddleLeft:   X  = worldNewPos.X;                     break;
             }
-            Width  = x2 - X;
+            const double min = 1.0;
+            Width = x2 - X;
             Height = y2 - Y;
+            if (Width < min)
+            {
+                bool leftEdgeMoved = handle is HandleType.TopLeft or HandleType.MiddleLeft or HandleType.BottomLeft;
+                if (leftEdgeMoved) X = x2 - min;
+                Width = min;
+            }
+            if (Height < min)
+            {
+                bool topEdgeMoved = handle is HandleType.TopLeft or HandleType.TopCenter or HandleType.TopRight;
+                if (topEdgeMoved) Y = y2 - min;
+                Height = min;
+            }
         }
 
         /// <summary>

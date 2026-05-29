@@ -49,6 +49,23 @@ namespace MxPlot.App.Views
         private List<WindowListItemViewModel>? _syncSelectionSnapshot;
         private List<MatrixPlotter> _syncBorderedPlotters = [];
 
+        /// <summary>
+        /// When <see langword="true"/>, automatically repositions windows (X-axis only) to prevent
+        /// the dashboard and plot windows from covering each other on activation.
+        /// Set to <see langword="false"/> to disable all overlap-avoidance movement.
+        /// </summary>
+        private bool _avoidOverlapEnabled = true;
+
+        /// <summary>Re-entry guard for overlap-avoidance repositioning.</summary>
+        private bool _adjustingOverlap = false;
+
+        /// <summary>
+        /// Set to <see langword="true"/> just before activating a window from the dashboard list,
+        /// so that <see cref="OnAnyAppWindowActivated"/> knows to skip the dashboard-dodge path
+        /// (the list-click path handles repositioning via <see cref="TryAvoidDashboardOverlap"/> instead).
+        /// </summary>
+        private bool _activatingFromList = false;
+
         private Border _toastPanel = null!;
         private TextBlock _toastText = null!;
         private CancellationTokenSource? _toastCts;
@@ -109,6 +126,8 @@ namespace MxPlot.App.Views
                 foreach (var item in ViewModel.ManagedWindows.ToList())
                     item.Window.Close();
             };
+
+            // ── Exit guard: suppress per-window dialogs after the app-exit check ──
 
             // ── Window List: drag-drop (on the Panel so empty-state area accepts drops too) ──
             // DataContext is set after the constructor via object initializer in App.axaml.cs,
@@ -181,7 +200,11 @@ namespace MxPlot.App.Views
                         && single.IsWindowVisible
                         && !ViewModel.ManagedWindows.Any(m => m.IsRenaming))
                     {
+                        _activatingFromList = true;
                         single.Window.Activate();
+                        _activatingFromList = false;
+                        var w1 = single.Window;
+                        Dispatcher.UIThread.Post(() => TryAvoidDashboardOverlap(w1), DispatcherPriority.Background);
                     }
                 }
                 finally
@@ -213,7 +236,11 @@ namespace MxPlot.App.Views
                     && vm.IsSelected
                     && vm.IsWindowVisible)
                 {
+                    _activatingFromList = true;
                     vm.Window.Activate();
+                    _activatingFromList = false;
+                    var w2 = vm.Window;
+                    Dispatcher.UIThread.Post(() => TryAvoidDashboardOverlap(w2), DispatcherPriority.Background);
                 }
             }, RoutingStrategies.Tunnel);
 
@@ -357,6 +384,39 @@ namespace MxPlot.App.Views
 
         private async void HamburgerExit_Click(object? sender, RoutedEventArgs e)
             => Close();
+
+        private bool _suppressExitConfirmation = false;
+
+        protected override async void OnClosing(WindowClosingEventArgs e)
+        {
+            if (!_suppressExitConfirmation)
+            {
+                var unsaved = ViewModel.ManagedWindows
+                    .OfType<MatrixPlotterListItemViewModel>()
+                    .Where(vm => vm.HasUnsavedChanges)
+                    .ToList();
+
+                if (unsaved.Count > 0)
+                {
+                    e.Cancel = true;
+                    var titles = unsaved
+                        .Select(vm => vm.FileName)
+                        .ToList();
+                    bool discard = await AppExitConfirmDialog.ShowAsync(this, titles);
+                    if (discard)
+                    {
+                        // Suppress both the app-level guard and each individual plotter's dialog.
+                        _suppressExitConfirmation = true;
+                        foreach (var item in ViewModel.ManagedWindows.ToList())
+                            if (item.Window is MatrixPlotter p)
+                                p.SuppressCloseConfirmation = true;
+                        Close();
+                    }
+                    return;
+                }
+            }
+            base.OnClosing(e);
+        }
 
         /// <summary>Shows an error dialog above the always-on-top main window.</summary>
         internal async System.Threading.Tasks.Task ShowErrorAsync(string message)
@@ -1737,7 +1797,107 @@ namespace MxPlot.App.Views
         }
 
         private void OnAnyAppWindowActivated(object? sender, EventArgs e)
-            => Topmost = true;
+        {
+            Topmost = true;
+            if (sender is Window activatedWindow && activatedWindow != this && !_activatingFromList)
+            {
+                var w3 = activatedWindow;
+                Dispatcher.UIThread.Post(() => TryDodgeDashboardFromPlotWindow(w3), DispatcherPriority.Background);
+            }
+        }
+
+        // ── Overlap avoidance helpers ──────────────────────────────────────────
+
+        /// <summary>
+        /// When activating a plot window from the dashboard list, moves the plot window
+        /// to the right or left of the dashboard if they overlap (X-axis only).
+        /// Skips if the window is maximised/fullscreen or overlap avoidance is disabled.
+        /// </summary>
+        private void TryAvoidDashboardOverlap(Window plotWindow)
+        {
+            if (!_avoidOverlapEnabled) return;
+            if (_adjustingOverlap) return;
+            if (plotWindow.WindowState != WindowState.Normal) return;
+            if (WindowState != WindowState.Normal) return;
+
+            var screen = Screens.All.FirstOrDefault(s =>
+                plotWindow.Position.X >= s.Bounds.X && plotWindow.Position.X < s.Bounds.X + s.Bounds.Width &&
+                plotWindow.Position.Y >= s.Bounds.Y && plotWindow.Position.Y < s.Bounds.Y + s.Bounds.Height)
+                ?? Screens.Primary;
+            if (screen == null) return;
+
+            double sc = screen.Scaling;
+            var wb = screen.WorkingArea;
+            var screenRect = new Rect(wb.X / sc, wb.Y / sc, wb.Width / sc, wb.Height / sc);
+            var dashRect = new Rect(Position.X / sc, Position.Y / sc, Bounds.Width, Bounds.Height);
+            var plotRect = new Rect(plotWindow.Position.X / sc, plotWindow.Position.Y / sc,
+                plotWindow.Bounds.Width, plotWindow.Bounds.Height);
+
+            if (!dashRect.Intersects(plotRect)) return;
+
+            const double Gap = 8.0;
+
+            double rightX = dashRect.Right + Gap;
+            double rightOverflow = Math.Max(0, rightX + plotRect.Width - screenRect.Right);
+
+            double leftX = dashRect.Left - Gap - plotRect.Width;
+            double leftOverflow = Math.Max(0, screenRect.Left - leftX);
+
+            double newX = rightOverflow <= leftOverflow
+                ? rightX
+                : Math.Max(screenRect.Left, leftX);
+            newX = Math.Max(screenRect.Left, Math.Min(newX, screenRect.Right - plotRect.Width));
+
+            _adjustingOverlap = true;
+            try { plotWindow.Position = new PixelPoint((int)(newX * sc), plotWindow.Position.Y); }
+            finally { _adjustingOverlap = false; }
+        }
+
+        /// <summary>
+        /// When a plot window gains focus directly, moves the dashboard to the left or right
+        /// of that window if they overlap (X-axis only).
+        /// Skips during sync, maximised/fullscreen states, or when avoidance is disabled.
+        /// </summary>
+        private void TryDodgeDashboardFromPlotWindow(Window plotWindow)
+        {
+            if (!_avoidOverlapEnabled) return;
+            if (_adjustingOverlap) return;
+            if (_isSyncActive) return;
+            if (plotWindow.WindowState != WindowState.Normal) return;
+            if (WindowState != WindowState.Normal) return;
+
+            var screen = Screens.All.FirstOrDefault(s =>
+                plotWindow.Position.X >= s.Bounds.X && plotWindow.Position.X < s.Bounds.X + s.Bounds.Width &&
+                plotWindow.Position.Y >= s.Bounds.Y && plotWindow.Position.Y < s.Bounds.Y + s.Bounds.Height)
+                ?? Screens.Primary;
+            if (screen == null) return;
+
+            double sc = screen.Scaling;
+            var wb = screen.WorkingArea;
+            var screenRect = new Rect(wb.X / sc, wb.Y / sc, wb.Width / sc, wb.Height / sc);
+            var dashRect = new Rect(Position.X / sc, Position.Y / sc, Bounds.Width, Bounds.Height);
+            var plotRect = new Rect(plotWindow.Position.X / sc, plotWindow.Position.Y / sc,
+                plotWindow.Bounds.Width, plotWindow.Bounds.Height);
+
+            if (!dashRect.Intersects(plotRect)) return;
+
+            const double Gap = 8.0;
+
+            double leftX = plotRect.Left - Gap - dashRect.Width;
+            double leftOverflow = Math.Max(0, screenRect.Left - leftX);
+
+            double rightX = plotRect.Right + Gap;
+            double rightOverflow = Math.Max(0, rightX + dashRect.Width - screenRect.Right);
+
+            double newX = leftOverflow <= rightOverflow
+                ? Math.Max(screenRect.Left, leftX)
+                : Math.Min(screenRect.Right - dashRect.Width, rightX);
+            newX = Math.Max(screenRect.Left, Math.Min(newX, screenRect.Right - dashRect.Width));
+
+            _adjustingOverlap = true;
+            try { Position = new PixelPoint((int)(newX * sc), Position.Y); }
+            finally { _adjustingOverlap = false; }
+        }
 
         private async void OnAnyAppWindowDeactivated(object? sender, EventArgs e)
         {

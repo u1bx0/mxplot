@@ -121,6 +121,12 @@ namespace MxPlot.UI.Avalonia.Views
 
         internal void SyncApplyRangeMode(ValueRangeMode mode)
         {
+            // All and Current are multi-frame-only concepts.
+            // Downgrade to Current (displayed as "Auto") on single-frame targets.
+            bool isMultiFrame = _currentData is { FrameCount: > 1 };
+            if (!isMultiFrame && (mode == ValueRangeMode.All || mode == ValueRangeMode.Current))
+                mode = ValueRangeMode.Current;
+
             _syncApplying = true;
             _rangeBar.SetMode(mode);
             _syncApplying = false;

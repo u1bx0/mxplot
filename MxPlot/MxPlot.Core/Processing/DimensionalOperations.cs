@@ -72,10 +72,10 @@ namespace MxPlot.Core.Processing
     /// Extracts a single frame at the specified linear frame index (SliceAt).
     /// Useful for isolating the currently displayed frame before applying further operations.
     /// </summary>
-    public record SliceAtOperation(int FrameIndex) : IMatrixDataOperation
+    public record SliceAtOperation(int FrameIndex, bool DeepCopy = false) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.SliceAt(FrameIndex);
+            => src.SliceAt(FrameIndex, DeepCopy);
     }
 
     // =========================================================================================
@@ -154,5 +154,32 @@ namespace MxPlot.Core.Processing
                 return result;
             }
         }
+    }
+
+    // =========================================================================================
+    // Substack / Volume Crop Operations
+    // =========================================================================================
+
+    /// <summary>
+    /// Extracts a contiguous range along the specified axis while preserving all other axes (Hyperstack-safe).
+    /// </summary>
+    public record SubstackOperation(string AxisName, int Start, int Count, bool DeepCopy = true) : IMatrixDataOperation
+    {
+        public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
+            => src.Substack(AxisName, Start, Count, DeepCopy);
+    }
+
+    /// <summary>
+    /// Crops both a contiguous axis range (Substack) and an XY rectangle in one operation.
+    /// Internally applies Substack first, then XY Crop, for efficiency.
+    /// </summary>
+    public record VolumeCropOperation(
+        string AxisName, int ZStart, int ZCount,
+        int X, int Y, int Width, int Height,
+        IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default) : IMatrixDataOperation
+    {
+        public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
+            => src.VolumeCrop(AxisName, ZStart, ZCount, X, Y, Width, Height, Progress, CancellationToken);
     }
 }

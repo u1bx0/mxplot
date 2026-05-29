@@ -104,10 +104,29 @@ namespace MxPlot.UI.Avalonia.Views
                 : "Saves data to a new file and updates the window title.";
 
             var actionsItems = new StackPanel { Spacing = 3, Margin = new Thickness(4, 6, 4, 4) };
-            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("File", [
+
+            var fileMenuItems = new List<Control>
+            {
                 ControlFactory.MakeChildMenuItem(saveLabel, ActAsync(SaveDataAsync), saveHint, icon: MenuIcons.Save),
-                ControlFactory.MakeChildMenuItem("Export as PNG\u2026", ActAsync(ExportFrameAsPngAsync), "Exports the current frame as a PNG image.",                          icon: MenuIcons.Image),
-            ], icon: MenuIcons.Folder));
+            };
+
+            // ── Export as… submenu (built-in PNG + injected formats) ──────────
+            var pngDesc = MakePngExportDescriptor();
+            var exportItems = new List<Control>
+            {
+                ControlFactory.MakeChildMenuItem(pngDesc.Label, ActAsync(() => InvokeExportAsync(pngDesc)), pngDesc.Hint, icon: MenuIcons.Image),
+            };
+            foreach (var ef in ExportFormats)
+            {
+                if (ef.RequiresStack && (_currentData == null || _currentData.FrameCount <= 1)) continue;
+                var captured = ef;
+                exportItems.Add(ControlFactory.MakeChildMenuItem(
+                    captured.Label, ActAsync(() => InvokeExportAsync(captured)), captured.Hint, icon: MenuIcons.Image));
+            }
+            fileMenuItems.Add(ControlFactory.MakeMenuGroup("Export as\u2026", [.. exportItems],
+                icon: MenuIcons.Image, initiallyExpanded: false, indent: 10,
+                headerFontWeight: FontWeight.Regular));
+            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("File", [.. fileMenuItems], icon: MenuIcons.Folder));
             actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [
                 ControlFactory.MakeChildMenuItem("Copy to Clipboard", ActAsync(CopyFrameToClipboardAsync), "Copies the current frame to the clipboard as an image or tab-separated text.", icon: MenuIcons.Copy),
                 ControlFactory.MakeChildMenuItem("Duplicate Window",  ActAsync(DuplicateWindowAsync),      "Opens a new window with an independent deep copy of the data.", icon: MenuIcons.Duplicate),

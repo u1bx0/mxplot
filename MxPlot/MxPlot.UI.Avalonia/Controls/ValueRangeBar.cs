@@ -1,5 +1,7 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Primitives.PopupPositioning;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -368,6 +370,12 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_roiAvailable)
                 AddItem(ValueRangeMode.Roi, "ROI", "Value range from designated ROI overlay");
 
+            menu.PlacementTarget = _modeBtn;
+            menu.Placement = PlacementMode.AnchorAndGravity;
+            menu.PlacementAnchor = PopupAnchor.BottomLeft;
+            menu.PlacementGravity = PopupGravity.BottomRight;
+            menu.HorizontalOffset = 0;
+            menu.VerticalOffset = 0;
             menu.Open(_modeBtn);
         }
 

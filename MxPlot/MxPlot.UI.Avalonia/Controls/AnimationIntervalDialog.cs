@@ -21,45 +21,45 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _fallback = currentInterval;
 
-            Title                  = "Animation Settings";
-            CanResize              = true;
-            SizeToContent          = SizeToContent.Height;
-            Width                  = 220;
-            MinWidth               = 200;
-            MinHeight              = 100;
-            WindowStartupLocation  = WindowStartupLocation.CenterOwner;
+            Title = "Animation Settings";
+            CanResize = true;
+            SizeToContent = SizeToContent.Height;
+            Width = 220;
+            MinWidth = 200;
+            MinHeight = 100;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
             var messageLabel = new TextBlock
             {
-                Text       = "Input animation interval [ms]",
-                FontSize   = 11,
-                Margin     = new Thickness(0, 0, 0, 6),
+                Text = "Input animation interval [ms]",
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 6),
             };
 
             _nud = new NumericUpDown
             {
-                Minimum                    = 1,
-                Maximum                    = 10000,
-                Value                      = currentInterval,
-                Increment                  = 10,
-                Width                      = 120,
-                Height                     = 20,
-                MinHeight                  = 0,
-                FontSize                   = 11,
-                VerticalAlignment          = VerticalAlignment.Center,
-                VerticalContentAlignment   = VerticalAlignment.Center,
+                Minimum = 1,
+                Maximum = 10000,
+                Value = currentInterval,
+                Increment = 10,
+                Width = 120,
+                Height = 20,
+                MinHeight = 0,
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
-                HorizontalAlignment        = HorizontalAlignment.Left,
-                Padding                    = new Thickness(4, 0),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Padding = new Thickness(4, 0),
             };
             _nud.Classes.Add("compact");
 
             _fpsLabel = new TextBlock
             {
-                Text     = FormatFps(currentInterval),
+                Text = FormatFps(currentInterval),
                 FontSize = 11,
-                Opacity  = 0.75,
-                Margin   = new Thickness(0, 4, 0, 0),
+                Opacity = 0.75,
+                Margin = new Thickness(0, 4, 0, 0),
             };
 
             _nud.ValueChanged += (_, _) =>
@@ -67,31 +67,31 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var okBtn = new Button
             {
-                Content                    = "OK",
-                Width                      = 70,
-                Height                     = 26,
-                FontSize                   = 11,
-                IsDefault                  = true,
+                Content = "OK",
+                Width = 70,
+                Height = 26,
+                FontSize = 11,
+                IsDefault = true,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
             };
 
             var cancelBtn = new Button
             {
-                Content                    = "Cancel",
-                Width                      = 70,
-                Height                     = 26,
-                FontSize                   = 11,
-                IsCancel                   = true,
+                Content = "Cancel",
+                Width = 70,
+                Height = 26,
+                FontSize = 11,
+                IsCancel = true,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
             };
 
-            okBtn.Click     += (_, _) => Close((int)(_nud.Value ?? _fallback));
+            okBtn.Click += (_, _) => Close((int)(_nud.Value ?? _fallback));
             cancelBtn.Click += (_, _) => Close();
 
             Content = new StackPanel
             {
-                Margin   = new Thickness(16, 12, 16, 12),
-                Spacing  = 0,
+                Margin = new Thickness(16, 12, 16, 12),
+                Spacing = 0,
                 Children =
                 {
                     messageLabel,

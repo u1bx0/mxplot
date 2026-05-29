@@ -1,7 +1,7 @@
 ﻿# Hosting MatrixPlotter in WinForms / WPF
 
 **Created**: 2026-04-24  
-**Updated**: 2026-04-29
+**Updated**: 2026-05-29
 **Target version**: `MxPlot.UI.Avalonia` (Avalonia 11.3.14), .NET 10
 
 ---
@@ -37,7 +37,7 @@ Add the following to your WinForms / WPF project `.csproj`.
 ```xml
 <ItemGroup>
   <!-- MxPlot NuGet package (includes MxPlot.UI.Avalonia and MxPlot.Core) -->
-  <PackageReference Include="MxPlot" Version="0.1.0" />
+  <PackageReference Include="MxPlot" Version="0.1.2" />
   <!-- Avalonia Windows backend (Win32 + Skia) -->
   <!-- ⚠️ Version must exactly match the Avalonia dependency of MxPlot.UI.Avalonia -->
   <PackageReference Include="Avalonia.Win32" Version="11.3.14" />

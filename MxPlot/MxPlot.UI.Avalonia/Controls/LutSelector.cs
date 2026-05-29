@@ -1,21 +1,22 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Templates;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Primitives.PopupPositioning;
+using Avalonia.Controls.Templates;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
-using Avalonia.Controls.Primitives.PopupPositioning;
 using Avalonia.Styling;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MxPlot.Core;
 using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Rendering;
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Diagnostics;
 
 namespace MxPlot.UI.Avalonia.Controls
 {
@@ -45,6 +46,7 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Controls ──────────────────────────────────────────────────────────
 
         private readonly ComboBox _comboBox;   // name list with inline gradient preview
+        private readonly Grid _comboWrapper; //Used for custom border of _comboBox
         private readonly TextBlock _lutLabel;   // "LUT:" label — hidden when control is very narrow
         private Popup?   _dropdownPopup;          // PART_Popup reference for placement control
         private Control? _popupContent;            // inner Border of PART_Popup
@@ -93,7 +95,12 @@ namespace MxPlot.UI.Avalonia.Controls
         public double ComboWidth
         {
             get => _comboWidth;
-            set { _comboWidth = value; _comboBox.Width = Math.Max(0, value); }
+            set
+            {
+                _comboWidth = value;
+                _comboBox.Width = Math.Max(0, value);
+                _comboWrapper.Width = Math.Max(0, value);
+            }
         }
 
         // ── Static init: load external .mlut files once ──────────────────────
@@ -118,6 +125,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 Height = 20,
                 FontSize = 11,
                 Padding = new Thickness(5, 1, 1, 1),
+                BorderThickness = new Thickness(0),
             };
 
             // Dropdown item template: [mini colorbar (64px)] [name]
@@ -171,6 +179,19 @@ namespace MxPlot.UI.Avalonia.Controls
                 _comboBox.IsDropDownOpen = true;
             };
 
+            // Wrap ComboBox in a Grid and overlay a persistent border on top.
+            // Fluent theme's ComboBox border disappears at small widths; this Border is always visible.
+            var comboWrapper = new Grid();
+            comboWrapper.Children.Add(_comboBox);
+            comboWrapper.Children.Add(new Border
+            {
+                BorderBrush = new SolidColorBrush(Color.FromArgb(180, 100, 100, 100)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(2), // flat rectangle
+                Background = Brushes.Transparent,
+                IsHitTestVisible = false,
+            });
+
             var panel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -179,10 +200,14 @@ namespace MxPlot.UI.Avalonia.Controls
                 Spacing = 6,
             };
             panel.Children.Add(_lutLabel);
-            panel.Children.Add(_comboBox);
-
+            //panel.Children.Add(_comboBox);
+            panel.Children.Add(comboWrapper);
+            _comboWrapper = comboWrapper;
             Content = panel;
         }
+
+        
+
 
         // ── Public helpers ────────────────────────────────────────────────────
 
@@ -264,6 +289,8 @@ namespace MxPlot.UI.Avalonia.Controls
             if (grid != null)
                 grid.ColumnDefinitions[1].Width = new GridLength(20);
         }
+
+       
 
         // ── Helpers ───────────────────────────────────────────────────────────
 

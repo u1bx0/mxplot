@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
-    /// A compact dialog for directly setting the width and height of the crop ROI.
+    /// A compact dialog for directly setting the width and height of a ROI (or Z start/count).
     /// Values can be entered in pixel (data-index) or physical-scale units.
     /// Returns <c>(double W, double H)</c> in pixel-edge units on OK, or <c>null</c> on Cancel.
     /// </summary>
@@ -27,11 +27,59 @@ namespace MxPlot.UI.Avalonia.Views
         private double _widthPx;
         private double _heightPx;
 
+        // Custom axis overrides (used for the Z-range dialog)
+        private readonly string _widthLabel;
+        private readonly string _heightLabel;
+        private readonly string _widthScaleUnit;
+        private readonly string _heightScaleUnit;
+        private readonly double _widthScaleStep;
+        private readonly double _heightScaleStep;
+        private readonly bool _hasScale;
+        // Optional upper bounds (used for Z-range: start ≤ maxStart, count ≤ dataZCount - start)
+        private readonly double _maxWidthPx;
+        private readonly double _maxHeightPx;
+        private readonly bool _linkHeightMaxToWidth; // when true, heightMax = _maxWidthPx - widthPx
+
+        /// <summary>Creates an XY ROI size dialog driven by the XY axes of <paramref name="data"/>.</summary>
         internal CropRoiSizeDialog(double currentWidthPx, double currentHeightPx, IMatrixData? data)
+            : this(currentWidthPx, currentHeightPx,
+                   widthLabel: "Width:", heightLabel: "Height:",
+                   widthScaleStep:  data?.XStep ?? 0,
+                   heightScaleStep: data?.YStep ?? 0,
+                   widthScaleUnit:  data?.XUnit ?? "",
+                   heightScaleUnit: data?.YUnit ?? "",
+                   data: data)
+        {
+            Title = "ROI Size";
+        }
+
+        /// <summary>
+        /// Creates a generic size dialog with explicit axis labels and scale parameters.
+        /// Used for Z-range editing where XY axis metadata is not applicable.
+        /// </summary>
+        internal CropRoiSizeDialog(
+            double currentWidthPx, double currentHeightPx,
+            string widthLabel, string heightLabel,
+            double widthScaleStep, double heightScaleStep,
+            string widthScaleUnit, string heightScaleUnit,
+            double maxWidthPx = double.MaxValue,
+            double maxHeightPx = double.MaxValue,
+            bool linkHeightMaxToWidth = false,
+            IMatrixData? data = null)
         {
             _data = data;
             _widthPx = Math.Max(1.0, currentWidthPx);
             _heightPx = Math.Max(1.0, currentHeightPx);
+            _widthLabel = widthLabel;
+            _heightLabel = heightLabel;
+            _widthScaleStep = widthScaleStep;
+            _heightScaleStep = heightScaleStep;
+            _widthScaleUnit = widthScaleUnit;
+            _heightScaleUnit = heightScaleUnit;
+            _hasScale = widthScaleStep != 0 && heightScaleStep != 0;
+            _maxWidthPx = maxWidthPx > 0 ? maxWidthPx : double.MaxValue;
+            _maxHeightPx = maxHeightPx > 0 ? maxHeightPx : double.MaxValue;
+            _linkHeightMaxToWidth = linkHeightMaxToWidth;
 
             Title = "ROI Size";
             Width = 210;
@@ -43,6 +91,10 @@ namespace MxPlot.UI.Avalonia.Views
 
             _widthNud = ControlFactory.MakeNumericUpDown(0m, 1m, 1_000_000m, 1m, width: 96);
             _heightNud = ControlFactory.MakeNumericUpDown(0m, 1m, 1_000_000m, 1m, width: 96);
+            if (_maxWidthPx < double.MaxValue)
+                _widthNud.Maximum = (decimal)_maxWidthPx;
+            if (_maxHeightPx < double.MaxValue)
+                _heightNud.Maximum = (decimal)_maxHeightPx;
             _widthUnit = new TextBlock { Text = "px", FontSize = 11, Opacity = 0.55, VerticalAlignment = VerticalAlignment.Center };
             _heightUnit = new TextBlock { Text = "px", FontSize = 11, Opacity = 0.55, VerticalAlignment = VerticalAlignment.Center };
 
@@ -56,7 +108,6 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var panel = new StackPanel { Margin = new Thickness(10, 10, 10, 8), Spacing = 6 };
 
-            bool hasScale = _data != null && _data.XStep != 0 && _data.YStep != 0;
             var pixelRadio = new RadioButton
             {
                 Content = "Pixel", GroupName = "SizeMode", IsChecked = true,
@@ -65,7 +116,7 @@ namespace MxPlot.UI.Avalonia.Views
             pixelRadio.Classes.Add("compact");
             var scaleRadio = new RadioButton
             {
-                Content = "Scale", GroupName = "SizeMode", IsEnabled = hasScale,
+                Content = "Scale", GroupName = "SizeMode", IsEnabled = _hasScale,
                 FontSize = 11, MinHeight = 0, Height = 20,
             };
             scaleRadio.Classes.Add("compact");
@@ -82,8 +133,8 @@ namespace MxPlot.UI.Avalonia.Views
             _widthNud.ValueChanged += (_, _) => OnNudChanged(isWidth: true);
             _heightNud.ValueChanged += (_, _) => OnNudChanged(isWidth: false);
 
-            panel.Children.Add(MakeNudRow("Width:", _widthNud, _widthUnit));
-            panel.Children.Add(MakeNudRow("Height:", _heightNud, _heightUnit));
+            panel.Children.Add(MakeNudRow(_widthLabel, _widthNud, _widthUnit));
+            panel.Children.Add(MakeNudRow(_heightLabel, _heightNud, _heightUnit));
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 2)));
 
             var okBtn = new Button
@@ -165,6 +216,22 @@ namespace MxPlot.UI.Avalonia.Views
             double px = _isPixelMode ? nudVal : (isWidth ? ScaleToPixelW(nudVal) : ScaleToPixelH(nudVal));
             px = Math.Max(1.0, px);
             if (isWidth) _widthPx = px; else _heightPx = px;
+
+            // When linked (Z-range: width = start, height = count),
+            // update height maximum so start + count never exceeds the data Z extent.
+            if (isWidth && _linkHeightMaxToWidth && _maxWidthPx < double.MaxValue)
+            {
+                double maxCountPx = Math.Max(1.0, _maxWidthPx - _widthPx);
+                decimal maxCountNud = _isPixelMode
+                    ? (decimal)Math.Floor(maxCountPx)
+                    : (decimal)Math.Round(PixelToScaleH(maxCountPx), 6);
+                _heightNud.Maximum = Math.Max(1m, maxCountNud);
+                if (_heightNud.Value > _heightNud.Maximum)
+                {
+                    _heightNud.Value = _heightNud.Maximum;
+                    _heightPx = maxCountPx;
+                }
+            }
         }
 
         private void SwitchMode(bool pixel)
@@ -181,12 +248,12 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                _widthNud.Increment = (decimal)Math.Abs(_data?.XStep ?? 1);
-                _heightNud.Increment = (decimal)Math.Abs(_data?.YStep ?? 1);
+                _widthNud.Increment = (decimal)Math.Abs(_widthScaleStep != 0 ? _widthScaleStep : 1);
+                _heightNud.Increment = (decimal)Math.Abs(_heightScaleStep != 0 ? _heightScaleStep : 1);
                 _widthNud.FormatString = "G6";
                 _heightNud.FormatString = "G6";
-                _widthUnit.Text = _data?.XUnit ?? "";
-                _heightUnit.Text = _data?.YUnit ?? "";
+                _widthUnit.Text = _widthScaleUnit;
+                _heightUnit.Text = _heightScaleUnit;
             }
             SyncFromPixels();
         }
@@ -220,9 +287,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Scale conversion ──────────────────────────────────────────────────
 
-        private double PixelToScaleW(double px) => px * Math.Abs(_data?.XStep ?? 1);
-        private double PixelToScaleH(double px) => px * Math.Abs(_data?.YStep ?? 1);
-        private double ScaleToPixelW(double s) => _data?.XStep != 0 ? s / Math.Abs(_data!.XStep) : s;
-        private double ScaleToPixelH(double s) => _data?.YStep != 0 ? s / Math.Abs(_data!.YStep) : s;
+        private double PixelToScaleW(double px) => px * Math.Abs(_widthScaleStep != 0 ? _widthScaleStep : 1);
+        private double PixelToScaleH(double px) => px * Math.Abs(_heightScaleStep != 0 ? _heightScaleStep : 1);
+        private double ScaleToPixelW(double s) => _widthScaleStep != 0 ? s / Math.Abs(_widthScaleStep) : s;
+        private double ScaleToPixelH(double s) => _heightScaleStep != 0 ? s / Math.Abs(_heightScaleStep) : s;
     }
 }

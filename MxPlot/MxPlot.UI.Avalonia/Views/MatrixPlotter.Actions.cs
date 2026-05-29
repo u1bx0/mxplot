@@ -25,24 +25,60 @@ namespace MxPlot.UI.Avalonia.Views
     {
         // ── Window actions (File / Edit / About) ─────────────────────────────
 
-        private async Task ExportFrameAsPngAsync()
+        // ── Export framework ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// Returns a <see cref="ExportFormatDescriptor"/> for the built-in single-frame PNG export.
+        /// This is always present as the first item in the "Export as…" submenu.
+        /// </summary>
+        private ExportFormatDescriptor MakePngExportDescriptor()
+        {
+            return new ExportFormatDescriptor(
+                Label: "PNG\u2026",
+                Hint: "Exports the current frame as a PNG image.",
+                FileTypeName: "PNG Image",
+                FilePattern: "*.png",
+                Exporter: async (path, _, _, _, _, _) =>
+                {
+                    await Task.CompletedTask; // SaveAsPng is synchronous
+                    var (natW, natH) = _view.GetNaturalDims();
+                    int w = Math.Max(1, (int)Math.Round(natW));
+                    int h = Math.Max(1, (int)Math.Round(natH));
+                    _view.SaveAsPng(path, w, h);
+                },
+                RequiresStack: false,
+                DefaultFps: 0);
+        }
+
+        /// <summary>
+        /// Opens a Save File dialog for <paramref name="desc"/> and runs the exporter.
+        /// <para>
+        /// For single-frame formats (<see cref="ExportFormatDescriptor.RequiresStack"/> is
+        /// <c>false</c>) the <c>frameRenderer</c> delegate renders only the current frame.
+        /// For stack formats it renders each frame in sequence at the natural view dimensions.
+        /// </para>
+        /// </summary>
+        private async Task InvokeExportAsync(ExportFormatDescriptor desc)
         {
             var md = _view.MatrixData;
             if (md == null) return;
 
+            int frameCount = desc.RequiresStack ? md.FrameCount : 1;
             int digits = md.FrameCount > 1 ? md.FrameCount.ToString().Length : 0;
 
-            // Strip any existing extension from the window title so that e.g. "Test.JPG"
-            // becomes "Test" and the picker appends ".png" cleanly.
             var baseName = Path.GetFileNameWithoutExtension(Title ?? "Image");
             if (string.IsNullOrWhiteSpace(baseName)) baseName = "Image";
+
+            string suggestedName = !desc.RequiresStack && digits > 0
+                ? baseName + $"_frame{_view.FrameIndex.ToString($"D{digits}")}"
+                : baseName;
 
             var sp = StorageProvider;
             var file = await sp.SaveFilePickerAsync(new FilePickerSaveOptions
             {
-                Title = "Export Frame as PNG",
-                SuggestedFileName = baseName + (digits > 0 ? $"_frame{_view.FrameIndex.ToString($"D{digits}")}" : ""),
-                FileTypeChoices = [new FilePickerFileType("PNG Image") { Patterns = ["*.png"] }],
+                Title = $"Export as {desc.FileTypeName}",
+                SuggestedFileName = suggestedName,
+                FileTypeChoices = [new FilePickerFileType(desc.FileTypeName) { Patterns = [desc.FilePattern] }],
             });
             if (file == null) return;
 
@@ -52,7 +88,20 @@ namespace MxPlot.UI.Avalonia.Views
             var (natW, natH) = _view.GetNaturalDims();
             int w = Math.Max(1, (int)Math.Round(natW));
             int h = Math.Max(1, (int)Math.Round(natH));
-            _view.SaveAsPng(path, w, h);
+
+            // frameRenderer: renders the given frame index to a BGRA32 byte array (via PNG round-trip).
+            // Must be called on the UI thread. Used by injected stack exporters.
+            byte[] FrameRenderer(int frameIndex)
+            {
+                _view.FrameIndex = frameIndex;
+                var rtb = _view.RenderToBitmap(w, h);
+                if (rtb == null) return [];
+                using var ms = new MemoryStream();
+                rtb.Save(ms);
+                return ms.ToArray();
+            }
+
+            await desc.Exporter(path, FrameRenderer, frameCount, w, h, desc.DefaultFps);
         }
 
         /// <summary>
@@ -62,67 +111,81 @@ namespace MxPlot.UI.Avalonia.Views
         /// During save, a semi-transparent overlay with a progress bar covers the window.
         /// On completion, the window title is updated to the saved file name.
         /// </summary>
-        private async Task SaveDataAsync()
+        private async Task SaveDataAsync() => await SaveAsAsync();
+
+        /// <summary>
+        /// Saves the current <see cref="IMatrixData"/> to <paramref name="path"/>.
+        /// When <paramref name="path"/> is <c>null</c> (default), a Save File dialog is shown first.
+        /// The format is inferred from the file extension via <see cref="FormatRegistry.CreateWriter"/>.
+        /// During save, a progress bar overlay covers the window.
+        /// On completion, the window title is updated to the saved file name (unless saving a copy
+        /// of read-only virtual data).
+        /// </summary>
+        /// <param name="path">
+        /// Destination file path, or <c>null</c> to open the Save File picker dialog.
+        /// </param>
+        /// <param name="ct">Cancellation token passed to the background save task.</param>
+        public async Task SaveAsAsync(string? path = null, CancellationToken ct = default)
         {
             if (_currentData == null) return;
 
-            var descriptors = FormatRegistry.WriterDescriptors;
-            var fileTypes = descriptors
-                .Select(d => new FilePickerFileType(d.FormatName) { Patterns = d.DialogPatterns.ToList() })
-                .ToList();
-
-            // Use current title as suggested file name, stripping any compound extension
-            // so that switching formats in the dialog doesn't produce "data.ome.h5" etc.
-            string suggestedName = FormatRegistry.StripKnownExtension(Title ?? "data");
-            foreach (var c in Path.GetInvalidFileNameChars())
-                suggestedName = suggestedName.Replace(c, '_');
-
-            // Pre-select the file type matching the original file extension so the dialog
-            // opens with the most likely format.  Falls back to OME-TIFF if no match.
-            string titleLower = (Title ?? "").ToLowerInvariant();
-            int bestIdx = -1;
-            int bestLen = 0;
-            for (int i = 0; i < descriptors.Count; i++)
+            if (path == null)
             {
-                foreach (var ext in descriptors[i].Extensions)
-                {
-                    if (titleLower.EndsWith(ext, StringComparison.Ordinal) && ext.Length > bestLen)
-                    {
-                        bestIdx = i;
-                        bestLen = ext.Length;
-                    }
-                }
-            }
-            if (bestIdx < 0)
-            {
-                // No extension match — prefer OME-TIFF as the general-purpose default
+                // ── Show Save File dialog to obtain the path ───────────────────────
+                var descriptors = FormatRegistry.WriterDescriptors;
+                var fileTypes = descriptors
+                    .Select(d => new FilePickerFileType(d.FormatName) { Patterns = d.DialogPatterns.ToList() })
+                    .ToList();
+                var title = Title;
+                string suggestedName = FormatRegistry.StripKnownExtension(title ?? "data");
+                foreach (var c in Path.GetInvalidFileNameChars())
+                    suggestedName = suggestedName.Replace(c, '_');
+
+                // Pre-select the file type matching the original file extension.
+                // Falls back to OME-TIFF if no match.
+                string titleLower = (title ?? "").ToLowerInvariant();
+                int bestIdx = -1;
+                int bestLen = 0;
                 for (int i = 0; i < descriptors.Count; i++)
                 {
-                    if (descriptors[i].FormatName.Contains("OME", StringComparison.OrdinalIgnoreCase))
-                    { bestIdx = i; break; }
+                    foreach (var ext in descriptors[i].Extensions)
+                    {
+                        if (titleLower.EndsWith(ext, StringComparison.Ordinal) && ext.Length > bestLen)
+                        {
+                            bestIdx = i;
+                            bestLen = ext.Length;
+                        }
+                    }
                 }
+                if (bestIdx < 0)
+                {
+                    for (int i = 0; i < descriptors.Count; i++)
+                    {
+                        if (descriptors[i].FormatName.Contains("OME", StringComparison.OrdinalIgnoreCase))
+                        { bestIdx = i; break; }
+                    }
+                }
+                if (bestIdx > 0)
+                {
+                    var preferred = fileTypes[bestIdx];
+                    fileTypes.RemoveAt(bestIdx);
+                    fileTypes.Insert(0, preferred);
+                }
+
+                var sp = StorageProvider;
+                var file = await sp.SaveFilePickerAsync(new FilePickerSaveOptions
+                {
+                    Title = "Save As",
+                    SuggestedFileName = suggestedName,
+                    FileTypeChoices = fileTypes,
+                });
+                if (file == null) return;
+
+                path = file.TryGetLocalPath();
+                if (string.IsNullOrEmpty(path)) return;
             }
-            if (bestIdx > 0)
-            {
-                var preferred = fileTypes[bestIdx];
-                fileTypes.RemoveAt(bestIdx);
-                fileTypes.Insert(0, preferred);
-            }
 
-            var sp = StorageProvider;
-            var file = await sp.SaveFilePickerAsync(new FilePickerSaveOptions
-            {
-                Title = "Save As",
-                SuggestedFileName = suggestedName,
-                FileTypeChoices = fileTypes,
-            });
-            if (file == null) return;
-
-            var path = file.TryGetLocalPath();
-            if (string.IsNullOrEmpty(path)) return;
-
-            // Clean up accumulated compound extensions caused by OS dialog limitations.
-            // e.g., "data.ome.ome.tif" → strip all known extensions → "data" → writer adds correct one.
+            // ── Common save logic (dialog path or caller-supplied path) ────────────
             path = FormatRegistry.CleanCompoundExtension(path);
 
             var writer = FormatRegistry.CreateWriter(path);
@@ -134,14 +197,10 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             // OME-TIFF uses ".ome" as a short dialog alias but the writer always
-            // produces ".ome.tif[f]" on disk.  Patch the path here so the title and
-            // _filePath reflect the actual filename without touching the interface.
+            // produces ".ome.tif[f]" on disk.
             string pathBeforeAlias = path;
             path = ResolveOmeTiffAlias(path);
 
-            // The OS save dialog compared against "data.ome" and could not detect
-            // that the canonical "data.ome.tif[f]" already exists on disk.
-            // Show the overwrite confirmation manually in that case.
             if (path != pathBeforeAlias && File.Exists(path))
             {
                 if (!await ShowConfirmDialogAsync("Overwrite File?",
@@ -149,43 +208,35 @@ namespace MxPlot.UI.Avalonia.Views
                     return;
             }
 
-            // ── Save with progress
-            bool compress = true;
             if (_currentData.IsVirtual && writer is ICompressible compressible)
-            {
                 compressible.CompressionInWrite = false;
-                compress = false;
-            }
-            else if (writer is ICompressible c2)
-            {
-                compress = c2.CompressionInWrite;
-            }
 
             var progress = BeginProgress($"Saving {Path.GetFileName(path)}…", blockInput: true);
             var savedTitle = Title;
 
             try
             {
-                // Attach progress reporter if supported
                 if (writer is IProgressReportable pr)
                     pr.ProgressReporter = progress;
 
-                // Persist current view settings (LUT, value-range, axis positions)
-                // into Metadata so they round-trip with any format.
                 SaveViewSettings();
 
-                await Task.Run(() => _currentData.SaveAs(path, writer));
+                await Task.Run(() => _currentData.SaveAs(path, writer), ct);
 
-                // Update title only when the backing store actually changed.
-                // - InMemory (IsWritable=true): title update is conventional "Save As" behavior.
-                // - WVSF (IsWritable=true): SaveAs does file move + remount, backing changed.
-                // - VSF (IsWritable=false): SaveAs copies data, backing unchanged → "Save a Copy".
                 if (_currentData.IsWritable)
                 {
                     Title = Path.GetFileName(FormatRegistry.CleanCompoundExtension(path));
-                    _filePath = path;
-                    SetModified(false);
+                    SourcePath = path;
+                    CaptureLutVrSnapshot();
+                    CaptureScaleSnapshot(_currentData);
+                    ClearAllDirty();
+                    if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
+                    UpdateScaleRevertButton();
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                Title = savedTitle;
             }
             catch (Exception ex)
             {
@@ -208,20 +259,28 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Opens a new <see cref="MatrixPlotter"/> window with a deep-copied <see cref="IMatrixData"/>.
+        /// Creates a new <see cref="MatrixPlotter"/> with a deep-copied <see cref="IMatrixData"/>.
         /// The duplicated data is fully independent — no <c>T[]</c> or <c>ValueRange</c>
         /// references are shared with the original, so mutations in either window are isolated.
-        /// <para><see cref="ICloneable.Clone"/> automatically selects the appropriate strategy:
+        /// <para><see cref="IMatrixData.Duplicate"/> automatically selects the appropriate strategy:
         /// virtual (MMF-backed) data is cloned to a temporary .mxd file without OOM risk,
         /// while in-memory data is deep-copied conventionally.</para>
         /// </summary>
-        private async Task DuplicateWindowAsync()
+        /// <param name="show">
+        /// When <c>true</c> (default), the new window is shown immediately.
+        /// Pass <c>false</c> to receive the window without displaying it,
+        /// allowing the caller to configure it before calling <see cref="Window.Show"/>.
+        /// </param>
+        /// <returns>
+        /// The newly created <see cref="MatrixPlotter"/>, or <c>null</c> when no data is loaded.
+        /// </returns>
+        public async Task<MatrixPlotter?> DuplicateAsync(bool show = true)
         {
-            if (_currentData == null) return;
+            if (_currentData == null) return null;
 
-            // Clone() auto-dispatches: virtual → temp .mxd, in-memory → deep copy.
-            // Virtual cloning writes all frames to a temp file and can take seconds for large datasets,
-            // so show a blocking marquee progress overlay while it runs.
+            // Duplicate() auto-dispatches: virtual → temp .mxd, in-memory → deep copy.
+            // Virtual duplication writes all frames to a temp file and can take seconds for large
+            // datasets, so show a blocking marquee progress overlay while it runs.
             IMatrixData copy;
             if (_currentData.IsVirtual)
             {
@@ -263,8 +322,12 @@ namespace MxPlot.UI.Avalonia.Views
                 }
             }
 
-            resultPlotter.Show();
+            if (show) resultPlotter.Show();
+            return resultPlotter;
         }
+
+        /// <summary>Menu command entry point: duplicates and shows the window immediately.</summary>
+        private async Task DuplicateWindowAsync() => await DuplicateAsync(show: true);
 
         /// <summary>Shows a message dialog with an OK button.</summary>
         private async Task ShowMessageDialogAsync(string title, string message)

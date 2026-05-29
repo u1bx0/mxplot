@@ -57,6 +57,12 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public string? ActiveAxisName => _data != null ? _axisName : null;
 
+        /// <summary>Current crosshair X index (main data column) used for YZ slice.</summary>
+        public int CurrentIX => _lastIX;
+
+        /// <summary>Current crosshair Y index (main data row) used for XZ slice.</summary>
+        public int CurrentIY => _lastIY;
+
         public OrthogonalViewController(OrthogonalPanel panel)
         {
             _panel = panel;

@@ -121,7 +121,7 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// Intended for zoom-independent annotations such as ROI size labels.
         /// </summary>
         public void DrawStringAtScreen(string text, Color foreground, Color background,
-            Point screenPos, double fontSize = 11.0, double pad = 3.0)
+            Point screenPos, double fontSize = 11.0, double pad = 3.0, bool bottomAnchor = false)
         {
             var ft = new FormattedText(
                 text,
@@ -130,11 +130,12 @@ namespace MxPlot.UI.Avalonia.Overlays
                 new Typeface("Arial"),
                 fontSize,
                 new SolidColorBrush(foreground));
-            double w = ft.Width  + pad * 2;
+            double w = ft.Width + pad * 2;
             double h = ft.Height + pad * 2;
+            double originY = bottomAnchor ? screenPos.Y - h : screenPos.Y;
             _ctx.DrawRectangle(MakeBrush(background), null,
-                new Rect(screenPos.X, screenPos.Y, w, h));
-            _ctx.DrawText(ft, new Point(screenPos.X + pad, screenPos.Y + pad));
+                new Rect(screenPos.X, originY, w, h));
+            _ctx.DrawText(ft, new Point(screenPos.X + pad, originY + pad));
         }
 
         /// <summary>Draws a fixed-pixel-size handle square centred at a screen position.</summary>

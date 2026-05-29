@@ -47,6 +47,12 @@ namespace MxPlot.UI.Avalonia.Views
                 _snapshots[p] = p.CaptureSnapshot();
                 Subscribe(p);
             }
+
+            // Cancel any in-progress crop actions on all members.
+            // Sync applies only to operations started after the group is formed;
+            // mid-flight crops from before sync are cancelled to avoid inconsistent state.
+            foreach (var p in _plotters)
+                p.CancelActiveCropAction();
         }
 
         // ── Subscribe / Unsubscribe ──────────────────────────────────────────
@@ -145,7 +151,11 @@ namespace MxPlot.UI.Avalonia.Views
             Propagate((MatrixPlotter)sender!, p => p.SyncApplyRangeMode(mode));
 
         private void OnFixedRangeChanged(object? sender, (double Min, double Max) range) =>
-            Propagate((MatrixPlotter)sender!, p => p.SyncApplyFixedRange(range.Min, range.Max));
+            Propagate((MatrixPlotter)sender!, p =>
+            {
+                p.SyncApplyRangeMode(ValueRangeMode.Fixed);
+                p.SyncApplyFixedRange(range.Min, range.Max);
+            });
 
         private void OnAxisIndexChanged(object? sender, (string AxisName, int Index) args) =>
             Propagate((MatrixPlotter)sender!, p => p.SyncApplyAxisIndex(args.AxisName, args.Index));
