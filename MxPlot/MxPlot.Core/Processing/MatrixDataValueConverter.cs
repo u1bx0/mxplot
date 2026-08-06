@@ -82,10 +82,10 @@ namespace MxPlot.Core.Processing
             var (dstRet, xnum, ynum) = PrepareDstForToDouble(src, dst, 1);
             dst = dstRet;
 
-            T[] srcArray = src.GetArray(frameIndex);
+            ReadOnlyMemory<T> srcMem = src.AsMemory(frameIndex);
             double[] dstArray = dst.GetArray();
 
-            ToDoubleProc(srcArray, dstArray, converter, xnum, ynum, useParallel: true);
+            ToDoubleProc(srcMem, dstArray, converter, xnum, ynum, useParallel: true);
 
             dst.Invalidate();
             return dst;
@@ -108,14 +108,16 @@ namespace MxPlot.Core.Processing
             }
 
             // Sync scale if different
-            if (!dst.GetScale().Equals(scale))
-            {
-                dst.SetXYScale(scale.XMin, scale.XMax, scale.YMin, scale.YMax);
-            }
+            //if (!dst.GetScale().Equals(scale))
+            //{
+            //   dst.SetXYScale(scale.XMin, scale.XMax, scale.YMin, scale.YMax);//
+            //}
+            dst.CopyPropertiesFrom(src);
+
             return (dst, xnum, ynum);
         }
 
-        private static void ToDoubleProc<T>(T[] srcArray, double[] dstArray,
+        private static void ToDoubleProc<T>(ReadOnlyMemory<T> srcMem, double[] dstArray,
             Func<T, double> converter, int xnum, int ynum, bool useParallel)
             where T : unmanaged
         {
@@ -125,22 +127,15 @@ namespace MxPlot.Core.Processing
             void ProcessRow(int iy)
             {
                 int offset = iy * xnum;
-                // Obtain base references to bypass array bounds checking
-                ref T srcRefBase = ref MemoryMarshal.GetArrayDataReference(srcArray);
+                ReadOnlySpan<T> srcRow = srcMem.Span.Slice(offset, xnum);
                 ref double dstRefBase = ref MemoryMarshal.GetArrayDataReference(dstArray);
-
-                // Advance to the start of the current row (equivalent to ptr + offset)
-                ref T currentSrc = ref Unsafe.Add(ref srcRefBase, offset);
-                ref double currentDst = ref Unsafe.Add(ref dstRefBase, offset);
+                ref double rowDstBase = ref Unsafe.Add(ref dstRefBase, offset);
 
                 // Inner loop — no bounds checking
                 for (int ix = 0; ix < xnum; ix++)
                 {
-                    currentDst = converter(currentSrc);
-
-                    // Advance pointers (equivalent to ptr++)
-                    currentSrc = ref Unsafe.Add(ref currentSrc, 1);
-                    currentDst = ref Unsafe.Add(ref currentDst, 1);
+                    ref readonly T currentSrc = ref srcRow[ix];
+                    Unsafe.Add(ref rowDstBase, ix) = converter(currentSrc);
                 }
             }
 
@@ -176,10 +171,11 @@ namespace MxPlot.Core.Processing
             var (ret, xnum, ynum) = PrepareDstForToDouble<Complex>(src, dst, 1);
             dst = ret;
 
-            Complex[] srcArray = src.GetArray(frameIndex);
+            //Complex[] srcArray = src.GetArray(frameIndex);
+            ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
             double[] dstArray = dst.GetArray();
 
-            ToDoubleFromComplexProc(srcArray, dstArray, mode, applyLog10, xnum, ynum, useParallel: true);
+            ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: true);
 
             dst.Invalidate();
             return dst;
@@ -205,15 +201,16 @@ namespace MxPlot.Core.Processing
             dst = ret;
             Parallel.For(0, src.FrameCount, frameIndex =>
             {
-                Complex[] srcArray = src.GetArray(frameIndex);
+                //Complex[] srcArray = src.GetArray(frameIndex);
+                ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
                 double[] dstArray = dst.GetArray(frameIndex);
-                ToDoubleFromComplexProc(srcArray, dstArray, mode, applyLog10, xnum, ynum, useParallel: false);
+                ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: false);
                 dst.Invalidate(frameIndex);
             });
             return dst;
         }
 
-        private static void ToDoubleFromComplexProc(Complex[] srcArray, double[] dstArray,
+        private static void ToDoubleFromComplexProc(ReadOnlyMemory<Complex> srcMem, double[] dstArray,
             ComplexValueMode mode, bool applyLog10, int xnum, int ynum, bool useParallel)
         {
             // Row-level processing (optimized path)
@@ -222,16 +219,18 @@ namespace MxPlot.Core.Processing
                 int offset = iy * xnum;
 
                 // Obtain base references for the current row
-                ref Complex srcRefBase = ref MemoryMarshal.GetArrayDataReference(srcArray);
+                //ref Complex srcRefBase = ref MemoryMarshal.GetArrayDataReference(srcArray);
+                ReadOnlySpan<Complex> srcRow = srcMem.Span.Slice(offset, xnum);
                 ref double dstRefBase = ref MemoryMarshal.GetArrayDataReference(dstArray);
 
-                ref Complex rowSrcBase = ref Unsafe.Add(ref srcRefBase, offset);
+                //ref Complex rowSrcBase = ref Unsafe.Add(ref srcRefBase, offset);
                 ref double rowDstBase = ref Unsafe.Add(ref dstRefBase, offset);
 
                 // Inner loop using base+ix addressing (JIT-friendly pattern)
                 for (int ix = 0; ix < xnum; ix++)
                 {
-                    ref Complex currentSrc = ref Unsafe.Add(ref rowSrcBase, ix);
+                    //ref Complex currentSrc = ref Unsafe.Add(ref rowSrcBase, ix);
+                    ref readonly Complex currentSrc = ref srcRow[ix];
 
                     double val;
 
@@ -368,7 +367,7 @@ namespace MxPlot.Core.Processing
         {
             int xnum = src.XCount;
             int ynum = src.YCount;
-            var dstArray = ConvertArray(src.GetArray(frameIndex), converter, xnum, ynum);
+            var dstArray = ConvertArray(src.AsMemory(frameIndex), converter, xnum, ynum);
 
             var result = new MatrixData<TDst>(xnum, ynum, dstArray);
             result.CopyPropertiesFrom(src);
@@ -379,29 +378,24 @@ namespace MxPlot.Core.Processing
         /// Core array conversion using Unsafe row-processing.
         /// Uses row-level parallelism for large arrays, matching the ToDouble path.
         /// </summary>
-        private static TDst[] ConvertArray<TSrc, TDst>(TSrc[] srcArray,
+        private static TDst[] ConvertArray<TSrc, TDst>(ReadOnlyMemory<TSrc> srcMem,
             Func<TSrc, TDst> converter, int xnum, int ynum)
             where TSrc : unmanaged
             where TDst : unmanaged
         {
-            var dstArray = new TDst[srcArray.Length];
+            var dstArray = new TDst[srcMem.Length];
             int totalLength = xnum * ynum;
 
             // Row-level processing
             void ProcessRow(int iy)
             {
                 int offset = iy * xnum;
-                ref TSrc srcRefBase = ref MemoryMarshal.GetArrayDataReference(srcArray);
-                ref TDst dstRefBase = ref MemoryMarshal.GetArrayDataReference(dstArray);
-
-                ref TSrc currentSrc = ref Unsafe.Add(ref srcRefBase, offset);
-                ref TDst currentDst = ref Unsafe.Add(ref dstRefBase, offset);
+                ReadOnlySpan<TSrc> srcRow = srcMem.Span.Slice(offset, xnum);
+                Span<TDst> dstRow = new Span<TDst>(dstArray, offset, xnum);
 
                 for (int ix = 0; ix < xnum; ix++)
                 {
-                    currentDst = converter(currentSrc);
-                    currentSrc = ref Unsafe.Add(ref currentSrc, 1);
-                    currentDst = ref Unsafe.Add(ref currentDst, 1);
+                    dstRow[ix] = converter(srcRow[ix]);
                 }
             }
 

@@ -68,7 +68,7 @@ namespace MxPlot.UI.Avalonia.Views
             IMatrixData? data = null)
         {
             _data = data;
-            _widthPx = Math.Max(1.0, currentWidthPx);
+            _widthPx = Math.Max(0.0, currentWidthPx);
             _heightPx = Math.Max(1.0, currentHeightPx);
             _widthLabel = widthLabel;
             _heightLabel = heightLabel;
@@ -77,7 +77,7 @@ namespace MxPlot.UI.Avalonia.Views
             _widthScaleUnit = widthScaleUnit;
             _heightScaleUnit = heightScaleUnit;
             _hasScale = widthScaleStep != 0 && heightScaleStep != 0;
-            _maxWidthPx = maxWidthPx > 0 ? maxWidthPx : double.MaxValue;
+            _maxWidthPx = maxWidthPx >= 0 ? maxWidthPx : double.MaxValue;
             _maxHeightPx = maxHeightPx > 0 ? maxHeightPx : double.MaxValue;
             _linkHeightMaxToWidth = linkHeightMaxToWidth;
 
@@ -89,7 +89,7 @@ namespace MxPlot.UI.Avalonia.Views
             CanMinimize = false;
             ShowInTaskbar = false;
 
-            _widthNud = ControlFactory.MakeNumericUpDown(0m, 1m, 1_000_000m, 1m, width: 96);
+            _widthNud = ControlFactory.MakeNumericUpDown(0m, 0m, 1_000_000m, 1m, width: 96);
             _heightNud = ControlFactory.MakeNumericUpDown(0m, 1m, 1_000_000m, 1m, width: 96);
             if (_maxWidthPx < double.MaxValue)
                 _widthNud.Maximum = (decimal)_maxWidthPx;
@@ -100,6 +100,15 @@ namespace MxPlot.UI.Avalonia.Views
 
             Content = BuildContent();
             SyncFromPixels();
+
+            KeyDown += (_, e) =>
+            {
+                if (e.Key == global::Avalonia.Input.Key.Enter)
+                {
+                    SyncFromPixels(); // fix display before close
+                    Close((_widthPx, _heightPx));
+                }
+            };
         }
 
         // ── Layout ────────────────────────────────────────────────────────────
@@ -132,6 +141,8 @@ namespace MxPlot.UI.Avalonia.Views
 
             _widthNud.ValueChanged += (_, _) => OnNudChanged(isWidth: true);
             _heightNud.ValueChanged += (_, _) => OnNudChanged(isWidth: false);
+            _widthNud.LostFocus += (_, _) => { if (!_isPixelMode) SyncFromPixels(); };
+            _heightNud.LostFocus += (_, _) => { if (!_isPixelMode) SyncFromPixels(); };
 
             panel.Children.Add(MakeNudRow(_widthLabel, _widthNud, _widthUnit));
             panel.Children.Add(MakeNudRow(_heightLabel, _heightNud, _heightUnit));
@@ -159,7 +170,7 @@ namespace MxPlot.UI.Avalonia.Views
                 HorizontalContentAlignment = HorizontalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
             };
-            okBtn.Click += (_, _) => Close((_widthPx, _heightPx));
+            okBtn.Click += (_, _) => { SyncFromPixels(); Close((_widthPx, _heightPx)); };
             cancelBtn.Click += (_, _) => Close(null);
 
             var btnRow = new StackPanel
@@ -214,7 +225,8 @@ namespace MxPlot.UI.Avalonia.Views
             if (_suppressSync) return;
             double nudVal = (double)((isWidth ? _widthNud : _heightNud).Value ?? 1m);
             double px = _isPixelMode ? nudVal : (isWidth ? ScaleToPixelW(nudVal) : ScaleToPixelH(nudVal));
-            px = Math.Max(1.0, px);
+            px = Math.Round(px); // snap to nearest integer pixel
+            px = Math.Max(isWidth ? 0.0 : 1.0, px);
             if (isWidth) _widthPx = px; else _heightPx = px;
 
             // When linked (Z-range: width = start, height = count),
@@ -245,6 +257,11 @@ namespace MxPlot.UI.Avalonia.Views
                 _heightNud.FormatString = "F0";
                 _widthUnit.Text = "px";
                 _heightUnit.Text = "px";
+                // Restore pixel-unit bounds
+                _widthNud.Minimum = 0m;
+                _heightNud.Minimum = 1m;
+                _widthNud.Maximum = _maxWidthPx < double.MaxValue ? (decimal)_maxWidthPx : 1_000_000m;
+                _heightNud.Maximum = _maxHeightPx < double.MaxValue ? (decimal)_maxHeightPx : 1_000_000m;
             }
             else
             {
@@ -254,6 +271,13 @@ namespace MxPlot.UI.Avalonia.Views
                 _heightNud.FormatString = "G6";
                 _widthUnit.Text = _widthScaleUnit;
                 _heightUnit.Text = _heightScaleUnit;
+                // Convert bounds to scale units
+                _widthNud.Minimum = 0m;
+                _heightNud.Minimum = (decimal)Math.Round(PixelToScaleH(1.0), 6);
+                _widthNud.Maximum = _maxWidthPx < double.MaxValue
+                    ? (decimal)Math.Round(PixelToScaleW(_maxWidthPx), 6) : 1_000_000m;
+                _heightNud.Maximum = _maxHeightPx < double.MaxValue
+                    ? (decimal)Math.Round(PixelToScaleH(_maxHeightPx), 6) : 1_000_000m;
             }
             SyncFromPixels();
         }

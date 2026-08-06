@@ -273,17 +273,7 @@ namespace MxPlot.Core
         /// <seealso cref="DimensionStructure.this[string]"/>
         Axis? this [string axisName] { get; }
 
-        /// <summary>
-        /// Find and update max and min values in the specific frame. This is necessary when an array data is directly modified.
-        /// </summary>
-        /// <param name="frameIndex"></param>
-        //void RefreshValueRange(int frameIndex);
-
-        /// <summary>
-        /// Find and update max and min values in the active frame. This is necessary when an array data is directly modified.
-        /// </summary>
-        //void RefreshValueRange();
-
+       
         /// <summary>
         /// Marks the current frame is modified and forces the system to recalculate the min and max values when needed.
         /// </summary>
@@ -402,6 +392,30 @@ namespace MxPlot.Core
         (double Min, double Max) GetGlobalValueRange(out List<int> invalids, bool forceRefresh);
 
         /// <summary>
+        /// Calculates the global minimum and maximum values for a specific slice of the hypercube
+        /// (e.g., across all frames, but fixed to a specific index on the target axis).
+        /// </summary>
+        /// <param name="targetAxis">The axis to hold constant (e.g., "C" for Channel).</param>
+        /// <param name="indexInAxis">The specific index on the target axis to evaluate.</param>
+        /// <returns>A tuple containing the minimum and maximum values for the specified slice.</returns>
+        (double Min, double Max) GetGlobalValueRange(Axis targetAxis, int indexInAxis);
+
+        /// <summary>
+        /// Calculates the global minimum and maximum values for a specific slice of the hypercube,
+        /// identifying any uncomputed frames.
+        /// </summary>
+        /// <param name="targetAxis">The axis to hold constant.</param>
+        /// <param name="indexInAxis">The specific index on the target axis to evaluate.</param>
+        /// <param name="invalids">
+        /// When this method returns, contains a list of representative frame indices that are currently uncalculated (invalid).
+        /// </param>
+        /// <param name="forceRefresh">
+        /// If true, forces an immediate full-pixel scan for all invalid frames before returning.
+        /// </param>
+        /// <returns>A tuple containing the minimum and maximum values for the specified slice.</returns>
+        (double Min, double Max) GetGlobalValueRange(Axis targetAxis, int indexInAxis, out List<int> invalids, bool forceRefresh = false);
+
+        /// <summary>
         /// Sets the element value at the specified pixel coordinates in the active frame.
         /// </summary>
         /// <param name="ix">The zero-based X index.</param>
@@ -498,6 +512,31 @@ namespace MxPlot.Core
         /// <exception cref="NotSupportedException">Thrown if the specific operation type is not supported by this data implementation.</exception>
         TResult Apply<TResult>(IOperation<TResult> operation);
 
+        /// <summary>
+        /// Creates a deep copy of this matrix data.
+        /// </summary>
+        /// <param name="forceInMemory">
+        /// When <c>true</c>, forces the cloned data to be fully loaded into memory,
+        /// even if the source is virtual (e.g., memory-mapped file).
+        /// When <c>false</c> (default), preserves the original backing structure
+        /// (virtual data remains virtual, in-memory data remains in-memory).
+        /// </param>
+        /// <returns>
+        /// A new <see cref="IMatrixData"/> instance with the same dimensions, values,
+        /// metadata, and axis structure. If <paramref name="forceInMemory"/> is <c>true</c>,
+        /// the returned instance will have <see cref="IsVirtual"/> = <c>false</c>.
+        /// </returns>
+        /// <remarks>
+        /// This method overloads <see cref="ICloneable.Clone()"/> to provide explicit control
+        /// over memory allocation. Use <c>forceInMemory = true</c> when:
+        /// <list type="bullet">
+        ///   <item>Converting virtual data to fully editable in-memory data.</item>
+        ///   <item>Ensuring data survives disposal of the original virtual backing store.</item>
+        /// </list>
+        /// For type-safe cloning that preserves the concrete type (e.g., <c>MatrixData&lt;T&gt;</c>),
+        /// use the <c>Duplicate&lt;T&gt;</c> extension method instead.
+        /// </remarks>
+        IMatrixData Clone(bool forceInMemory);
 
     }
 

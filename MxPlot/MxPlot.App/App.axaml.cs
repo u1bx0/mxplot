@@ -7,6 +7,7 @@ using MxPlot.App.Plugins;
 using MxPlot.App.ViewModels;
 using MxPlot.App.Views;
 using MxPlot.UI.Avalonia.Plugins;
+using MxPlot.UI.Avalonia.Video;
 using System.IO;
 using System.Linq;
 
@@ -41,6 +42,7 @@ namespace MxPlot.App
                 var pluginsDir = Path.Combine(System.AppContext.BaseDirectory, "plugins");
                 MatrixPlotterPluginRegistry.LoadFromDirectory(pluginsDir);
                 MxPlotAppPluginRegistry.LoadFromDirectory(pluginsDir);
+                MatrixPlotterPluginRegistry.AddExportPlugin(new AviExporter());
 
                 var vm = new MxPlotAppViewModel();
                 var win = new MxPlotAppWindow { DataContext = vm };

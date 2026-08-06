@@ -180,17 +180,7 @@ namespace MxPlot.Core.IO.CacheStrategies
 
             return _dim.GetFrameIndexAt(pos);
         }
-
-        private int CalculateIndex(int[] basePos, int axis1, int val1, int axis2, int val2)
-        {
-            Span<int> pos = stackalloc int[_dim.Axes.Count];
-            basePos.CopyTo(pos);
-
-            if (axis1 >= 0) pos[axis1] = val1;
-            if (axis2 >= 0) pos[axis2] = val2;
-
-            return _dim.GetFrameIndexAt(pos);
-        }
+              
 
         public bool IsHighPriority(int index)
         {

@@ -52,6 +52,16 @@ namespace MxPlot.UI.Avalonia.Helpers
         internal static readonly StreamGeometry Lightning = StreamGeometry.Parse(
             "M7,2V13H10V22L17,10H13L17,2H7Z");
 
+        /// <summary>Open-in-new-window icon (Bootstrap Icons "box-arrow-up-right", MIT).
+        /// Square with lower-left notch + upper-right arrow. 16×16 coordinate space.</summary>
+        internal static readonly StreamGeometry OpenInNewWindow = StreamGeometry.Parse(
+            "M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z");
+
+        /// <summary>Cube with a plus badge at the top-right corner — "create new data" action.
+        /// Cube body from Material Design Icons "cube" (Apache 2.0), plus badge hand-crafted. 24×24 coordinate space.</summary>
+        internal static readonly StreamGeometry CreateNewData = StreamGeometry.Parse(
+            "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15M5,15.91L11,19.29V12.58L5,9.21V15.91M19,15.91V9.21L13,12.58V19.29L19,15.91Z M20,0H22V2H24V4H22V6H20V4H18V2H20Z");
+
         // ── Property / Analysis ───────────────────────────────────────────────
 
         internal static readonly StreamGeometry Ruler = StreamGeometry.Parse(
@@ -59,6 +69,7 @@ namespace MxPlot.UI.Avalonia.Helpers
 
         internal static readonly StreamGeometry Palette = StreamGeometry.Parse(
             "M12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2C17.5,2 22,6 22,11A6,6 0 0,1 16,17H14.2C13.9,17 13.7,17.2 13.7,17.5C13.7,17.6 13.8,17.7 13.8,17.8C14.2,18.3 14.4,18.9 14.4,19.5C14.5,20.9 13.4,22 12,22M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C12.3,20 12.5,19.8 12.5,19.5C12.5,19.3 12.4,19.2 12.4,19.1C12,18.6 11.8,18.1 11.8,17.5C11.8,16.1 12.9,15 14.3,15H16A4,4 0 0,0 20,11C20,7.1 16.4,4 12,4M6.5,10A1.5,1.5 0 0,1 8,11.5A1.5,1.5 0 0,1 6.5,13A1.5,1.5 0 0,1 5,11.5A1.5,1.5 0 0,1 6.5,10M9,6.5A1.5,1.5 0 0,1 10.5,8A1.5,1.5 0 0,1 9,9.5A1.5,1.5 0 0,1 7.5,8A1.5,1.5 0 0,1 9,6.5M15,6.5A1.5,1.5 0 0,1 16.5,8A1.5,1.5 0 0,1 15,9.5A1.5,1.5 0 0,1 13.5,8A1.5,1.5 0 0,1 15,6.5M18,10A1.5,1.5 0 0,1 19.5,11.5A1.5,1.5 0 0,1 18,13A1.5,1.5 0 0,1 16.5,11.5A1.5,1.5 0 0,1 18,10Z");
+
 
         internal static readonly StreamGeometry Magnify = StreamGeometry.Parse(
             "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z");
@@ -105,6 +116,12 @@ namespace MxPlot.UI.Avalonia.Helpers
         internal static readonly StreamGeometry EyeOff = StreamGeometry.Parse(
             "M11.83,9L15,12.16C15,12.11 15,12.05 15,12A3,3 0 0,0 12,9C11.94,9 11.89,9 11.83,9M7.53,9.8L9.08,11.35C9.03,11.56 9,11.77 9,12A3,3 0 0,0 12,15C12.22,15 12.44,14.97 12.65,14.92L14.2,16.47C13.53,16.8 12.79,17 12,17A5,5 0 0,1 7,12C7,11.21 7.2,10.47 7.53,9.8M2,4.27L4.28,6.55L4.73,7C3.08,8.3 1.78,10 1,12C2.73,16.39 7,19.5 12,19.5C13.55,19.5 15.03,19.13 16.38,18.5L16.81,18.92L19.73,21.85L21,20.54L3.27,2.82L2,4.27M12,7A5,5 0 0,1 17,12C17,12.64 16.87,13.26 16.64,13.82L19.57,16.75C21.07,15.5 22.27,13.86 23,12C21.27,7.61 17,4.5 12,4.5C10.6,4.5 9.26,4.75 8,5.2L10.17,7.35C10.74,7.13 11.35,7 12,7Z");
 
+        internal static readonly StreamGeometry SineWave = StreamGeometry.Parse(
+            "M16.5,21C13.5,21 12.31,16.76 11.05,12.28C10.14,9.04 9,5 7.5,5C4.11,5 4,11.93 4,12H2C2,11.63 2.06,3 7.5,3C10.5,3 11.71,7.25 12.97,11.74C13.83,14.8 15,19 16.5,19C19.94,19 20,12.07 20,12H22C22,12.37 21.94,21 16.5,21Z");
+
+        internal static readonly StreamGeometry ComplexZ = StreamGeometry.Parse(
+            "M6,5 L18,5 L18,8 L11,16 L18,16 L18,19 L6,19 L6,16 L13,8 L6,8 Z");
+
         // ── Plugin system ─────────────────────────────────────────────────────
 
         /// <summary>Puzzle-piece icon for the Plugins tab (Material Design "extension", Apache 2.0).</summary>
@@ -129,6 +146,10 @@ namespace MxPlot.UI.Avalonia.Helpers
 
         internal static readonly StreamGeometry Search = StreamGeometry.Parse(
              "M11.5,5A6.5,6.5 0 1,0 11.5,18A6.5,6.5 0 1,0 11.5,5ZM11.5,7A4.5,4.5 0 1,1 11.5,16A4.5,4.5 0 1,1 11.5,7ZM16.1,16.1L21.8,21.8A1,1 0 0,0 23.2,20.4L17.5,14.7Z");
+
+        /// <summary>Table/database icon for Data menu (Material Design "table_chart", Apache 2.0).</summary>
+        internal static readonly StreamGeometry Data = StreamGeometry.Parse(
+            "M19,3H5C3.9,3 3,3.9 3,5V19C3,20.1 3.9,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.9 20.1,3 19,3M19,5V9H5V5H19M19,11V15H13V11H19M19,17V19H13V17H19M11,11V15H5V11H11M11,17V19H5V17H11Z");
 
         /// <summary>Dashed selection rectangle (ROI marquee) icon for "Use ROI for value range" action.
         /// Built from filled dash rectangles because PathIcon renders geometry as Fill, not Stroke.</summary>
@@ -176,9 +197,14 @@ namespace MxPlot.UI.Avalonia.Helpers
             [Plugin]     = new SolidColorBrush(Color.Parse("#26A69A")),  // Teal 400
             [Sparkle]    = new SolidColorBrush(Color.Parse("#FFCA28")),  // Amber 400
             [LineChart]  = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
+            [SineWave] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [ComplexZ] = new SolidColorBrush(Color.Parse("#FFC107")),  // Amber 500 — Gold
             [Lock]       = new SolidColorBrush(Color.Parse("#FFB74D")),  // Orange 300
             [History]    = new SolidColorBrush(Color.Parse("#7E57C2")),  // Deep Purple 400
             [Search]     = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
+            [Data]       = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [OpenInNewWindow] = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
+            [CreateNewData]   = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
         };
 
         /// <summary>Returns the default colour brush for the given icon geometry, or <c>null</c> if unknown.</summary>

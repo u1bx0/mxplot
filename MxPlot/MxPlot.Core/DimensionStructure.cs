@@ -95,6 +95,7 @@ namespace MxPlot.Core
         public DimensionStructure(IMatrixData md)
         {
             _md = md;
+            _md.ActiveIndexChanged += ActiveIndex_Changed;
             if (_md.FrameCount > 1)
                 RegisterAxes(new Axis(_md.FrameCount, 0, _md.FrameCount - 1, "Frame"));
             else
@@ -167,6 +168,7 @@ namespace MxPlot.Core
                 axis.IndexChanged -= AxisIndexChanged;
             }
             _axisList.Clear();
+            _strides = Array.Empty<int>();
         }
 
         [MemberNotNull(nameof(_strides))]
@@ -195,7 +197,7 @@ namespace MxPlot.Core
                 currentStride *= axis.Count;
             }
 
-            // 総数チェック
+            // Check if the total number of frames matches the product of axis counts
             if (currentStride != _md.FrameCount)
                 throw new ArgumentException($"Total count mismatch. Expected {_md.FrameCount}, but axes product is {currentStride}");
 
@@ -208,11 +210,25 @@ namespace MxPlot.Core
         /// <param name="e"></param>
         private void ActiveIndex_Changed(object? sender, EventArgs e)
         {
-            if (_isUpdating == 1 || _axisList.Count == 0) // Skip if we are updating MatrixData's ActiveIndex ourselves
+            if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0 
+                || _axisList.Count == 0)
                 return;
 
-            UpdateAxisIndicesFromFrameIndex(_md.ActiveIndex);
+            try
+            {
+                UpdateAxisIndicesProc(_md.ActiveIndex);
+
+#if DEBUG
+                Debug.WriteLine($"[DimensionStructure.ActiveIndex_Changed] ActiveIndex={_md.ActiveIndex}, AxisIndices={string.Join(",", GetAxisIndices())}");
+#endif
+
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isUpdating, 0);
+            }
         }
+
         /// <summary>
         /// One of the Axis indices has changed -> Need to update MatrixData's ActiveIndex
         /// </summary>
@@ -230,6 +246,9 @@ namespace MxPlot.Core
             {
                 int index = ToFrameIndex();
                 _md.ActiveIndex = index;
+#if DEBUG
+                Debug.WriteLine($"[DimensionStructure.AxisIndexChanged] AxisIndices={string.Join(",", GetAxisIndices())}, ActiveIndex={_md.ActiveIndex}");
+#endif
             }
             finally
             {
@@ -246,20 +265,21 @@ namespace MxPlot.Core
                || _axisList.Count == 0)
                 return;// Skip if we are updating Axis indices ourselves
 
-            // Here: _isUpdating = 1;
             try
             {
-                var indices = GetAxisIndices(frameIndex);
-                for (int i = 0; i < indices.Length; i++)
-                {
-                    // Update active Index of each axis -> Event notifications occur but will be skipped
-                    _axisList[i].Index = indices[i];
-                }
+                UpdateAxisIndicesProc(frameIndex);
             }
             finally
             {
                 Interlocked.Exchange(ref _isUpdating, 0);
             }
+        }
+
+        private void UpdateAxisIndicesProc(int frameIndex)
+        {
+            var indices = GetAxisIndices(frameIndex);
+            for (int i = 0; i < indices.Length; i++)
+                _axisList[i].Index = indices[i];
         }
 
         /// <summary>
@@ -271,8 +291,13 @@ namespace MxPlot.Core
             if (indices.Length != _axisList.Count)
                 throw new ArgumentException("Invalid lenght of indices!");
             var index = GetFrameIndexAt(indices);
-            //内部で更新する
+            /* The following is not needed because the AxisIndexChanged event will automatically update the ActiveIndex of MatrixData.
+            // Update the active index of each axis in sync with changes to MatrixData's ActiveIndex
             UpdateAxisIndicesFromFrameIndex(index);
+            */
+
+            //By setting the ActiveIndex of MatrixData, the AxisIndexChanged event will be triggered, which will update the indices of each axis.
+            _md.ActiveIndex = index;
         }
            
 
@@ -294,15 +319,14 @@ namespace MxPlot.Core
                 return 0;
             }
 
+            int pos = _axisList.IndexOf(axis);
+            if (pos == -1)
+                throw new ArgumentException(axis + " does not exist in this series.");
+
             if (index < 0 || index >= axis.Count)
                 throw new IndexOutOfRangeException("Invalid index for " + axis + "index = " + index);
 
-            if (!_axisList.Contains(axis))
-                throw new ArgumentException(axis + " does not exist in this series.");
-
             int[] indices = GetAxisIndices();
-            int pos = _axisList.IndexOf(axis);
-
             indices[pos] = index;
             return GetFrameIndexAt(indices);
         }
@@ -321,6 +345,121 @@ namespace MxPlot.Core
 
             return GetFrameIndexFor(axis, index);
         }
+
+        /// <summary>
+        /// Returns the frame indices for all values of the specified axis,
+        /// while keeping all other axes fixed at their current or specified positions.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// This method is designed for scenarios where one axis needs to be fully iterated
+        /// while other axes remain fixed. A typical use case is <b>composite (multi-channel) display</b>,
+        /// where all channel frames at the current Z and Time position are required simultaneously.
+        /// </para>
+        /// <para>
+        /// If <paramref name="baseCoords"/> is empty (or not specified), the current
+        /// <c>ActiveIndex</c> is used as the base, and all axes retain their current positions.
+        /// If one or more coords are specified, those axes are overridden while unspecified axes
+        /// still fall back to their <c>ActiveIndex</c> positions.
+        /// </para>
+        /// <code>
+        /// // Setup:
+        /// // var md = new MatrixData(w, h, Axis.Channel(3), Axis.Z(5, -1, 2), Axis.Time(20, 0, 10));
+        /// // Axes[0] = Channel (count=3)
+        /// // Axes[1] = Z       (count=5)
+        /// // Axes[2] = Time    (count=20)
+        ///
+        /// // Example 1: Get all Channel frame indices at the current ActiveIndex position (Z and Time unchanged)
+        /// int[] chs = dim.GetFrameIndicesFor(chAxis);
+        /// // chs[0] = frame index where Channel=0, Z=current, Time=current
+        /// // chs[1] = frame index where Channel=1, Z=current, Time=current
+        /// // chs[2] = frame index where Channel=2, Z=current, Time=current
+        ///
+        /// // Example 2: Get all Channel frame indices at a specific Z and Time position
+        /// int[] chs = dim.GetFrameIndicesFor(chAxis, ("Z", 2), ("Time", 5));
+        /// // chs[0] = frame index where Channel=0, Z=2, Time=5
+        /// // chs[1] = frame index where Channel=1, Z=2, Time=5
+        /// // chs[2] = frame index where Channel=2, Z=2, Time=5
+        /// </code>
+        /// <para>
+        /// <b>Note:</b> The target axis itself should not be included in <paramref name="baseCoords"/>,
+        /// as its value is overridden by the iteration regardless.
+        /// </para>
+        /// </remarks>
+        /// <param name="axis">
+        /// The axis to iterate over. All index values from 0 to <c>axis.Count - 1</c> are enumerated.
+        /// Must not be null and must be registered in this <see cref="DimensionStructure"/>.
+        /// </param>
+        /// <param name="baseCoords">
+        /// Optional axis position overrides used as the base for iteration.
+        /// Each entry specifies an axis name (case-insensitive) and its fixed index value.
+        /// Axes not listed here retain their position from the current <c>ActiveIndex</c>.
+        /// If empty, the current <c>ActiveIndex</c> is used as-is for all axes.
+        /// </param>
+        /// <returns>
+        /// An array of frame indices of length <c>axis.Count</c>, where <c>result[i]</c> is the
+        /// frame index corresponding to the target axis being at index <c>i</c>,
+        /// with all other axes fixed as described above.
+        /// </returns>
+        /// <exception cref="ArgumentNullException">
+        /// Thrown when <paramref name="axis"/> is null.
+        /// </exception>
+        /// <exception cref="ArgumentException">
+        /// Thrown when <paramref name="axis"/> is not registered in this <see cref="DimensionStructure"/>,
+        /// or when any axis name in <paramref name="baseCoords"/> does not exist.
+        /// </exception>
+        public int[] GetFrameIndicesFor(Axis axis, params (string AxisName, int Index)[] baseCoords)
+        {
+            if (axis == null)
+                throw new ArgumentNullException(nameof(axis));
+            if (!_axisList.Contains(axis))
+                throw new ArgumentException(axis + " does not exist in this series.");
+
+            int[] indices = GetAxisIndices(GetFrameIndexAt(baseCoords));
+            int axisOrder = GetAxisOrder(axis);
+
+            int[] result = new int[axis.Count];
+            // indices is reused across iterations; only the target axis slot is updated each time.
+            for (int i = 0; i < axis.Count; i++)
+            {
+                indices[axisOrder] = i;
+                result[i] = GetFrameIndexAt(indices);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Returns the frame indices for all values of the axis with the specified name,
+        /// while keeping all other axes fixed at their current or specified positions.
+        /// </summary>
+        /// <remarks>
+        /// This is a convenience overload of <see cref="GetFrameIndicesFor(Axis, ValueTuple{string, int}[])"/>
+        /// that accepts an axis name string instead of an <see cref="Axis"/> object.
+        /// Refer to that method for full documentation and usage examples.
+        /// </remarks>
+        /// <param name="axisName">
+        /// The name of the axis to iterate over (case-insensitive).
+        /// Must correspond to an axis registered in this <see cref="DimensionStructure"/>.
+        /// </param>
+        /// <param name="baseCoords">
+        /// Optional axis position overrides. See <see cref="GetFrameIndicesFor(Axis, ValueTuple{string, int}[])"/>
+        /// for details.
+        /// </param>
+        /// <returns>
+        /// An array of frame indices of length <c>axis.Count</c>.
+        /// See <see cref="GetFrameIndicesFor(Axis, ValueTuple{string, int}[])"/> for details.
+        /// </returns>
+        /// <exception cref="ArgumentException">
+        /// Thrown when <paramref name="axisName"/> does not correspond to any registered axis,
+        /// or when any axis name in <paramref name="baseCoords"/> does not exist.
+        /// </exception>
+        public int[] GetFrameIndicesFor(string axisName, params (string AxisName, int Index)[] baseCoords)
+        {
+            var axis = this[axisName]
+                ?? throw new ArgumentException($"Axis '{axisName}' not found.");
+            return GetFrameIndicesFor(axis, baseCoords);
+        }
+
 
         /// <summary>
         /// Returns the position of the specified axis in the Series axes = axisList.IndexOf(axis)
@@ -529,7 +668,7 @@ namespace MxPlot.Core
         public int[] GetAxisIndices(int frameIndex = -1)
         {
             var buffer = new int[_axisList.Count];
-            // Span版の Copy を呼ぶことで配列への暗黙変換を利用
+            // Use the Span version of Copy to leverage implicit conversion to an array.
             CopyAxisIndicesTo(buffer, frameIndex);
             return buffer;
         }
@@ -541,7 +680,7 @@ namespace MxPlot.Core
         /// <param name="frameIndex">The index of the frame from which to copy axis indices. Specify -1 to use the current frame.</param>
         public void CopyAxisIndicesTo(int[] buffer, int frameIndex = -1)
         {
-            // 配列版は Span版へ丸投げするだけ (ロジック重複排除)
+            // Call the Span version of CopyAxisIndicesTo, which accepts a Span<int> and handles the logic.
             CopyAxisIndicesTo(buffer.AsSpan(), frameIndex);
         }
 
@@ -554,11 +693,12 @@ namespace MxPlot.Core
         /// <exception cref="ArgumentException">Thrown if the length of <paramref name="buffer"/> is less than the number of axes.</exception>
         public void CopyAxisIndicesTo(Span<int> buffer, int frameIndex = -1)
         {
-            if (frameIndex == -1) frameIndex = _md.ActiveIndex; // ここは適宜修正
+            if (frameIndex == -1) 
+                frameIndex = _md.ActiveIndex; 
             if (buffer.Length < _axisList.Count)
                 throw new ArgumentException("Destination span is too short.");
 
-            // ロジック本体 
+            // Logic to compute the axis indices for the given frame index using pre-calculated strides.
             for (int i = 0; i < _axisList.Count; i++)
             {
                 buffer[i] = (frameIndex / _strides[i]) % _axisList[i].Count;

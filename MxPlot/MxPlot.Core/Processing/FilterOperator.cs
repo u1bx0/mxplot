@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
@@ -41,8 +42,8 @@ namespace MxPlot.Core.Processing
             int r = kernel.Radius;
             int kernelFullSize = (2 * r + 1) * (2 * r + 1);
 
-            var toDouble = MatrixData<T>.ToDoubleConverter;
-            var fromDouble = MatrixData<T>.FromDoubleConverter;
+            //var toDouble = MatrixData<T>.ToDoubleConverter;
+            //var fromDouble = MatrixData<T>.FromDoubleConverter;
 
             var dstArrays = new T[frameCount][];
             progress?.Report(-frameCount);
@@ -72,11 +73,11 @@ namespace MxPlot.Core.Processing
                             int rowOff = ky * w;
                             for (int kx = xMin; kx <= xMax; kx++)
                             {
-                                buf[count++] = toDouble(src[rowOff + kx]);
+                                buf[count++] = NumericConverter.ToDouble(src[rowOff + kx]);
                             }
                         }
 
-                        dst[py * w + px] = fromDouble(kernel.Apply(buf.AsSpan(), count));
+                        dst[py * w + px] = NumericConverter.FromDouble<T>(kernel.Apply(buf.AsSpan(), count));
                     }
                 }
 

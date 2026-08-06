@@ -4,6 +4,7 @@ using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
 using System;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -390,20 +391,49 @@ namespace MxPlot.UI.Avalonia.Views
         /// Builds a human-readable frame label for the title of an extracted frame window.
         /// For Hyperstack data, formats as "[A=1, B=3]"; for flat multi-frame, "[i=8]".
         /// </summary>
+        /// <summary>
+        /// Formats an axis value at the given index as a short string suitable for window titles.
+        /// Index-based axes use "i=N" (1-based). Scaled axes use the value formatted to 3 decimal places with unit.
+        /// Example: "Z=12.500 um", "Time=0.100 s", "Channel=i=2"
+        /// </summary>
+        /// <param name="verbose">
+        /// When <c>true</c>, appends the 1-based index suffix for scaled axes: "12.500 um (i=22)".
+        /// When <c>false</c>, returns the value only: "12.500 um". Index-based axes always use "(Index=N)".
+        /// </param>
+        private static string FormatAxisValue(Axis axis, int index, bool verbose = false)
+        {
+            if (axis.IsIndexBased)
+                return $"i:{index + 1}";
+            double val = axis.ValueAt(index);
+            string unit = string.IsNullOrEmpty(axis.Unit) ? "" : $" {axis.Unit}";
+            return verbose ? $"{val:F3}{unit} (idx:{index + 1})" : $"{val:F3}{unit}";
+        }
+
         private static string BuildFrameLabel(IMatrixData data, int frameIndex)
         {
             var axes = data.Axes;
             if (axes.Count == 0)
-                return $"[i={frameIndex}]";
+                return $"[i={frameIndex + 1}]";
 
             var coords = data.Dimensions.GetAxisIndices(frameIndex);
             var parts = new System.Text.StringBuilder();
             for (int i = 0; i < axes.Count; i++)
             {
                 if (i > 0) parts.Append(", ");
-                parts.Append($"{axes[i].Name}={coords[i] + 1}");
+                parts.Append($"{axes[i].Name}={FormatAxisValue(axes[i], coords[i])}");
             }
             return $"[{parts}]";
+        }
+
+        private static string BuildFrameHistoryDetail(IMatrixData data, int frameIndex)
+        {
+            var axes = data.Axes;
+            if (axes.Count == 0)
+                return $"i={frameIndex + 1}";
+
+            var coords = data.Dimensions.GetAxisIndices(frameIndex);
+            return string.Join(", ", Enumerable.Range(0, axes.Count)
+                .Select(i => $"{axes[i].Name}={FormatAxisValue(axes[i], coords[i], verbose: true)}"));
         }
 
         /// <summary>
@@ -412,63 +442,215 @@ namespace MxPlot.UI.Avalonia.Views
         /// When the source data has additional hyperstack axes, they are appended as "Name=val".
         /// Example: "[X-Time, Y=5, Channel=2]"
         /// </summary>
-        private static string BuildOrthoLabel(string horizAxis, string vertAxis, string fixedAxisName, int fixedIndex, IMatrixData? sourceData)
+        /// <param name="horizAxis">Horizontal spatial axis name ("X" or "Y").</param>
+        /// <param name="vertAxis">Vertical/depth hyperstack axis name shown in the plane (e.g. "Z", "T").</param>
+        /// <param name="fixedAxisName">Fixed spatial axis name ("Y" for XZ, "X" for YZ).</param>
+        /// <param name="fixedPixelIndex">0-based pixel index of the fixed spatial axis.</param>
+        /// <param name="sourceData">Source data for resolving additional hyperstack axis values.</param>
+        private static string BuildOrthoLabel(string horizAxis, string vertAxis, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData)
         {
             var sb = new System.Text.StringBuilder();
-            sb.Append($"{horizAxis}-{vertAxis}, {fixedAxisName}i={fixedIndex}");
+            // iy=/ix= is a 0-based pixel coordinate, grouped with the plane name as an attribute
+            string pixelTag = fixedAxisName.ToLowerInvariant();
+            sb.Append($"{horizAxis}-{vertAxis}(i{pixelTag}={fixedPixelIndex})");
 
-            // Append other hyperstack axis indices (axes that are neither the depth axis (vertAxis/horizAxis) nor the fixed axis)
+            // Append additional hyperstack axes (depth axis already encoded in plane name)
             if (sourceData != null)
             {
                 foreach (var axis in sourceData.Axes)
                 {
-                    if (axis.Name == fixedAxisName || axis.Name == horizAxis || axis.Name == vertAxis)
-                        continue;
-                    sb.Append($", {axis.Name}={axis.Index + 1}");
+                    if (axis.Name == vertAxis) continue;
+                    sb.Append($", {axis.Name}={FormatAxisValue(axis, axis.Index)}");
                 }
             }
             return $"[{sb}]";
         }
 
+        private static string BuildOrthoHistoryDetail(string planeName, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData, string depthAxisName)
+        {
+            var sb = new System.Text.StringBuilder();
+            string pixelTag = fixedAxisName.ToLowerInvariant();
+            sb.Append($"{planeName} plane; i{pixelTag}={fixedPixelIndex}");
+            if (sourceData != null)
+            {
+                foreach (var axis in sourceData.Axes)
+                {
+                    if (axis.Name == depthAxisName) 
+                        continue;
+                    sb.Append($", {axis.Name}={FormatAxisValue(axis, axis.Index, verbose: true)}");
+                }
+            }
+            return sb.ToString();
+        }
+
         /// <summary>
-        /// copy and opens it in a new <see cref="MatrixPlotter"/> window.
+        /// Extracts the current frame or orthogonal slice and opens it in a new
+        /// <see cref="MatrixPlotter"/> window.
         /// For the main view, <see cref="MxView.FrameIndex"/> is used to slice the current frame.
-        /// For orthogonal views (XZ / YZ), the already-sliced data is used directly.
+        /// For orthogonal views (XZ / YZ), a live fixed-plane extract window is created:
+        /// the slice position (iy / ix) is captured at the moment of extraction and the child
+        /// window is refreshed whenever the parent refreshes. When the parent's data instance
+        /// is replaced (<see cref="MatrixDataChanged"/>), the child window is closed automatically.
         /// </summary>
         private void InvokeExtractFrame(MxView sourceView)
         {
-            var data = sourceView.MatrixData;
-            if (data == null) return;
-
-            IMatrixData result;
-            string frameLabel;
-
             if (sourceView == _orthoPanel.BottomView)
             {
-                // XZ view: slice is fixed at current Y (iy), scans X vs depth axis
-                result = data;
-                int iy = _orthoController.CurrentIY;
-                string axisName = _orthoController.ActiveAxisName ?? "Z";
-                frameLabel = BuildOrthoLabel("X", axisName, "Y", iy, _currentData);
+                // XZ view: fixed Y slice — live extract
+                var capturedData = _currentData;
+                if (capturedData == null) return;
+                int capturedIY = _orthoController.CurrentIY;
+                string capturedAxis = _orthoController.ActiveAxisName ?? "Z";
+
+                var result = capturedData.Apply(new SliceOperation(ViewFrom.Y, capturedIY, capturedAxis));
+                string frameLabel = BuildOrthoLabel("X", capturedAxis, "Y", capturedIY, capturedData);
+                AppendHistory(result, "Extract Frame (XZ)", Title,
+                    BuildOrthoHistoryDetail("XZ", "Y", capturedIY, capturedData, capturedAxis));
+                var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
+
+                EventHandler refreshHandler = (_, _) =>
+                {
+                    var updated = capturedData.Apply(new SliceOperation(ViewFrom.Y, capturedIY, capturedAxis));
+                    child.SetMatrixData(updated);
+                };
+                EventHandler<IMatrixData?> dataChangedHandler = null!;
+                dataChangedHandler = (_, _) =>
+                {
+                    this.Refreshed -= refreshHandler;
+                    this.MatrixDataChanged -= dataChangedHandler;
+                    child.Close();
+                };
+                this.Refreshed += refreshHandler;
+                this.MatrixDataChanged += dataChangedHandler;
+                child.Closed += (_, _) =>
+                {
+                    this.Refreshed -= refreshHandler;
+                    this.MatrixDataChanged -= dataChangedHandler;
+                };
+
+                child.Show();
+                return;
             }
-            else if (sourceView == _orthoPanel.RightView)
+
+            if (sourceView == _orthoPanel.RightView)
             {
-                // YZ view: slice is fixed at current X (ix), scans depth axis vs Y
-                result = data;
-                int ix = _orthoController.CurrentIX;
-                string axisName = _orthoController.ActiveAxisName ?? "Z";
-                frameLabel = BuildOrthoLabel("Y", axisName, "X", ix, _currentData);
+                // YZ view: fixed X slice — live extract
+                var capturedData = _currentData;
+                if (capturedData == null) return;
+                int capturedIX = _orthoController.CurrentIX;
+                string capturedAxis = _orthoController.ActiveAxisName ?? "Z";
+
+                var result = capturedData.Apply(new SliceOperation(ViewFrom.X, capturedIX, capturedAxis));
+                string frameLabel = BuildOrthoLabel("Y", capturedAxis, "X", capturedIX, capturedData);
+                AppendHistory(result, "Extract Frame (YZ)", Title,
+                    BuildOrthoHistoryDetail("YZ", "X", capturedIX, capturedData, capturedAxis));
+                var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
+
+                EventHandler refreshHandler = (_, _) =>
+                {
+                    var updated = capturedData.Apply(new SliceOperation(ViewFrom.X, capturedIX, capturedAxis));
+                    child.SetMatrixData(updated);
+                };
+                EventHandler<IMatrixData?> dataChangedHandler = null!;
+                dataChangedHandler = (_, _) =>
+                {
+                    this.Refreshed -= refreshHandler;
+                    this.MatrixDataChanged -= dataChangedHandler;
+                    child.Close();
+                };
+                this.Refreshed += refreshHandler;
+                this.MatrixDataChanged += dataChangedHandler;
+                child.Closed += (_, _) =>
+                {
+                    this.Refreshed -= refreshHandler;
+                    this.MatrixDataChanged -= dataChangedHandler;
+                };
+
+                child.Show();
+                return;
+            }
+
+            {
+                // Main view: slice the current frame (shallow copy)
+                var data = sourceView.MatrixData;
+                if (data == null) return;
+                int frameIndex = sourceView.FrameIndex;
+                bool isDeepCopy = !data.IsWritable; //true only if data is Writable (e.g., read-only MMF)
+                var result = data.Apply(new SliceAtOperation(frameIndex, DeepCopy: isDeepCopy));
+                string frameLabel = BuildFrameLabel(data, frameIndex);
+                AppendHistory(result, "Extract Frame" + (isDeepCopy ? "(deep copy)" : ""), Title,
+                    data.FrameCount > 1 ? BuildFrameHistoryDetail(data, frameIndex) : null);
+                var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}");
+                child.Show();
+            }
+        }
+
+        // ── Extract Dimension (Extract Along / Extract At) ────────────────────
+
+        private async Task InvokeExtractDimensionAsync()
+        {
+            if (_currentData == null) return;
+            HideMenuPanel();
+
+            var axes = _currentData.Axes;
+            var p = await ExtractDimensionDialog.ShowAsync(this, axes);
+            if (p == null) return;
+
+            IMatrixData result;
+            string resultTitle;
+            string historyDetail;
+            try
+            {
+                if (p.Mode == ExtractDimensionDialog.ExtractMode.Along)
+                {
+                    // baseIndices must have length == axes.Count (all axes, including the target).
+                    // The target axis slot value is ignored internally, but the array length must match.
+                    int[] baseIndices = axes.Select(a => a.Index).ToArray();
+                    result = _currentData.Apply(new ExtractAlongOperation(p.AxisName, baseIndices));
+
+                    // History: record the fixed positions of all other axes
+                    var otherAxesParts = axes
+                        .Where(a => a.Name != p.AxisName)
+                        .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index, verbose: true)}");
+                    historyDetail = $"axis={p.AxisName}; fixed: {string.Join(", ", otherAxesParts)}";
+
+                    var otherTitleParts = axes
+                        .Where(a => a.Name != p.AxisName)
+                        .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index)}");
+                    resultTitle = $"{Title} [Along {p.AxisName}, {string.Join(", ", otherTitleParts)}]";
+                }
+                else
+                {
+                    var targetAxis = axes.First(a => a.Name == p.AxisName);
+                    result = _currentData.Apply(new SelectByOperation(p.AxisName, targetAxis.Index));
+
+                    historyDetail = $"{p.AxisName}={FormatAxisValue(targetAxis, targetAxis.Index, verbose: true)}";
+
+                    resultTitle = $"{Title} [At {p.AxisName}={FormatAxisValue(targetAxis, targetAxis.Index)}]";
+                }
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageDialogAsync("Extract Failed", ex.Message);
+                return;
+            }
+
+            string modeLabel = p.Mode == ExtractDimensionDialog.ExtractMode.Along
+                ? $"Extract Along {p.AxisName}"
+                : $"Extract At {p.AxisName}";
+            AppendHistory(result, modeLabel, Title, historyDetail);
+
+            if (p.ReplaceData)
+            {
+                var newTitle = Title;
+                SetMatrixData(result);
+                Title = newTitle;
+                SetDirty(DirtyFlags.Data, true);
             }
             else
             {
-                // Main view: slice the current frame
-                int frameIndex = sourceView.FrameIndex;
-                result = data.Apply(new SliceAtOperation(frameIndex, DeepCopy: false));
-                frameLabel = BuildFrameLabel(data, frameIndex);
+                CreateLinked(result, _view.Lut, resultTitle).Show();
             }
-
-            var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}");
-            child.Show();
         }
 
         // ── Reverse Stack ─────────────────────────────────────────────────────
@@ -480,9 +662,11 @@ namespace MxPlot.UI.Avalonia.Views
 
             var axes = _currentData.Axes;
             var p = await ReverseStackDialog.ShowAsync(this, axes);
-            if (p == null) return;
+            if (p == null) 
+                return;
 
-            if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Reverse Stack")) return;
+            if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Reverse Stack")) 
+                return;
 
             IMatrixData result;
             try
@@ -492,7 +676,7 @@ namespace MxPlot.UI.Avalonia.Views
             catch (OutOfMemoryException)
             {
                 await ShowMessageDialogAsync("Out of Memory",
-                    "Not enough memory to process this virtual dataset.\nOperation cancelled.");
+                    "Not enough memory to process this dataset.\nOperation cancelled.");
                 return;
             }
             catch (Exception ex)
@@ -532,10 +716,12 @@ namespace MxPlot.UI.Avalonia.Views
         /// </remarks>
         private async Task<bool> ConfirmLargeVirtualOperationAsync(IMatrixData data, string operationName)
         {
-            if (!data.IsVirtual) return true;
+            if (!data.IsVirtual) 
+                return true;
 
             long totalBytes = 1L * data.FrameCount * data.XCount * data.YCount * data.ElementSize;
-            if (totalBytes <= VirtualPolicy.ThresholdBytes) return true;
+            if (totalBytes <= VirtualPolicy.ThresholdBytes) 
+                return true;
 
             string sizeStr = totalBytes switch
             {

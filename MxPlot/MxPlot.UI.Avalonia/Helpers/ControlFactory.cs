@@ -15,16 +15,17 @@ namespace MxPlot.UI.Avalonia.Helpers
     internal static class ControlFactory
     {
         // ── Color palette ───────────────────────────────────────────────
+        // Default palette: prioritizes colors commonly used in composite imaging
         private static readonly Color[] _colorPalette =
         [
-            Colors.Black,                  Colors.White,
-            Color.FromRgb(220,  20,  60),  Color.FromRgb(255, 165,   0),
-            Color.FromRgb(255, 215,   0),  Color.FromRgb( 50, 205,  50),
-            Color.FromRgb(  0, 128, 255),  Color.FromRgb(138,  43, 226),
-            Color.FromRgb(128, 128, 128),  Color.FromRgb(192, 192, 192),
-            Color.FromRgb(  0,   0, 128),  Color.FromRgb(139,   0,   0),
-            Color.FromRgb(  0, 100,   0),  Colors.Yellow,
-            Color.FromRgb(255, 255, 200),  Color.FromRgb(200, 230, 255),
+            Colors.White,                  Color.FromRgb(255,   0,   0),  // White, Red
+            Color.FromRgb(  0, 255,   0),  Color.FromRgb(  0,   0, 255),  // Green, Blue
+            Colors.Yellow,                 Colors.Magenta,                 // Yellow, Magenta
+            Colors.Cyan,                   Color.FromRgb(255, 165,   0),  // Cyan, Orange
+            Color.FromRgb(255, 192, 203),  Color.FromRgb(128,   0, 128),  // Pink, Purple
+            Color.FromRgb(128, 128, 128),  Color.FromRgb(192, 192, 192),  // Gray, Light gray
+            Colors.Black,                  Color.FromRgb(139,  69,  19),  // Black, Brown
+            Color.FromRgb(255, 215,   0),  Color.FromRgb(  0, 255, 255),  // Gold, Aqua
         ];
 
         // ── Separators ────────────────────────────────────────────────
@@ -51,7 +52,13 @@ namespace MxPlot.UI.Avalonia.Helpers
             {
                 Orientation = Orientation.Horizontal,
                 Spacing = 6,
-                Children = { pathIcon, new TextBlock { Text = text, FontSize = fontSize, VerticalAlignment = VerticalAlignment.Center } },
+                Children = {
+                    pathIcon,
+                    new TextBlock {
+                        Text = text,
+                        FontSize = fontSize,
+                        VerticalAlignment = VerticalAlignment.Center
+                    } },
             };
         }
 
@@ -323,6 +330,7 @@ namespace MxPlot.UI.Avalonia.Helpers
             {
                 Orientation = Orientation.Horizontal,
                 Spacing = 4,
+                Margin = new Thickness(2, 1),
                 Children =
                 {
                     new TextBlock
@@ -352,18 +360,51 @@ namespace MxPlot.UI.Avalonia.Helpers
         {
             var swatch = new Button
             {
-                Width = 22, Height = 22, MinHeight = 0,
+                Width = 22,
+                Height = 22,
+                MinHeight = 0,
                 Background = new SolidColorBrush(initial),
-                Padding = new Thickness(0), BorderThickness = new Thickness(1),
+                Padding = new Thickness(0),
+                BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
             };
             var flyout = new Flyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
 
             Color custom = initial;
-            var aSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.A, Width = 100 };
-            var rSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.R, Width = 100 };
-            var gSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.G, Width = 100 };
-            var bSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.B, Width = 100 };
+            Color flyoutInitial = initial; // Track the color when flyout opens
+            var aSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.A, Width = 100, MinHeight = 0 };
+            var rSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.R, Width = 100, MinHeight = 0 };
+            var gSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.G, Width = 100, MinHeight = 0 };
+            var bSlider = new Slider { Minimum = 0, Maximum = 255, Value = custom.B, Width = 100, MinHeight = 0 };
+
+            void ConfigureCompactSlider(Slider slider)
+            {
+                slider.TemplateApplied += (_, e) =>
+                {
+                    if (e.NameScope.Find("thumb") is Thumb thumb)
+                    {
+                        thumb.MinWidth = 0;
+                        thumb.MinHeight = 0;
+                        thumb.Width = 12;
+                        thumb.Height = 12;
+                    }
+
+                    if (e.NameScope.Find("PART_Track") is Track track)
+                    {
+                        track.MinHeight = 2;
+                        track.Height = 2;
+                        if (track.IncreaseButton is Control inc)
+                            inc.Height = 1;
+                        if (track.DecreaseButton is Control dec)
+                            dec.Height = 1;
+                    }
+                };
+            }
+            ConfigureCompactSlider(aSlider);
+            ConfigureCompactSlider(rSlider);
+            ConfigureCompactSlider(gSlider);
+            ConfigureCompactSlider(bSlider);
+
             var aNud = MakeNumericUpDown(custom.A, 0, 255, 1); aNud.Width = 58;
             var rNud = MakeNumericUpDown(custom.R, 0, 255, 1); rNud.Width = 58;
             var gNud = MakeNumericUpDown(custom.G, 0, 255, 1); gNud.Width = 58;
@@ -371,7 +412,8 @@ namespace MxPlot.UI.Avalonia.Helpers
 
             var preview = new Border
             {
-                Width = 32, Height = 20,
+                Width = 32,
+                Height = 20,
                 Background = new SolidColorBrush(custom),
                 BorderThickness = new Thickness(1),
                 BorderBrush = new SolidColorBrush(Color.FromArgb(100, 128, 128, 128)),
@@ -381,12 +423,29 @@ namespace MxPlot.UI.Avalonia.Helpers
 
             bool syncing = false;
             byte AlphaValue() => showAlpha ? (byte)Math.Round(aSlider.Value) : (byte)255;
+
             void UpdatePreview() =>
                 preview.Background = new SolidColorBrush(
                     Color.FromArgb(AlphaValue(),
                                    (byte)Math.Round(rSlider.Value),
                                    (byte)Math.Round(gSlider.Value),
                                    (byte)Math.Round(bSlider.Value)));
+
+            Button? applyBtn = null; // Forward reference for CheckColorChanged
+
+            void CheckColorChanged()
+            {
+                if (applyBtn == null) return;
+
+                // Compare current slider values with flyoutInitial
+                bool alphaChanged = showAlpha && (byte)Math.Round(aSlider.Value) != flyoutInitial.A;
+                bool colorChanged = (byte)Math.Round(rSlider.Value) != flyoutInitial.R
+                                 || (byte)Math.Round(gSlider.Value) != flyoutInitial.G
+                                 || (byte)Math.Round(bSlider.Value) != flyoutInitial.B;
+
+                applyBtn.IsVisible = alphaChanged || colorChanged;
+            }
+
             void SyncFromSliders()
             {
                 if (syncing) return; syncing = true;
@@ -394,7 +453,9 @@ namespace MxPlot.UI.Avalonia.Helpers
                 rNud.Value = (decimal)Math.Round(rSlider.Value);
                 gNud.Value = (decimal)Math.Round(gSlider.Value);
                 bNud.Value = (decimal)Math.Round(bSlider.Value);
-                syncing = false; UpdatePreview();
+                syncing = false;
+                UpdatePreview();
+                CheckColorChanged();
             }
             void SyncFromNuds()
             {
@@ -403,12 +464,15 @@ namespace MxPlot.UI.Avalonia.Helpers
                 rSlider.Value = (double)(rNud.Value ?? 0);
                 gSlider.Value = (double)(gNud.Value ?? 0);
                 bSlider.Value = (double)(bNud.Value ?? 0);
-                syncing = false; UpdatePreview();
+                syncing = false;
+                UpdatePreview();
+                CheckColorChanged();
             }
 
             void Apply(Color c)
             {
                 swatch.Background = new SolidColorBrush(c);
+                custom = c; // Update the stored color
                 onApply(c);
                 flyout.Hide();
             }
@@ -423,9 +487,12 @@ namespace MxPlot.UI.Avalonia.Helpers
                 var cap = pc;
                 var btn = new Button
                 {
-                    Width = 22, Height = 22, MinHeight = 0,
+                    Width = 22,
+                    Height = 22,
+                    MinHeight = 0,
                     Background = new SolidColorBrush(pc),
-                    Padding = new Thickness(0), BorderThickness = new Thickness(0.5),
+                    Padding = new Thickness(0),
+                    BorderThickness = new Thickness(0.5),
                 };
                 string tip = showAlpha
                     ? $"R={cap.R}, G={cap.G}, B={cap.B} [A={cap.A}]"
@@ -443,6 +510,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                     bNud.Value = cap.B;
                     syncing = false;
                     UpdatePreview();
+                    CheckColorChanged();
                 };
                 paletteGrid.Children.Add(btn);
             }
@@ -456,30 +524,35 @@ namespace MxPlot.UI.Avalonia.Helpers
             gNud.ValueChanged += (_, _) => SyncFromNuds();
             bNud.ValueChanged += (_, _) => SyncFromNuds();
 
-            var applyBtn = new Button
+            applyBtn = new Button
             {
-                Content = "Apply", FontSize = 11, Height = 20, MinHeight = 0,
+                Content = "Apply",
+                FontSize = 11,
+                Height = 20,
+                MinHeight = 0,
                 Padding = new Thickness(10, 0),
                 VerticalContentAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Right,
+                IsVisible = false, // Initially hidden until color changes
             };
             applyBtn.Click += (_, _) =>
             {
-                custom = Color.FromArgb(AlphaValue(),
+                var newColor = Color.FromArgb(AlphaValue(),
                                         (byte)Math.Round(rSlider.Value),
                                         (byte)Math.Round(gSlider.Value),
                                         (byte)Math.Round(bSlider.Value));
-                Apply(custom);
+                Apply(newColor);
             };
 
-            var channelPanel = new StackPanel { Spacing = 1, Margin = new Thickness(3) };
+            var channelPanel = new StackPanel { Spacing = 1, Margin = new Thickness(1) };
             if (showAlpha) channelPanel.Children.Add(MakeSliderRow("A", aSlider, aNud));
             channelPanel.Children.Add(MakeSliderRow("R", rSlider, rNud));
             channelPanel.Children.Add(MakeSliderRow("G", gSlider, gNud));
             channelPanel.Children.Add(MakeSliderRow("B", bSlider, bNud));
             var bottomRow = new StackPanel
             {
-                Orientation = Orientation.Horizontal, Spacing = 6,
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
                 Margin = new Thickness(0, 2, 0, 0),
             };
             bottomRow.Children.Add(preview);
@@ -492,6 +565,29 @@ namespace MxPlot.UI.Avalonia.Helpers
             flyout.Content = flyoutContent;
 
             FlyoutBase.SetAttachedFlyout(swatch, flyout);
+
+            // When flyout opens, snapshot the current color and reset slider values
+            flyout.Opening += (_, _) =>
+            {
+                flyoutInitial = custom;
+                if (syncing) return;
+                syncing = true;
+                if (showAlpha)
+                {
+                    aSlider.Value = custom.A;
+                    aNud.Value = custom.A;
+                }
+                rSlider.Value = custom.R;
+                gSlider.Value = custom.G;
+                bSlider.Value = custom.B;
+                rNud.Value = custom.R;
+                gNud.Value = custom.G;
+                bNud.Value = custom.B;
+                syncing = false;
+                UpdatePreview();
+                if (applyBtn != null) applyBtn.IsVisible = false; // Hide apply button on open
+            };
+
             swatch.Click += (_, _) => FlyoutBase.ShowAttachedFlyout(swatch);
             return swatch;
         }

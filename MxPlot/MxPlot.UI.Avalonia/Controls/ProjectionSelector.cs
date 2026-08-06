@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core.Processing;
+using MxPlot.UI.Avalonia.Helpers;
 using System;
 
 namespace MxPlot.UI.Avalonia.Controls
@@ -53,6 +54,25 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public event EventHandler<(ProjectionPlane Plane, bool IsEnabled, ProjectionMode Mode)>? SelectionChanged;
 
+        /// <summary>
+        /// Fired when the "Create a new data with projection" button on the XY row is clicked.
+        /// The handler receives the current projection mode for the XY plane.
+        /// </summary>
+        public event EventHandler<ProjectionMode>? OpenAsNewDataRequested;
+
+        /// <summary>
+        /// Shows or hides the "Create new data" button on the XY row based on whether
+        /// the source data is a hyperstack (AxisCount &gt;= 2).
+        /// Call this whenever the data source changes.
+        /// </summary>
+        public void UpdateHyperstackState(bool isHyperstack)
+        {
+            if (_xyRow.OpenButton != null)
+            {
+                _xyRow.OpenButton.IsVisible = isHyperstack;
+            }
+        }
+
         /// <summary>Whether projection is enabled for the given <paramref name="plane"/>.</summary>
         public bool IsProjectionEnabled(ProjectionPlane plane) => GetRow(plane).CheckBox.IsChecked == true;
 
@@ -80,6 +100,11 @@ namespace MxPlot.UI.Avalonia.Controls
                 };
                 row.ComboBox.IsEnabled = enabled;
                 row.ComboBox.Opacity = enabled ? 1.0 : 0.4;
+                if (row.OpenButton != null)
+                {
+                    row.OpenButton.IsEnabled = enabled;
+                    row.OpenButton.Opacity = enabled ? 1.0 : 0.4;
+                }
             }
             finally { _suppressEvents = false; }
         }
@@ -130,11 +155,20 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var checkBox = new CheckBox
             {
-                FontSize = 11,
                 MinHeight = 0,
+                MinWidth = 0,
                 Padding = new Thickness(0),
                 VerticalAlignment = VerticalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
+            };
+
+            var checkBoxWrapper = new Viewbox
+            {
+                Width = 20,
+                Height = 20,
+                Stretch = Stretch.Uniform,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = checkBox,
             };
 
             var comboBox = new ComboBox
@@ -146,10 +180,43 @@ namespace MxPlot.UI.Avalonia.Controls
                 Height = 24,
                 MinWidth = 90,
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0),
+                Margin = new Thickness(4, 0, 0, 0),
                 IsEnabled = false,
                 Opacity = 0.4,
             };
+
+            Button? openButton = null;
+            if (plane == ProjectionPlane.XY)
+            {
+                var icon = new PathIcon
+                {
+                    Data = MenuIcons.CreateNewData,
+                    Width = 12,
+                    Height = 12,
+                };
+                /*
+                // The "Create new data with projection" button is currently not implemented, so we'll hide it for now. But the code is left here for easy re-enabling in the future.
+                openButton = new Button 
+                {
+                    Content = icon,
+                    Padding = new Thickness(3),
+                    MinWidth = 0,
+                    MinHeight = 0,
+                    Width = 22,
+                    Height = 22,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(4, 0, 0, 0),
+                    IsEnabled = false,
+                    IsVisible = false,
+                    Opacity = 0.4,
+                };
+                ToolTip.SetTip(openButton, "Create a new dataset with projection");
+                openButton.Click += (_, _) =>
+                {
+                    OpenAsNewDataRequested?.Invoke(this, GetMode(ProjectionPlane.XY));
+                };
+                */
+            }
 
             checkBox.IsCheckedChanged += (_, _) =>
             {
@@ -157,6 +224,11 @@ namespace MxPlot.UI.Avalonia.Controls
                 bool enabled = checkBox.IsChecked == true;
                 comboBox.IsEnabled = enabled;
                 comboBox.Opacity = enabled ? 1.0 : 0.4;
+                if (openButton != null)
+                {
+                    openButton.IsEnabled = enabled;
+                    openButton.Opacity = enabled ? 1.0 : 0.4;
+                }
                 SelectionChanged?.Invoke(this, (plane, enabled, GetMode(plane)));
             };
 
@@ -171,14 +243,16 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 Orientation = Orientation.Horizontal,
             };
-            controlRow.Children.Add(checkBox);
+            controlRow.Children.Add(checkBoxWrapper);
             controlRow.Children.Add(comboBox);
+            if (openButton != null)
+                controlRow.Children.Add(openButton);
 
             var panel = new StackPanel { Spacing = 0 };
             panel.Children.Add(label);
             panel.Children.Add(controlRow);
 
-            return new ViewRow(panel, label, checkBox, comboBox);
+            return new ViewRow(panel, label, checkBox, comboBox, openButton);
         }
 
         private ViewRow GetRow(ProjectionPlane plane) => plane switch
@@ -189,6 +263,6 @@ namespace MxPlot.UI.Avalonia.Controls
             _ => throw new ArgumentOutOfRangeException(nameof(plane)),
         };
 
-        private sealed record ViewRow(StackPanel Panel, TextBlock Header, CheckBox CheckBox, ComboBox ComboBox);
+        private sealed record ViewRow(StackPanel Panel, TextBlock Header, CheckBox CheckBox, ComboBox ComboBox, Button? OpenButton);
     }
 }

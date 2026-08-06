@@ -188,6 +188,11 @@ namespace MxPlot.Core.IO
                     continue;
                 }
                 var values = line.Split(new[] { separator }, StringSplitOptions.None);
+                int end = values.Length;
+                while (end > 0 && values[end - 1] == "") 
+                    end--;
+                values = values[..end]; //Remove empty entries from the last
+
                 if (values.Length > xCount) xCount = values.Length; // Use the widest row as the column count
                 validLines.Add(values);
             }

@@ -328,6 +328,11 @@ namespace MxPlot.Core
                 _min = min;
                 _max = max;
             }
+            else
+            {
+                _min = 0;
+                _max = count - 1;
+            }
 
             //Step is computed on each access. Setting Step changes Max. The line below is not needed.
             //Step = count > 1 ? (max - min) / (count - 1) : 0;

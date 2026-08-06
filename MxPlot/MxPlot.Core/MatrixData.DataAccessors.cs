@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -16,7 +17,7 @@ namespace MxPlot.Core
         public double GetValueAt(int ix, int iy, int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
-            return ToDoubleFrom(GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix]);
+            return NumericConverter.ToDouble(GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix]);
         }
 
         public T GetValueAtTyped(int ix, int iy, int frameIndex = -1)
@@ -50,7 +51,7 @@ namespace MxPlot.Core
                 return;
             }
 
-            GetInternalArray(frameIndex, needsInvalidate: true)[iy * _xcount + ix] = ToValueTypeFrom(v);
+            GetInternalArray(frameIndex, needsInvalidate: true)[iy * _xcount + ix] = NumericConverter.FromDouble<T>(v);
         }
 
         /// <summary>
@@ -108,13 +109,30 @@ namespace MxPlot.Core
 
         /// <summary>
         /// Gets the internal array for the specified frame. If no frame index is provided, the active frame's array is returned.
-        /// By default (with forceInvalidation = true), this method automatically invalidates the cached min/max values 
-        /// for the specified frame, ensuring that any modifications to the array will trigger a refresh of the statistics when next requested.
-        /// However, users should call Invalidate explicitly when further modifying the array kept outside after calling GetValueRange.
+        /// <para>
+        /// By default, this method automatically invalidates the cached min/max values 
+        /// for the specified frame (unless the data is read-only), ensuring that any modifications 
+        /// to the array will trigger a refresh of the statistics when next requested.
+        /// </para>
+        /// <para>
+        /// <strong>Important:</strong> If you call <see cref="GetValueRange(int)"/> after obtaining the array
+        /// (which recalculates and caches statistics), and then subsequently modify the array contents,
+        /// you <strong>must</strong> call <see cref="Invalidate(int)"/> explicitly to ensure the cached
+        /// statistics are refreshed on the next access. Otherwise stale min/max values will be returned.
+        /// </para>
+        /// <para>
+        /// <strong>Performance note:</strong> If you only need to read the data without modifying it,
+        /// use <see cref="AsMemory"/> or <see cref="AsSpan"/> instead. These methods return read-only views
+        /// that do not trigger cache invalidation, avoiding unnecessary min/max recalculation on the next access.
+        /// </para>
         /// </summary>
-        /// <param name="frameIndex"></param>
-        /// <param name="forceInvalidation"></param>
-        /// <returns></returns>
+        /// <param name="frameIndex">The zero-based frame index, or -1 to use <see cref="ActiveIndex"/>.</param>
+        /// <returns>The underlying array for the specified frame. Modifications are permitted but will require
+        /// a subsequent call to <see cref="Invalidate(int)"/> if <see cref="GetValueRange(int)"/> has been
+        /// called between obtaining the array and modifying it.</returns>
+        /// <seealso cref="AsMemory"/>
+        /// <seealso cref="AsSpan"/>
+        /// <seealso cref="Invalidate(int)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T[] GetArray(int frameIndex = -1)
         {
@@ -542,7 +560,7 @@ namespace MxPlot.Core
             else
             {
                 var v = GetValueAsDouble(x, y, frameIndex, true);
-                return _fromDouble(v);
+                return NumericConverter.FromDouble<T>(v);
             }
         }
 
@@ -569,7 +587,8 @@ namespace MxPlot.Core
 
             if (!interpolate)
             {
-                return _toDouble(GetValue(x, y, frameIndex, false));
+                //return _toDouble(GetValue(x, y, frameIndex, false));
+                return NumericConverter.ToDouble(GetValue(x, y, frameIndex, false));
             }
             //interpolation is enabled
             var array = GetInternalArray(frameIndex, needsInvalidate: false);
@@ -593,10 +612,10 @@ namespace MxPlot.Core
             double dy = iiy - iy0;
 
             // For standard numeric types
-            double v00 = _toDouble(array[iy0 * _xcount + ix0]);
-            double v10 = _toDouble(array[iy0 * _xcount + ix1]);
-            double v01 = _toDouble(array[iy1 * _xcount + ix0]);
-            double v11 = _toDouble(array[iy1 * _xcount + ix1]);
+            double v00 = NumericConverter.ToDouble(array[iy0 * _xcount + ix0]);
+            double v10 = NumericConverter.ToDouble(array[iy0 * _xcount + ix1]);
+            double v01 = NumericConverter.ToDouble(array[iy1 * _xcount + ix0]);
+            double v11 = NumericConverter.ToDouble(array[iy1 * _xcount + ix1]);
 
             double v = v00 * (1 - dx) * (1 - dy)
                      + v10 * dx * (1 - dy)

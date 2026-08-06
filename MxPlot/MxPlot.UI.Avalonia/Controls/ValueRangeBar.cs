@@ -9,6 +9,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using System;
+using System.Diagnostics;
 using System.Globalization;
 
 namespace MxPlot.UI.Avalonia.Controls
@@ -51,17 +52,20 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double BtnSize = 20;      // uniform height for all buttons
         private const double ItemH = 20;        // textbox height (MinHeight=0 required)
 
+        private const double BaseFontSize = 11; // base font size for labels and mode button; 
         // ── Controls ──────────────────────────────────────────────────────────
         private readonly Button _modeBtn;     // shows mode-picker flyout on click
         private readonly TextBox _minBox;
         private readonly TextBox _maxBox;
         private readonly Button _searchMinBtn;
         private readonly Button _searchMaxBtn;
+        private readonly TextBlock _imperfectBadge; // * indicator shown in All mode when imperfect
 
         // ── State ─────────────────────────────────────────────────────────────
         private ValueRangeMode _mode;       // current display mode
         private bool _isMultiFrame;         // true when FrameCount > 1
         private bool _isImperfect;          // true when All range is only partially scanned
+        private int _invalidCount;          // number of frames not yet scanned
         private bool _roiAvailable;         // true when an ROI overlay is designated
         private bool _updating;
         private double _lastMin = double.NaN;
@@ -93,18 +97,53 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>The max value currently displayed in the bar (valid for all modes).</summary>
         public double DisplayedMaxValue => _lastMax;
 
+        /// <summary>
+        /// The actual component width to the right edge of SerachMaxButton
+        /// </summary>
+        public double EffectiveUIComponentWidth => _searchMaxBtn is not null ? _searchMaxBtn.Bounds.Right : double.NaN;
+
         // ── Constructor ───────────────────────────────────────────────────────
 
         public ValueRangeBar()
         {
+            // Warning indicator for imperfect All mode (displayed inside mode button)
+            _imperfectBadge = new TextBlock
+            {
+                Text = "*",
+                FontSize = 14,
+                FontWeight = FontWeight.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(255, 190, 0)),
+                IsVisible = false,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, -2, 0, 0),  // slight upward shift for visual balance
+            };
+
+            // Mode button content: [TextBlock] [⚠ icon]
+            var modeBtnContent = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = "Auto",
+                        FontSize = BaseFontSize,
+                        VerticalAlignment = VerticalAlignment.Center,
+                    },
+                    _imperfectBadge,
+                },
+            };
+
             _modeBtn = new Button
             {
-                Content = "Auto",
+                Content = modeBtnContent,
                 Height = BtnSize,
-                FontSize = 10,
                 Padding = new Thickness(4, 0),
+                Margin = new Thickness(0,0,6,0),
                 MinWidth = 34,
-                Width = 50,
+                Width = 52,  // Fixed width to prevent content-driven resizing
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
@@ -293,13 +332,16 @@ namespace MxPlot.UI.Avalonia.Controls
 
         /// <summary>
         /// Marks the All-mode range as imperfect (some frames not yet scanned).
-        /// Appends <c>*</c> to the All button and updates its tooltip.
+        /// Updates the button icon and tooltip with detailed frame count information.
         /// </summary>
-        public void SetImperfect(bool imperfect)
+        /// <param name="imperfect">True if the All-mode range is incomplete.</param>
+        /// <param name="invalidCount">The number of frames not yet scanned (used in tooltip).</param>
+        public void SetImperfect(bool imperfect, int invalidCount = 0)
         {
-            if (_isImperfect == imperfect) return;
+            if (_isImperfect == imperfect && _invalidCount == invalidCount) return;
             _isImperfect = imperfect;
-            if (_mode == ValueRangeMode.All) UpdateModeBtnLabel();
+            _invalidCount = invalidCount;
+            UpdateModeBtnLabel();
         }
 
         /// <summary>
@@ -318,6 +360,10 @@ namespace MxPlot.UI.Avalonia.Controls
 
         private void UpdateModeBtnLabel()
         {
+            // Get the TextBlock inside the mode button's StackPanel
+            if (_modeBtn.Content is not StackPanel panel || panel.Children[0] is not TextBlock textBlock)
+                return;
+
             var (label, tip) = _mode switch
             {
                 ValueRangeMode.Fixed   => ("Fixed",
@@ -328,13 +374,23 @@ namespace MxPlot.UI.Avalonia.Controls
                                                : "Automatic min/max from current frame"),
                 ValueRangeMode.Roi     => ("ROI",
                                            "Value range from designated ROI overlay"),
-                _                      => (_isImperfect ? "All*" : "All",
-                                           _isImperfect
-                                               ? "Global min/max \u2014 some frames not yet scanned"
-                                               : "Global min/max across all frames"),
+                _                      => ("All",
+                                           _isImperfect && _invalidCount > 0
+                                               ? $"Global min/max — {_invalidCount} frame{(_invalidCount == 1 ? "" : "s")} not yet scanned"
+                                               : _isImperfect
+                                                   ? "Global min/max — some frames not yet scanned"
+                                                   : "Global min/max across all frames"),
             };
-            _modeBtn.Content = label;
+
+            textBlock.Text = label;
             ToolTip.SetTip(_modeBtn, tip);
+
+            // Show * indicator ONLY when All mode is active AND imperfect
+            _imperfectBadge.IsVisible = _mode == ValueRangeMode.All && _isImperfect;
+            if (_imperfectBadge.IsVisible)
+            {
+                ToolTip.SetTip(_imperfectBadge, tip);
+            }
         }
 
         // ── Mode picker flyout ────────────────────────────────────────────────
@@ -346,16 +402,55 @@ namespace MxPlot.UI.Avalonia.Controls
 
             menu.Items.Clear();
 
-            void AddItem(ValueRangeMode mode, string label, string description)
+            void AddItem(ValueRangeMode mode, string label, string description, bool showWarning = false)
             {
                 var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-                header.Children.Add(new TextBlock { Text = label, FontSize = 11, MinWidth = 52 });
+
+                // Label with optional warning icon
+                var labelPanel = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 2 };
+                labelPanel.Children.Add(new TextBlock
+                {
+                    Text = label,
+                    FontSize = BaseFontSize,
+                    MinWidth = 52,
+                    VerticalAlignment = VerticalAlignment.Center,
+                });
+
+                if (showWarning)
+                {
+                    var menuFillPath = new Path
+                    {
+                        Data = Geometry.Parse(
+                            "M 7,0 L 14,12 L 0,12 Z " +
+                            "M 6.3,3.5 L 6.3,8 L 7.7,8 L 7.7,3.5 Z " +
+                            "M 6.3,9.5 L 6.3,11 L 7.7,11 L 7.7,9.5 Z"),
+                        Fill = new SolidColorBrush(Color.FromRgb(255, 190, 0)),
+                    };
+                    var menuStrokePath = new Path
+                    {
+                        Data = Geometry.Parse("M 7,0 L 14,12 L 0,12 Z"),
+                        Stroke = new SolidColorBrush(Color.FromRgb(80, 60, 0)),
+                        StrokeThickness = 0.8,
+                    };
+                    var warningIcon = new Panel
+                    {
+                        Width = 10,
+                        Height = 10,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Children = { menuFillPath, menuStrokePath },
+                    };
+                    labelPanel.Children.Add(warningIcon);
+                }
+
+                header.Children.Add(labelPanel);
                 header.Children.Add(new TextBlock
                 {
                     Text = description,
-                    FontSize = 10,
+                    FontSize = BaseFontSize - 1,
                     Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)),
+                    VerticalAlignment = VerticalAlignment.Center,
                 });
+
                 var item = new MenuItem { Header = header };
                 item.Click += (_, _) => SetMode(mode);
                 menu.Items.Add(item);
@@ -365,8 +460,17 @@ namespace MxPlot.UI.Avalonia.Controls
             AddItem(ValueRangeMode.Current,
                 _isMultiFrame ? "Current" : "Auto",
                 _isMultiFrame ? "Current frame min/max" : "Automatic min/max");
+
             if (_isMultiFrame)
-                AddItem(ValueRangeMode.All, _isImperfect ? "All*" : "All", "Global min/max across all frames");
+            {
+                string allDescription = _isImperfect && _invalidCount > 0
+                    ? $"{_invalidCount} frame{(_invalidCount == 1 ? "" : "s")} not yet scanned"
+                    : _isImperfect
+                        ? "Some frames not yet scanned"
+                        : "Global min/max across all frames";
+                AddItem(ValueRangeMode.All, "All", allDescription, showWarning: _isImperfect);
+            }
+
             if (_roiAvailable)
                 AddItem(ValueRangeMode.Roi, "ROI", "Value range from designated ROI overlay");
 
@@ -481,7 +585,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private static TextBlock MakeLabel(string text) => new TextBlock
         {
             Text = text,
-            FontSize = 11,
+            FontSize = BaseFontSize,
             VerticalAlignment = VerticalAlignment.Center,
         };
 

@@ -5,6 +5,7 @@
   <Project Path="MxPlot.Extensions.Hdf5/MxPlot.Extensions.Hdf5.csproj" />
   <Project Path="MxPlot.Extensions.Images/MxPlot.Extensions.Images.csproj" />
   <Project Path="MxPlot.Extensions.Tiff/MxPlot.Extensions.Tiff.csproj" />
+  <Project Path="MxPlot.UI.Avalonia.Video/MxPlot.UI.Avalonia.Video.csproj" />
   <Project Path="MxPlot.UI.Avalonia/MxPlot.UI.Avalonia.csproj" />
   <Project Path="MxPlot/MxPlot.csproj" />
 </Solution>

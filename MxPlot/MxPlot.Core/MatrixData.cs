@@ -83,16 +83,7 @@ namespace MxPlot.Core
         private static readonly bool _isSupportedPrimitive =
                 MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
 
-        /// <summary>
-        /// Delegate to convert T to double
-        /// </summary>
-        private static readonly Func<T, double> _toDouble = CreateConverter();
-
-        /// <summary>
-        /// Delegate to convert double to T
-        /// </summary>
-        private static readonly Func<double, T> _fromDouble = CreateReverseConverter();
-
+        
         private static readonly Type _valueType = typeof(T);
 
         private static readonly string _valueTyepName = default(T) switch
@@ -128,10 +119,23 @@ namespace MxPlot.Core
         public event EventHandler? UnitChanged;
 
         // Properties
+
         /// <summary>
-        /// 
+        ///  Gets whether the underlying frame list is virtual (i.e., it implements IVirtualFrameList) either directly or through a RoutedFrames wrapper.
         /// </summary>
-        public bool IsVirtual => _arrayList is IVirtualFrameList;
+        //public bool IsVirtual => _arrayList is IVirtualFrameList;
+        public bool IsVirtual
+        {
+            get
+            {
+                if (_arrayList is IVirtualFrameList)
+                    return true;
+                else if (_arrayList is RoutedFrames<T> routed)
+                    return routed.IsVirtual;
+                else
+                    return false;
+            }
+        }
 
         /// <inheritdoc/>
         public bool IsWritable => !_arrayList.IsReadOnly;
@@ -222,10 +226,11 @@ namespace MxPlot.Core
 
         public IVirtualFrameList? GetDiagnosticVirtualList()
         {
-            if(IsVirtual)
-                return _arrayList as IVirtualFrameList;
-            else
-                return null;
+            if (_arrayList is IVirtualFrameList vfl)
+                return vfl;
+            if (_arrayList is RoutedFrames<T> routed)
+                return routed.GetUnderlyingVirtualList();
+            return null;
         }
 
 
@@ -240,61 +245,6 @@ namespace MxPlot.Core
         {
             _registeredDefaultFinder = finder;
         }
-
-        // Type conversion methods
-        private static Func<T, double> CreateConverter()
-        {
-            var t = typeof(T);
-
-            if (t == typeof(double)) return v => (double)(object)v!;
-            if (t == typeof(float)) return v => (float)(object)v!;
-            if (t == typeof(int)) return v => (int)(object)v!;
-            if (t == typeof(uint)) return v => (uint)(object)v!;
-            if (t == typeof(long)) return v => (long)(object)v!;
-            if (t == typeof(ulong)) return v => (ulong)(object)v!;
-            if (t == typeof(short)) return v => (short)(object)v!;
-            if (t == typeof(ushort)) return v => (ushort)(object)v!;
-            if (t == typeof(byte)) return v => (byte)(object)v!;
-            if (t == typeof(sbyte)) return v => (sbyte)(object)v!;
-            if (t == typeof(decimal)) return v => (double)(decimal)(object)v!;
-            if (t == typeof(Complex)) return v => ((Complex)(object)v!).Magnitude;
-
-            // For custom structs that don't have a natural conversion to double,
-            // return a dummy converter. Operations requiring double conversion
-            // will throw NotSupportedException when actually used.
-            return v => throw new NotSupportedException(
-                $"Type {typeof(T)} does not support conversion to double. " +
-                $"Operations requiring numeric conversion (interpolation, scaling) are not available for this type.");
-        }
-
-        private static Func<double, T> CreateReverseConverter()
-        {
-            var t = typeof(T);
-
-            if (t == typeof(double)) return v => (T)(object)v!;
-            if (t == typeof(float)) return v => (T)(object)(float)v!;
-            if (t == typeof(int)) return v => (T)(object)(int)v!;
-            if (t == typeof(uint)) return v => (T)(object)(uint)v!;
-            if (t == typeof(long)) return v => (T)(object)(long)v!;
-            if (t == typeof(ulong)) return v => (T)(object)(ulong)v!;
-            if (t == typeof(short)) return v => (T)(object)(short)v!;
-            if (t == typeof(ushort)) return v => (T)(object)(ushort)v!;
-            if (t == typeof(byte)) return v => (T)(object)(byte)v!;
-            if (t == typeof(sbyte)) return v => (T)(object)(sbyte)v!;
-            if (t == typeof(decimal)) return v => (T)(object)(decimal)v!;
-            if (t == typeof(Complex)) return v => (T)(object)new Complex(v!, 0);
-
-            // For custom structs, return a dummy converter
-            return v => throw new NotSupportedException(
-                $"Type {typeof(T)} does not support conversion from double. " +
-                $"Operations requiring numeric conversion (interpolation, scaling) are not available for this type.");
-        }
-
-        protected virtual double ToDoubleFrom(T v) => _toDouble(v);
-        protected virtual T ToValueTypeFrom(double v) => _fromDouble(v);
-
-        internal static Func<T, double> ToDoubleConverter => _toDouble;
-        internal static Func<double, T> FromDoubleConverter => _fromDouble;
 
         /// <summary>
         /// Check the dimension of the plane. If the size is invalid, throw ArgumentException.
@@ -540,6 +490,29 @@ namespace MxPlot.Core
                 return CloneAsVirtual();
             else
                 return CloneInMemory();
+        }
+
+        /// <summary>
+        /// Creates a clone of this <see cref="MatrixData{T}"/> with the option to force in-memory copying.
+        /// </summary>
+        /// <param name="forceInMemory">If true, forces the clone to be created in memory even if the source is virtual.</param>
+        /// <returns>A clone of this <see cref="MatrixData{T}"/>.</returns>
+        public MatrixData<T> Clone(bool forceInMemory)
+        {
+            if (forceInMemory)
+                return CloneInMemory();
+            else
+                return (MatrixData<T>)Clone();
+        }
+
+        /// <summary>
+        /// Creates a clone of this <see cref="MatrixData{T}"/> with the option to force in-memory copying.
+        /// </summary>
+        /// <param name="forceInMemory">If true, forces the clone to be created in memory even if the source is virtual.</param>
+        /// <returns>A clone of this <see cref="MatrixData{T}"/>.</returns>
+        IMatrixData IMatrixData.Clone(bool forceInMemory)
+        {
+            return Clone(forceInMemory);
         }
 
         private MatrixData<T> CloneInMemory()

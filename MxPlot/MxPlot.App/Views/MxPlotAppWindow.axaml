@@ -290,6 +290,8 @@
 						<MenuItem Header="Open File…"  Click="HamburgerOpenFile_Click" />
 						<Separator/>
 						<MenuItem Header="Tools">
+							<MenuItem Header="Create a linear scale…" Click="ToolsGenerateLinearScale_Click"
+									  ToolTip.Tip="Creates a linear scale data."/>
 							<MenuItem Header="Sample 2D data…" Click="ToolsGenerate2DTestData_Click"
 									  ToolTip.Tip="Creates a sample 2D dataset and opens it."/>
 							<MenuItem Header="Sample Julia Set…" Click="ToolsGenerateJulia_Click"

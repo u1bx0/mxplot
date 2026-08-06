@@ -1,6 +1,9 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace MxPlot.Core.Processing
@@ -11,9 +14,7 @@ namespace MxPlot.Core.Processing
     /// </summary>
     public static class ElementWiseOperator
     {
-        // =========================================================================================
-        // Normalize
-        // =========================================================================================
+
 
         /// <summary>
         /// Normalizes pixel values so that the maximum maps to <paramref name="target"/>.
@@ -25,8 +26,7 @@ namespace MxPlot.Core.Processing
         /// </para>
         /// </summary>
         /// <remarks>
-        /// Conversion is performed via <see cref="Convert.ToDouble"/> and
-        /// <see cref="Convert.ChangeType"/>, so integer types are rounded (not truncated to 0).
+        /// Conversion is performed via internal methods. Integer types are rounded (not truncated to 0).
         /// For example, normalizing a <c>ushort</c> dataset to 100 yields values in 0–100.
         /// </remarks>
         public static MatrixData<T> Normalize<T>(
@@ -63,9 +63,12 @@ namespace MxPlot.Core.Processing
 
             Parallel.For(0, frameIndices.Length, new ParallelOptions { CancellationToken = ct }, i =>
             {
+                ct.ThrowIfCancellationRequested();
+
                 int fi = frameIndices[i];
-                var srcArr = src.GetArray(fi);
-                var dstArr = new T[srcArr.Length];
+                //var srcArr = src.GetArray(fi);
+                var srcSpan = src.AsSpan(fi);
+                var dstArr = new T[srcSpan.Length];
 
                 double frameMax = (!singleFrame && scope == NormalizeScope.Global)
                     ? globalMax
@@ -76,13 +79,15 @@ namespace MxPlot.Core.Processing
                     : target / frameMax;
 
                 double dstMin = double.MaxValue, dstMax = double.MinValue;
-                for (int k = 0; k < srcArr.Length; k++)
+                for (int k = 0; k < srcSpan.Length; k++)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    double v = Convert.ToDouble(srcArr[k]) * scale;
-                    var tv = (T)Convert.ChangeType(v, typeof(T));
+                    
+                    double v = NumericConverter.ToDouble(srcSpan[k]) * scale;
+                    var tv = NumericConverter.FromDouble<T>(v);
                     dstArr[k] = tv;
-                    double dv = Convert.ToDouble(tv);
+                    // Use NumericConverter.ToDouble(tv) rather than v so that dstMin/dstMax reflect
+                    // the actual stored value after rounding and clamping.
+                    double dv = NumericConverter.ToDouble(tv);
                     if (dv < dstMin) dstMin = dv;
                     if (dv > dstMax) dstMax = dv;
                 }
@@ -150,9 +155,13 @@ namespace MxPlot.Core.Processing
 
             Parallel.For(0, frameIndices.Length, new ParallelOptions { CancellationToken = ct }, i =>
             {
+                //Check for cancellation at the start of each frame processing
+                ct.ThrowIfCancellationRequested();
+
                 int fi = frameIndices[i];
-                var srcArr = src.GetArray(fi);
-                var dstArr = new double[srcArr.Length];
+                //var srcArr = src.GetArray(fi);
+                var srcSpan = src.AsSpan(fi); 
+                var dstArr = new double[srcSpan.Length];
 
                 double shift = 0.0;
                 if (handling == NegativeHandling.Shift)
@@ -162,10 +171,10 @@ namespace MxPlot.Core.Processing
                 }
 
                 double dstMin = double.MaxValue, dstMax = double.MinValue;
-                for (int k = 0; k < srcArr.Length; k++)
+                for (int k = 0; k < srcSpan.Length; k++)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    double v = Convert.ToDouble(srcArr[k]);
+                    
+                    double v = NumericConverter.ToDouble(srcSpan[k]);
                     double lv = handling == NegativeHandling.Shift
                         ? logFunc(v + shift)
                         : logFunc(Math.Max(v, LogEpsilon));

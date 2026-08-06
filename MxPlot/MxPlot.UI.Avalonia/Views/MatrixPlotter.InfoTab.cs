@@ -9,6 +9,7 @@ using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Utils;
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -60,6 +61,16 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>Rebuilds the Info tab grid from <see cref="_currentData"/>. Safe to call when the panel has not been created yet.</summary>
         private void RefreshInfoTab()
         {
+            RefreshScaleTab();
+            RefreshMetaTab();
+        }
+
+        /// <summary>
+        /// Rebuilds only the Scale (axis info) tab grid from <see cref="_currentData"/>.
+        /// Lighter than <see cref="RefreshInfoTab"/> as it skips metadata tab refresh.
+        /// </summary>
+        private void RefreshScaleTab()
+        {
             if (_scaleTabBody == null) 
                 return;
 
@@ -74,13 +85,11 @@ namespace MxPlot.UI.Avalonia.Views
                     Margin = new Thickness(8, 10),
                     Opacity = 0.6,
                 });
-                RefreshMetaTab();
                 return;
             }
-
+            //Debug.WriteLine("Rebuild Axis Info");
             _scaleTabBody.Children.Add(BuildAxisInfoGrid(data));
             UpdateScaleRevertButton();
-            RefreshMetaTab();
         }
 
         /// <summary>
@@ -94,6 +103,10 @@ namespace MxPlot.UI.Avalonia.Views
             var fmt = CultureInfo.InvariantCulture;
             var ns = System.Globalization.NumberStyles.Any;
             const double fs = 11.0;
+
+            // Dynamic precision-based format strings
+            var vfmt = $"G{ScaleValuePrecision}";  // Min/Max/Range
+            var sfmt = $"G{ScaleStepPrecision}";   // Step
 
             var g = new Grid { Margin = new Thickness(2, 4) };
             g.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(70)));  // col 0: Axis (wider to fit rename button)
@@ -159,14 +172,17 @@ namespace MxPlot.UI.Avalonia.Views
                 }
                 return tb;
             }
-            void Wire(TextBox tb, Action apply)
+            void Wire(TextBox tb, Func<bool> apply)
             {
                 void Refresh()
                 {
-                    apply();
-                    SetScaleDirty(true);
-                    if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
-                    _orthoController.RefreshCrosshairAndSlices();
+                    if (apply()) // only refresh if the apply action reports a change, to avoid unnecessary redraws while editing
+                    {
+                        TryUpdateTimeAxisAnimationInterval(showNotice: true); //Try to update the animation interval if the time axis changed
+                        SetScaleDirty(true);
+                        if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
+                        _orthoController.RefreshCrosshairAndSlices();
+                    }
                 }
                 tb.LostFocus += (_, _) => Refresh();
                 tb.KeyDown += (_, e) => { if (e.Key == Key.Return) Refresh(); };
@@ -192,21 +208,74 @@ namespace MxPlot.UI.Avalonia.Views
             AddRow(); Place(HSep(80), row++, 0, 7);
 
             // ── X row ──────────────────────────────────────────────────────
-            var xMinEd = Ed(data.XMin.ToString("G5", fmt));
-            var xMaxEd = Ed(data.XMax.ToString("G5", fmt));
-            var xRngEd = Ed(data.XRange.ToString("G5", fmt));
-            var xStpEd = Ed(data.XStep.ToString("G4", fmt));
+            var xMinEd = Ed(data.XMin.ToString(vfmt, fmt));
+            var xMaxEd = Ed(data.XMax.ToString(vfmt, fmt));
+            var xRngEd = Ed(data.XRange.ToString(vfmt, fmt));
+            var xStpEd = Ed(data.XStep.ToString(sfmt, fmt));
             var xUniEd = Ed(data.XUnit ?? ""); xUniEd.HorizontalContentAlignment = HorizontalAlignment.Left;
 
             // Min → Max fixed, recompute Range and Step
-            Wire(xMinEd, () => { if (double.TryParse(xMinEd.Text, ns, fmt, out var v)) data.XMin = v; xRngEd.Text = data.XRange.ToString("G5", fmt); xStpEd.Text = data.XStep.ToString("G4", fmt); });
+            Wire(xMinEd, () =>
+            {
+                if (!double.TryParse(xMinEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == data.XMin.ToString(vfmt, fmt))
+                    return false;
+                data.XMin = v;
+                xRngEd.Text = data.XRange.ToString(vfmt, fmt);
+                xStpEd.Text = data.XStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Min, v));
+                return true;
+            });
             // Max → Min fixed, recompute Range and Step
-            Wire(xMaxEd, () => { if (double.TryParse(xMaxEd.Text, ns, fmt, out var v)) data.XMax = v; xRngEd.Text = data.XRange.ToString("G5", fmt); xStpEd.Text = data.XStep.ToString("G4", fmt); });
+            Wire(xMaxEd, () =>
+            {
+                if (!double.TryParse(xMaxEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == data.XMax.ToString(vfmt, fmt))
+                    return false;
+                data.XMax = v;
+                xRngEd.Text = data.XRange.ToString(vfmt, fmt);
+                xStpEd.Text = data.XStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Max, v));
+                return true;
+            });
             // Range → Max = Min + Range, recompute Step
-            Wire(xRngEd, () => { if (double.TryParse(xRngEd.Text, ns, fmt, out var r)) { data.XMax = data.XMin + r; xMaxEd.Text = data.XMax.ToString("G5", fmt); xStpEd.Text = data.XStep.ToString("G4", fmt); } });
+            Wire(xRngEd, () =>
+            {
+                if (!double.TryParse(xRngEd.Text, ns, fmt, out var r))
+                    return false;
+                var newMax = data.XMin + r;
+                if (newMax.ToString(vfmt, fmt) == data.XMax.ToString(vfmt, fmt))
+                    return false;
+                data.XMax = newMax;
+                xMaxEd.Text = data.XMax.ToString(vfmt, fmt);
+                xStpEd.Text = data.XStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Max, newMax));
+                return true;
+            });
             // Step  → Max = Min + Step × (N-1), recompute Range
-            Wire(xStpEd, () => { if (double.TryParse(xStpEd.Text, ns, fmt, out var s)) { data.XMax = data.XMin + s * (data.XCount - 1); xMaxEd.Text = data.XMax.ToString("G5", fmt); xRngEd.Text = data.XRange.ToString("G5", fmt); } });
-            Wire(xUniEd, () => data.XUnit = xUniEd.Text ?? "");
+            Wire(xStpEd, () =>
+            {
+                if (!double.TryParse(xStpEd.Text, ns, fmt, out var s))
+                    return false;
+                var newMax = data.XMin + s * (data.XCount - 1);
+                if (newMax.ToString(vfmt, fmt) == data.XMax.ToString(vfmt, fmt))
+                    return false;
+                data.XMax = newMax;
+                xMaxEd.Text = data.XMax.ToString(vfmt, fmt);
+                xRngEd.Text = data.XRange.ToString(vfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Step, s));
+                return true;
+            });
+            Wire(xUniEd, () =>
+            {
+                var newUnit = xUniEd.Text ?? "";
+                if (newUnit == data.XUnit)
+                    return false;
+                data.XUnit = newUnit;
+                return true;
+            });
 
             AddRow();
             Place(Ro("x"), row, 0);
@@ -219,21 +288,74 @@ namespace MxPlot.UI.Avalonia.Views
             row++;
 
             // ── Y row ──────────────────────────────────────────────────────
-            var yMinEd = Ed(data.YMin.ToString("G5", fmt));
-            var yMaxEd = Ed(data.YMax.ToString("G5", fmt));
-            var yRngEd = Ed(data.YRange.ToString("G5", fmt));
-            var yStpEd = Ed(data.YStep.ToString("G4", fmt));
+            var yMinEd = Ed(data.YMin.ToString(vfmt, fmt));
+            var yMaxEd = Ed(data.YMax.ToString(vfmt, fmt));
+            var yRngEd = Ed(data.YRange.ToString(vfmt, fmt));
+            var yStpEd = Ed(data.YStep.ToString(sfmt, fmt));
             var yUniEd = Ed(data.YUnit ?? ""); yUniEd.HorizontalContentAlignment = HorizontalAlignment.Left;
 
             // Min → Max fixed, recompute Range and Step
-            Wire(yMinEd, () => { if (double.TryParse(yMinEd.Text, ns, fmt, out var v)) data.YMin = v; yRngEd.Text = data.YRange.ToString("G5", fmt); yStpEd.Text = data.YStep.ToString("G4", fmt); });
+            Wire(yMinEd, () =>
+            {
+                if (!double.TryParse(yMinEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == data.YMin.ToString(vfmt, fmt))
+                    return false;
+                data.YMin = v;
+                yRngEd.Text = data.YRange.ToString(vfmt, fmt);
+                yStpEd.Text = data.YStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Min, v));
+                return true;
+            });
             // Max → Min fixed, recompute Range and Step
-            Wire(yMaxEd, () => { if (double.TryParse(yMaxEd.Text, ns, fmt, out var v)) data.YMax = v; yRngEd.Text = data.YRange.ToString("G5", fmt); yStpEd.Text = data.YStep.ToString("G4", fmt); });
+            Wire(yMaxEd, () =>
+            {
+                if (!double.TryParse(yMaxEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == data.YMax.ToString(vfmt, fmt))
+                    return false;
+                data.YMax = v;
+                yRngEd.Text = data.YRange.ToString(vfmt, fmt);
+                yStpEd.Text = data.YStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Max, v));
+                return true;
+            });
             // Range → Max = Min + Range, recompute Step
-            Wire(yRngEd, () => { if (double.TryParse(yRngEd.Text, ns, fmt, out var r)) { data.YMax = data.YMin + r; yMaxEd.Text = data.YMax.ToString("G5", fmt); yStpEd.Text = data.YStep.ToString("G4", fmt); } });
+            Wire(yRngEd, () =>
+            {
+                if (!double.TryParse(yRngEd.Text, ns, fmt, out var r))
+                    return false;
+                var newMax = data.YMin + r;
+                if (newMax.ToString(vfmt, fmt) == data.YMax.ToString(vfmt, fmt))
+                    return false;
+                data.YMax = newMax;
+                yMaxEd.Text = data.YMax.ToString(vfmt, fmt);
+                yStpEd.Text = data.YStep.ToString(sfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Max, newMax));
+                return true;
+            });
             // Step  → Max = Min + Step × (N-1), recompute Range
-            Wire(yStpEd, () => { if (double.TryParse(yStpEd.Text, ns, fmt, out var s)) { data.YMax = data.YMin + s * (data.YCount - 1); yMaxEd.Text = data.YMax.ToString("G5", fmt); yRngEd.Text = data.YRange.ToString("G5", fmt); } });
-            Wire(yUniEd, () => data.YUnit = yUniEd.Text ?? "");
+            Wire(yStpEd, () =>
+            {
+                if (!double.TryParse(yStpEd.Text, ns, fmt, out var s))
+                    return false;
+                var newMax = data.YMin + s * (data.YCount - 1);
+                if (newMax.ToString(vfmt, fmt) == data.YMax.ToString(vfmt, fmt))
+                    return false;
+                data.YMax = newMax;
+                yMaxEd.Text = data.YMax.ToString(vfmt, fmt);
+                yRngEd.Text = data.YRange.ToString(vfmt, fmt);
+                if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Step, s));
+                return true;
+            });
+            Wire(yUniEd, () =>
+            {
+                var newUnit = yUniEd.Text ?? "";
+                if (newUnit == data.YUnit)
+                    return false;
+                data.YUnit = newUnit;
+                return true;
+            });
 
             AddRow();
             Place(Ro("y"), row, 0);
@@ -255,25 +377,78 @@ namespace MxPlot.UI.Avalonia.Views
                     var ca = axis;
                     bool ro = axis.IsIndexBased;  // Channel etc.: Min/Max fixed at 0..Count-1
 
-                    var aMinEd = Ed(axis.Min.ToString("G5", fmt), readOnly: ro);
-                    var aMaxEd = Ed(axis.Max.ToString("G5", fmt), readOnly: ro);
-                    var aRngEd = Ed((axis.Max - axis.Min).ToString("G5", fmt), readOnly: ro);
-                    var aStpEd = Ed(axis.Step.ToString("G4", fmt), readOnly: ro);
+                    var aMinEd = Ed(axis.Min.ToString(vfmt, fmt), readOnly: ro);
+                    var aMaxEd = Ed(axis.Max.ToString(vfmt, fmt), readOnly: ro);
+                    var aRngEd = Ed((axis.Max - axis.Min).ToString(vfmt, fmt), readOnly: ro);
+                    var aStpEd = Ed(axis.Step.ToString(sfmt, fmt), readOnly: ro);
                     var aUniEd = Ed(axis.Unit); aUniEd.HorizontalContentAlignment = HorizontalAlignment.Left;
 
                     if (!ro)
                     {
                         // Min → Max fixed, recompute Range and Step
-                        Wire(aMinEd, () => { if (double.TryParse(aMinEd.Text, ns, fmt, out var v)) { ca.Min = v; aRngEd.Text = (ca.Max - ca.Min).ToString("G5", fmt); aStpEd.Text = ca.Step.ToString("G4", fmt); } });
+                        Wire(aMinEd, () =>
+                        {
+                            if (!double.TryParse(aMinEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == ca.Min.ToString(vfmt, fmt))
+                                return false;
+                            ca.Min = v;
+                            aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
+                            aStpEd.Text = ca.Step.ToString(sfmt, fmt);
+                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Min, v));
+                            return true;
+                        });
                         // Max → Min fixed, recompute Range and Step
-                        Wire(aMaxEd, () => { if (double.TryParse(aMaxEd.Text, ns, fmt, out var v)) { ca.Max = v; aRngEd.Text = (ca.Max - ca.Min).ToString("G5", fmt); aStpEd.Text = ca.Step.ToString("G4", fmt); } });
+                        Wire(aMaxEd, () =>
+                        {
+                            if (!double.TryParse(aMaxEd.Text, ns, fmt, out var v) || v.ToString(vfmt, fmt) == ca.Max.ToString(vfmt, fmt))
+                                return false;
+                            ca.Max = v;
+                            aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
+                            aStpEd.Text = ca.Step.ToString(sfmt, fmt);
+                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Max, v));
+                            return true;
+                        });
                         // Range → Max = Min + Range, recompute Step
-                        Wire(aRngEd, () => { if (double.TryParse(aRngEd.Text, ns, fmt, out var r)) { ca.Max = ca.Min + r; aMaxEd.Text = ca.Max.ToString("G5", fmt); aStpEd.Text = ca.Step.ToString("G4", fmt); } });
+                        Wire(aRngEd, () =>
+                        {
+                            if (!double.TryParse(aRngEd.Text, ns, fmt, out var r))
+                                return false;
+                            var newMax = ca.Min + r;
+                            if (newMax.ToString(vfmt, fmt) == ca.Max.ToString(vfmt, fmt))
+                                return false;
+                            ca.Max = newMax;
+                            aMaxEd.Text = ca.Max.ToString(vfmt, fmt);
+                            aStpEd.Text = ca.Step.ToString(sfmt, fmt);
+                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Max, newMax));
+                            return true;
+                        });
                         // Step  → Max = Min + Step × (N-1), recompute Range
-                        Wire(aStpEd, () => { if (double.TryParse(aStpEd.Text, ns, fmt, out var s)) { ca.Max = ca.Min + s * (ca.Count - 1); aMaxEd.Text = ca.Max.ToString("G5", fmt); aRngEd.Text = (ca.Max - ca.Min).ToString("G5", fmt); } });
+                        Wire(aStpEd, () =>
+                        {
+                            if (!double.TryParse(aStpEd.Text, ns, fmt, out var s))
+                                return false;
+                            var newMax = ca.Min + s * (ca.Count - 1);
+                            if (newMax.ToString(vfmt, fmt) == ca.Max.ToString(vfmt, fmt))
+                                return false;
+                            ca.Max = newMax;
+                            aMaxEd.Text = ca.Max.ToString(vfmt, fmt);
+                            aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
+                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Step, s));
+                            return true;
+                        });
                     }
 
-                    Wire(aUniEd, () => ca.Unit = aUniEd.Text ?? "");
+                    Wire(aUniEd, () =>
+                    {
+                        var newUnit = aUniEd.Text ?? "";
+                        if (newUnit == ca.Unit)
+                            return false;
+                        ca.Unit = newUnit;
+                        return true;
+                    });
 
                     AddRow();
                     var editBtn = new Button
@@ -296,13 +471,17 @@ namespace MxPlot.UI.Avalonia.Views
                         Orientation = Orientation.Horizontal,
                         VerticalAlignment = VerticalAlignment.Center,
                     };
-                    nameCell.Children.Add(new TextBlock
+                    var axisNameBlock = new TextBlock
                     {
                         Text = axis.Name,
                         FontSize = fs,
                         Padding = new Thickness(3, 2, 1, 2),
                         VerticalAlignment = VerticalAlignment.Center,
-                    });
+                        MaxWidth = 48,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                    };
+                    ToolTip.SetTip(axisNameBlock, axis.Name);
+                    nameCell.Children.Add(axisNameBlock);
                     nameCell.Children.Add(editBtn);
                     Place(nameCell, row, 0);
                     Place(Ro(axis.Count.ToString(), right: true), row, 1);
@@ -388,6 +567,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
+                string oldName = axis.Name;
                 if (newName.Equals("Channel", StringComparison.OrdinalIgnoreCase))
                 {
                     axis.IsIndexBased = true; // auto-resets min=0, max=count-1
@@ -397,6 +577,12 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     axis.IsIndexBased = false;
                     axis.Name = newName; // AxisTracker updates its label automatically via Axis.NameChanged
+                }
+                // Update the key of _axisTrackers element
+                if (_axisTrackers.TryGetValue(oldName, out var tracker))
+                {
+                    _axisTrackers.Remove(oldName);
+                    _axisTrackers[axis.Name] = tracker;
                 }
             }
 
@@ -409,6 +595,8 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>Builds and wires the Metadata tab, adding it to <paramref name="tabControl"/>.</summary>
         private void BuildMetadataTab(TabControl tabControl)
         {
+            const double TabFontSize = 11;   // tab header labels
+
             // left panel: key list + add/delete toolbar + inline new-key input
             _metaKeyList = new ListBox
             {
@@ -490,7 +678,7 @@ namespace MxPlot.UI.Avalonia.Views
             // event handlers
             _metaKeyList.SelectionChanged += async (_, _) =>
             {
-                if (_metaSwitchGuard) return;
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
                 if (_metaValueBox == null || _metaCopyBtn == null || _metaSaveBtn == null) return;
                 if (_metaKeyList?.SelectedItem is not string rawKey) return;
 
@@ -499,16 +687,9 @@ namespace MxPlot.UI.Avalonia.Views
 
                 if(await MetadataNeedsRevertAsync())
                 {//canceled
-                    _metaSwitchGuard = true;
-                    try
-                    {
-                        if (_metaKeyList != null)
-                            _metaKeyList.SelectedItem = _metaPreviousKey;
-                    }
-                    finally
-                    {
-                        _metaSwitchGuard = false;
-                    }
+                    using var _ = _reentrancy.Begin(GuardContext.UiSync);
+                    if (_metaKeyList != null)
+                        _metaKeyList.SelectedItem = _metaPreviousKey;
                     return;
                 } //else: Save or discard
 
@@ -670,7 +851,7 @@ namespace MxPlot.UI.Avalonia.Views
             static Control TabHdr(string t, Geometry? icon = null)
             {
                 if (icon == null)
-                    return new TextBlock { Text = t, FontSize = 11, FontWeight = FontWeight.Bold };
+                    return new TextBlock { Text = t, FontSize = TabFontSize, FontWeight = FontWeight.Bold };
                 var pathIcon = new PathIcon { Data = icon, Width = 12, Height = 12 };
                 var brush = MenuIcons.DefaultBrush(icon);
                 if (brush != null) pathIcon.Foreground = brush;
@@ -681,7 +862,7 @@ namespace MxPlot.UI.Avalonia.Views
                     Children =
                     {
                         pathIcon,
-                        new TextBlock { Text = t, FontSize = 11, FontWeight = FontWeight.Bold },
+                        new TextBlock { Text = t, FontSize = TabFontSize, FontWeight = FontWeight.Bold },
                     }
                 };
             }

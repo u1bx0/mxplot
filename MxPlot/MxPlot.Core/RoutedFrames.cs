@@ -1,9 +1,5 @@
 ﻿using MxPlot.Core.IO;
-using System;
 using System.Collections;
-using System.Collections.Generic;
-using System.Reflection.Metadata.Ecma335;
-using System.Text;
 
 namespace MxPlot.Core
 {
@@ -21,12 +17,13 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// RoutedFramesのindex -> _frameListのindex
+        /// Returns the mapped index in the underlying frame list for a given RoutedFrames index.
+        ///
         /// </summary>
         /// <param name="index"></param>
-        /// <returns></returns>
+        /// <returns>The mapped index</returns>
         /// <exception cref="ArgumentOutOfRangeException"></exception>
-        private int GetMappedIndex(int index)
+        public int GetMappedIndex(int index)
         {
             if (index < 0 || index >= _mappedIndex.Count) throw new ArgumentOutOfRangeException(nameof(index));
             return _mappedIndex[index];
@@ -44,6 +41,11 @@ namespace MxPlot.Core
                 throw new NotSupportedException();
             }
         }
+
+        /// <summary>
+        /// Gets whether the underlying frame list is virtual (i.e., it implements IVirtualFrameList).
+        /// </summary>
+        public bool IsVirtual => _frameList is IVirtualFrameList;
 
         public int Count => _mappedIndex.Count;
 
@@ -141,6 +143,12 @@ namespace MxPlot.Core
         public bool Remove(T[] item) => throw new NotSupportedException();
         public void RemoveAt(int index) => throw new NotSupportedException();
 
+        /// <summary>
+        /// Gets the underlying frame list if it implements IVirtualFrameList; otherwise, returns null.
+        /// This method is intended for internal use in diagnostic tools that need to access virtual list features directly.
+        /// </summary>
+        /// <returns></returns>
+        internal IVirtualFrameList? GetUnderlyingVirtualList() => _frameList as IVirtualFrameList;
     }
 
 }

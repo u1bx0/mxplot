@@ -1,5 +1,6 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Notifications;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
@@ -9,9 +10,10 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
+using Avalonia.Styling;
 using Avalonia.Threading;
-using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Analysis;
+using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
@@ -67,6 +69,8 @@ namespace MxPlot.UI.Avalonia.Views
         private ToggleButton? _sizeFixedToggle;
         private NumericUpDown? _plotWidthNud;
         private NumericUpDown? _plotHeightNud;
+
+        private WindowNotificationManager? _notificationManager;
 
         /// <summary>Gets or sets the text displayed in the info panel.</summary>
         public string InfoText
@@ -136,6 +140,7 @@ namespace MxPlot.UI.Avalonia.Views
         private double _savedMenuWidth = MenuPanelWidth;
         private StackPanel _plotStyleContainer = null!;
         private StackPanel _fitStyleSection    = null!;
+        private StackPanel _dataVisibilityContainer = null!;
 
         // ── Color palette for series color picker ─────────────────────────────
         private static readonly Color[] ColorPalette =
@@ -168,8 +173,33 @@ namespace MxPlot.UI.Avalonia.Views
             Plot.SetData(series, xAxisLabel, yAxisLabel, title);
 
             BuildLayout();
-            Plot.SeriesChanged += (_, _) => Dispatcher.UIThread.Post(RebuildStyleControls);
+            Plot.SeriesChanged += (_, _) => Dispatcher.UIThread.Post(() =>
+            {
+                RebuildDataVisibilityControls();
+                RebuildStyleControls();
+            });
+            RebuildDataVisibilityControls();
             RebuildStyleControls();
+
+            this.Styles.Add(new Style(x => x.OfType<NotificationCard>()) //Toast
+            {
+                Setters =
+                {
+                    new Setter(MinHeightProperty, 0.0),
+                    //new Setter(HeightProperty, 60.0), 
+                    new Setter(VerticalContentAlignmentProperty, VerticalAlignment.Top),
+                    new Setter(CornerRadiusProperty, new CornerRadius(4)),
+                    new Setter(OpacityProperty, 0.95),
+                    new Setter(WidthProperty, 250.0)
+                }
+            });
+
+            _notificationManager = new WindowNotificationManager(this)
+            {
+                Position = NotificationPosition.BottomCenter,
+                MaxItems = 2,
+                Margin = new Thickness(0, 0, 10, 5)
+            };
 
             PlotWindowNotifier.NotifyCreated(this);
         }
@@ -243,10 +273,11 @@ namespace MxPlot.UI.Avalonia.Views
                 TextWrapping = TextWrapping.Wrap,
                 AcceptsReturn = true,
                 FontFamily = new FontFamily("Consolas"),
-                FontSize = 11,
+                FontSize = 12,
                 Padding = new Thickness(6),
                 Background = Brushes.Transparent,
                 BorderThickness = new Thickness(0),
+                LineHeight = 14,
             };
 
             static IBrush? GetInfoBg() =>
@@ -422,7 +453,9 @@ namespace MxPlot.UI.Avalonia.Views
                 dragOrigin = x;
 
                 // drag right → splitter moves right → info panel shrinks (delta > 0 means ?)
-                double maxInfo = Bounds.Width - SplitterThickness - MinPlotWidth;
+                //double maxInfo = Bounds.Width - SplitterThickness - MinPlotWidth;
+                //double newInfo = Math.Clamp(_savedInfoWidth - delta, MinInfoWidth, maxInfo);
+                double maxInfo = Math.Max(MinInfoWidth, Bounds.Width - SplitterThickness - MinPlotWidth);
                 double newInfo = Math.Clamp(_savedInfoWidth - delta, MinInfoWidth, maxInfo);
                 _savedInfoWidth = newInfo;
                 _contentGrid.ColumnDefinitions[4].Width = new GridLength(_savedInfoWidth);
@@ -459,7 +492,9 @@ namespace MxPlot.UI.Avalonia.Views
                 dragOrigin = x;
 
                 // drag right → menu grows, drag left → menu shrinks
-                double maxMenu = Bounds.Width - SplitterThickness - MinPlotWidth;
+                //double maxMenu = Bounds.Width - SplitterThickness - MinPlotWidth;
+                //double newMenu = Math.Clamp(_savedMenuWidth + delta, MinMenuWidth, maxMenu);
+                double maxMenu = Math.Max(MinMenuWidth, Bounds.Width - SplitterThickness - MinPlotWidth);
                 double newMenu = Math.Clamp(_savedMenuWidth + delta, MinMenuWidth, maxMenu);
                 _savedMenuWidth = newMenu;
                 _contentGrid.ColumnDefinitions[0].Width = new GridLength(_savedMenuWidth);
@@ -549,6 +584,13 @@ namespace MxPlot.UI.Avalonia.Views
                 ControlFactory.MakeChildMenuItem("Copy as image",    async () => { await CopyImageToClipboardAsync(); },    "Copy plot as PNG image."),
                 ControlFactory.MakeChildMenuItem("Copy as CSV", async () => { await CopyRowDataToClipboardAsync(); }, "Copy XY series data as CSV."),
             ], icon: MenuIcons.Edit, initiallyExpanded: false));
+
+            // ── Data visibility controls (per-series checkboxes, rebuilt on SeriesChanged) ──
+            _dataVisibilityContainer = new StackPanel { Spacing = 1 };
+            menuItems.Children.Add(ControlFactory.MakeMenuGroup("Data", [
+                _dataVisibilityContainer,
+            ], icon: MenuIcons.Data, initiallyExpanded: false));
+
             // ── Plot style controls (per-series, rebuilt on SeriesChanged) ──
             _plotStyleContainer = new StackPanel { Spacing = 1 };
             _fitStyleSection    = new StackPanel { Spacing = 1, IsVisible = false };
@@ -789,6 +831,28 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Action implementations ────────────────────────────────────────────
 
+        private void RebuildDataVisibilityControls()
+        {
+            _dataVisibilityContainer.Children.Clear();
+            var series = Plot.Series;
+            for (int i = 0; i < series.Count; i++)
+            {
+                int idx = i;
+                var s = series[i];
+                string label = s.Name.Length > 0
+                    ? (s.Name.Length > 20 ? s.Name[..18] + "\u2026" : s.Name)
+                    : $"Series {i + 1}";
+                var chk = ControlFactory.MakeCheckBox(label, fontSize: 11);
+                chk.IsChecked = Plot.GetSeriesVisible(idx);
+                chk.Margin = new Thickness(10, 0, 6, -10);
+                chk.IsCheckedChanged += (_, _) =>
+                {
+                    Plot.SetSeriesVisible(idx, chk.IsChecked == true);
+                };
+                _dataVisibilityContainer.Children.Add(chk);
+            }
+        }
+
         private void RebuildStyleControls()
         {
             _plotStyleContainer.Children.Clear();
@@ -933,7 +997,8 @@ namespace MxPlot.UI.Avalonia.Views
             double xMin = pts.Min(p => p.X), xMax = pts.Max(p => p.X);
             Plot.SetFitOverlay(result.GenerateCurve(xMin, xMax, Math.Max(300, pts.Count * 2)), $"{_activeFitter.Name} fit");
 
-            string unit = Plot.XLabel ?? "";
+            //string unit = Plot.XLabel ?? "";
+            string unit = ""; //Currently, we don't have a way to get the unit from the plot, so we'll leave it empty for now.
             InfoText = result.FormatInfo(unit);
             if (!_showInfo) ToggleInfoPanel();
         }
@@ -1324,6 +1389,17 @@ namespace MxPlot.UI.Avalonia.Views
             swatch.Click += (_, _) => FlyoutBase.ShowAttachedFlyout(swatch);
             return swatch;
         }
+
+        private void ShowToast(string title, string message)
+        {
+            _notificationManager?.Show(new Notification(
+                title,
+                message,
+                NotificationType.Success, 
+                TimeSpan.FromSeconds(2.5) 
+            ));
+        }
+
         private async Task CopyImageToClipboardAsync()
         {
             var topLevel = TopLevel.GetTopLevel(this);
@@ -1350,6 +1426,8 @@ namespace MxPlot.UI.Avalonia.Views
                         Plot.Render(ctx);
                 }
                 await clipboard.SetBitmapAsync(bmp);
+
+                ShowToast("Copied", "Image copied to clipboard.");
             }
             catch (Exception ex) { bmp.Dispose(); Debug.WriteLine(ex); }
             finally { Plot.ShowCrosshair = prevCrosshair; }
@@ -1412,7 +1490,11 @@ namespace MxPlot.UI.Avalonia.Views
 
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard == null) return;
-            try { await clipboard.SetTextAsync(sb.ToString()); }
+            try
+            {
+                await clipboard.SetTextAsync(sb.ToString());
+                ShowToast("Copied", "Row data copied to clipboard.");
+            }
             catch { }
         }
 

@@ -4,12 +4,12 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
-using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace MxPlot.UI.Avalonia.Views
@@ -52,6 +52,11 @@ namespace MxPlot.UI.Avalonia.Views
                 Canvas.SetLeft(_menuPanel, pt.Value.X);
                 Canvas.SetTop(_menuPanel, pt.Value.Y);
             }
+
+            // Refresh Scale tab to reflect any changes from sync operations
+            // (RefreshScaleTab is lighter than RefreshInfoTab as it skips metadata tab refresh)
+            RefreshScaleTab();
+
             _menuPanel.IsVisible = true;
             _hamburgerBtn.Background = Brushes.LightGray;
         }
@@ -68,20 +73,316 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private void OnMenuLightDismiss(object? s, PointerPressedEventArgs e)
         {
-            if (_menuPanel == null || !_menuPanel.IsVisible) return;
+            bool anyVisible = (_menuPanel?.IsVisible == true) || (_zoomFlyout?.IsVisible == true);
+            if (!anyVisible) return;
 
-            var pp = e.GetPosition(_menuPanel);
-            if (pp.X >= 0 && pp.Y >= 0 && pp.X <= _menuPanel.Bounds.Width && pp.Y <= _menuPanel.Bounds.Height)
-                return; // inside panel → keep open
-
-            if (_hamburgerBtn != null)
+            if (_menuPanel?.IsVisible == true)
             {
-                var hp = e.GetPosition(_hamburgerBtn);
-                if (hp.X >= 0 && hp.Y >= 0 && hp.X <= _hamburgerBtn.Bounds.Width && hp.Y <= _hamburgerBtn.Bounds.Height)
-                    return; // inside hamburger button → let Click handler toggle
+                var pp = e.GetPosition(_menuPanel);
+                if (pp.X >= 0 && pp.Y >= 0 && pp.X <= _menuPanel.Bounds.Width && pp.Y <= _menuPanel.Bounds.Height)
+                    return;
+
+                if (_hamburgerBtn != null)
+                {
+                    var hp = e.GetPosition(_hamburgerBtn);
+                    if (hp.X >= 0 && hp.Y >= 0 && hp.X <= _hamburgerBtn.Bounds.Width && hp.Y <= _hamburgerBtn.Bounds.Height)
+                        return;
+                }
+                HideMenuPanel();
             }
 
-            HideMenuPanel();
+            if (_zoomFlyout?.IsVisible == true)
+            {
+                var zp = e.GetPosition(_zoomFlyout);
+                if (zp.X >= 0 && zp.Y >= 0 && zp.X <= _zoomFlyout.Bounds.Width && zp.Y <= _zoomFlyout.Bounds.Height)
+                    return;
+
+                var zt = e.GetPosition(_zoomText);
+                if (zt.X >= 0 && zt.Y >= 0 && zt.X <= _zoomText.Bounds.Width && zt.Y <= _zoomText.Bounds.Height)
+                    return;
+
+                HideZoomFlyout(commit: true);
+            }
+        }
+
+        // ── Zoom flyout ────────────────────────────────────────────────────────
+
+        private double _zoomFlyoutOriginalZoom;
+        private EventHandler<SizeChangedEventArgs>? _zoomFlyoutSizeChangedHandler;
+
+        private void ShowZoomFlyout()
+        {
+            if (_zoomFlyout == null) return;
+            var overlay = OverlayLayer.GetOverlayLayer(this);
+            if (overlay == null) return;
+
+            _zoomFlyoutOriginalZoom = _view.Zoom;
+            RefreshZoomFlyout();
+
+            if (_zoomFlyout.Parent == null)
+                overlay.Children.Add(_zoomFlyout);
+            else
+            {
+                int idx = overlay.Children.IndexOf(_zoomFlyout);
+                if (idx >= 0 && idx < overlay.Children.Count - 1)
+                    overlay.Children.Move(idx, overlay.Children.Count - 1);
+            }
+
+            _zoomFlyout.IsVisible = true;
+            RepositionZoomFlyout(overlay);
+
+            // Reposition again after layout pass (flyout height becomes known)
+            void OnLayout(object? s, EventArgs _)
+            {
+                _zoomFlyout.LayoutUpdated -= OnLayout;
+                RepositionZoomFlyout(overlay);
+            }
+            _zoomFlyout.LayoutUpdated += OnLayout;
+
+            // Reposition when window is resized
+            if (_zoomFlyoutSizeChangedHandler == null)
+            {
+                _zoomFlyoutSizeChangedHandler = (_, _) =>
+                {
+                    var ov = OverlayLayer.GetOverlayLayer(this);
+                    if (ov != null) RepositionZoomFlyout(ov);
+                };
+                SizeChanged += _zoomFlyoutSizeChangedHandler;
+            }
+        }
+
+        private void RepositionZoomFlyout(Panel overlay)
+        {
+            if (_zoomFlyout == null) return;
+            var topPt = _zoomText.TranslatePoint(new Point(0, 0), overlay);
+            if (!topPt.HasValue) return;
+
+            double flyoutH = _zoomFlyout.Bounds.Height > 0 ? _zoomFlyout.Bounds.Height : _zoomFlyout.DesiredSize.Height;
+            double top = topPt.Value.Y - flyoutH;
+
+            double left = topPt.Value.X;
+            double overlayW = overlay.Bounds.Width;
+            if (overlayW > 0 && left + _zoomFlyout.Width > overlayW)
+                left = Math.Max(0, overlayW - _zoomFlyout.Width);
+
+            Canvas.SetLeft(_zoomFlyout, left);
+            Canvas.SetTop(_zoomFlyout, top);
+        }
+
+        private void HideZoomFlyout(bool commit = true)
+        {
+            if (_zoomFlyout == null) return;
+            if (!commit)
+                _view.SetZoom(_zoomFlyoutOriginalZoom);
+            _zoomFlyout.IsVisible = false;
+            if (_zoomFlyoutSizeChangedHandler != null)
+            {
+                SizeChanged -= _zoomFlyoutSizeChangedHandler;
+                _zoomFlyoutSizeChangedHandler = null;
+            }
+        }
+
+        /// <summary>Refreshes the zoom flyout's text boxes from the current view zoom.</summary>
+        internal void RefreshZoomFlyout()
+        {
+            if (_zoomFlyout?.Tag is not (TextBox zb, TextBox wb, TextBox hb)) return;
+            if (_zoomFlyout.IsVisible) return; // only sync before opening
+            double z = _view.Zoom;
+            var (nw, nh) = _view.GetNaturalDims();
+            zb.Text = $"{z * 100:0.##}";
+            wb.Text = $"{Math.Max(1, (int)Math.Round(nw * z))}";
+            hb.Text = $"{Math.Max(1, (int)Math.Round(nh * z))}";
+        }
+
+        private Border BuildZoomFlyout()
+        {
+            const double FS = 11;
+            const double LabelW = 74;
+            const double BoxW = 90;
+
+            var (nw, nh) = _view.GetNaturalDims();
+            double aspect = nw > 0 && nh > 0 ? nw / nh : 1.0;
+            double z0 = _view.Zoom;
+
+            TextBox MakeBox(string text) => new()
+            {
+                Text = text,
+                Width = BoxW,
+                MinHeight = 0,
+                Height = 26,
+                TextAlignment = TextAlignment.Right,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                FontSize = FS,
+            };
+
+            var zoomBox = MakeBox($"{z0 * 100:0.##}");
+            var wBox = MakeBox($"{Math.Max(1, (int)Math.Round(nw * z0))}");
+            var hBox = MakeBox($"{Math.Max(1, (int)Math.Round(nh * z0))}");
+
+            bool syncing = false;
+
+            void ApplyZoom(double z)
+            {
+                z = Math.Clamp(z, 0.01, 64.0);
+                _view.SetZoom(z);
+            }
+
+            void SyncFromZoom()
+            {
+                if (syncing || !double.TryParse(zoomBox.Text, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.CurrentCulture, out double pct) || pct <= 0) return;
+                syncing = true;
+                double z = Math.Clamp(pct / 100.0, 0.01, 64.0);
+                wBox.Text = $"{Math.Max(1, (int)Math.Round(nw * z))}";
+                hBox.Text = $"{Math.Max(1, (int)Math.Round(nh * z))}";
+                ApplyZoom(z);
+                syncing = false;
+            }
+
+            void SyncFromW()
+            {
+                if (syncing || !double.TryParse(wBox.Text, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.CurrentCulture, out double w) || w <= 0) return;
+                syncing = true;
+                double z = Math.Clamp(w / Math.Max(1, nw), 0.01, 64.0);
+                zoomBox.Text = $"{z * 100:0.##}";
+                hBox.Text = $"{Math.Max(1, (int)Math.Round(w / aspect))}";
+                ApplyZoom(z);
+                syncing = false;
+            }
+
+            void SyncFromH()
+            {
+                if (syncing || !double.TryParse(hBox.Text, System.Globalization.NumberStyles.Any,
+                    System.Globalization.CultureInfo.CurrentCulture, out double h) || h <= 0) return;
+                syncing = true;
+                double z = Math.Clamp(h / Math.Max(1, nh), 0.01, 64.0);
+                zoomBox.Text = $"{z * 100:0.##}";
+                wBox.Text = $"{Math.Max(1, (int)Math.Round(h * aspect))}";
+                ApplyZoom(z);
+                syncing = false;
+            }
+
+            // Debounce: apply zoom 300 ms after the last keystroke so typing "100" doesn't
+            // snap the view on each character.
+            CancellationTokenSource? zoomCts = null, wCts = null, hCts = null;
+
+            zoomBox.TextChanged += async (_, _) =>
+            {
+                zoomCts?.Cancel();
+                zoomCts = new CancellationTokenSource();
+                var token = zoomCts.Token;
+                try { await System.Threading.Tasks.Task.Delay(250, token); }
+                catch (OperationCanceledException) { return; }
+                if (!token.IsCancellationRequested) SyncFromZoom();
+            };
+            wBox.TextChanged += async (_, _) =>
+            {
+                wCts?.Cancel();
+                wCts = new CancellationTokenSource();
+                var token = wCts.Token;
+                try { await System.Threading.Tasks.Task.Delay(250, token); }
+                catch (OperationCanceledException) { return; }
+                if (!token.IsCancellationRequested) SyncFromW();
+            };
+            hBox.TextChanged += async (_, _) =>
+            {
+                hCts?.Cancel();
+                hCts = new CancellationTokenSource();
+                var token = hCts.Token;
+                try { await System.Threading.Tasks.Task.Delay(150, token); }
+                catch (OperationCanceledException) { return; }
+                if (!token.IsCancellationRequested) SyncFromH();
+            };
+
+            // Sync flyout fields when user scrolls / zooms with mouse wheel
+            _view.ScrollStateChanged += (_, _) =>
+            {
+                if (_zoomFlyout?.IsVisible != true) return;
+                if (syncing) return;
+                syncing = true;
+                double z = _view.Zoom;
+                var (cnw, cnh) = _view.GetNaturalDims();
+                zoomBox.Text = $"{z * 100:0.##}";
+                wBox.Text = $"{Math.Max(1, (int)Math.Round(cnw * z))}";
+                hBox.Text = $"{Math.Max(1, (int)Math.Round(cnh * z))}";
+                syncing = false;
+            };
+
+            StackPanel Row(string label, TextBox box) => new()
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 6,
+                Margin = new Thickness(0, 3, 0, 0),
+                Children =
+                {
+                    new TextBlock { 
+                        Text = label, Width = LabelW, TextAlignment = TextAlignment.Right,
+                        VerticalAlignment = VerticalAlignment.Center, FontSize = FS ,
+                    },
+                    box,
+                }
+            };
+
+            var closeBtn = new Button
+            {
+                Content = "✕",
+                Width = 18,
+                Height = 18,
+                Padding = new Thickness(0),
+                FontSize = 10,
+                Background = Brushes.Transparent,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+            };
+            closeBtn.Click += (_, _) => HideZoomFlyout(commit: true);
+
+            var body = new StackPanel { Margin = new Thickness(8, 4, 8, 8) };
+            body.Children.Add(new DockPanel
+            {
+                LastChildFill = false,
+                Margin = new Thickness(0, 2, 0, 4),
+                Children =
+                {
+                    new TextBlock { Text = "Zoom / View Size", FontSize = FS, FontWeight = FontWeight.SemiBold,
+                        VerticalAlignment = VerticalAlignment.Center, [DockPanel.DockProperty] = Dock.Left },
+                    closeBtn,
+                }
+            });
+            DockPanel.SetDock(closeBtn, Dock.Right);
+            body.Children.Add(Row("Zoom (%):", zoomBox));
+            body.Children.Add(Row("Width (px):", wBox));
+            body.Children.Add(Row("Height (px):", hBox));
+
+            static IBrush? GetMenuBg() =>
+                Application.Current?.TryGetResource("MenuPopupBg",
+                    Application.Current.ActualThemeVariant, out var r) == true
+                    ? r as IBrush
+                    : new SolidColorBrush(Color.FromArgb(220, 36, 36, 36));
+
+            var flyout = new Border
+            {
+                Child = body,
+                BorderBrush = new SolidColorBrush(Color.FromArgb(180, 110, 110, 110)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Width = LabelW + BoxW + 6 + 8 * 2,
+                IsVisible = false,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Background = GetMenuBg(),
+                Tag = (zoomBox, wBox, hBox),
+            };
+
+            if (Application.Current is { } app)
+            {
+                void UpdateBg(object? _, EventArgs __) => flyout.Background = GetMenuBg();
+                app.ActualThemeVariantChanged += UpdateBg;
+                Closed += (_, _) => app.ActualThemeVariantChanged -= UpdateBg;
+            }
+
+            return flyout;
         }
 
         /// <summary>Builds the floating panel (created once, reused). Contains Actions and Matrix Info tabs.</summary>
@@ -123,14 +424,29 @@ namespace MxPlot.UI.Avalonia.Views
                 exportItems.Add(ControlFactory.MakeChildMenuItem(
                     captured.Label, ActAsync(() => InvokeExportAsync(captured)), captured.Hint, icon: MenuIcons.Image));
             }
+            foreach (var ep in MatrixPlotterPluginRegistry.ExportPlugins)
+            {
+                if (ep.RequiresStack && (_currentData == null || _currentData.FrameCount <= 1)) continue;
+                var captured = ToDescriptor(ep);
+                exportItems.Add(ControlFactory.MakeChildMenuItem(
+                    captured.Label, ActAsync(() => InvokeExportAsync(captured)), captured.Hint, icon: MenuIcons.Image));
+            }
             fileMenuItems.Add(ControlFactory.MakeMenuGroup("Export as\u2026", [.. exportItems],
                 icon: MenuIcons.Image, initiallyExpanded: false, indent: 10,
                 headerFontWeight: FontWeight.Regular));
             actionsItems.Children.Add(ControlFactory.MakeMenuGroup("File", [.. fileMenuItems], icon: MenuIcons.Folder));
+
+            // Convert menu item: label and tooltip change for Complex data
+            bool isComplex = _currentData?.ValueType == typeof(System.Numerics.Complex);
+            string convertLabel = isComplex ? "Convert Complex To\u2026" : "Convert Value Type\u2026";
+            string convertHint = isComplex
+                ? "Converts complex data to double by extracting a component (Magnitude, Real, Imaginary, Phase, or Power)."
+                : "Converts the matrix data to a different numerical type (e.g., float to ushort).";
+
             actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [
                 ControlFactory.MakeChildMenuItem("Copy to Clipboard", ActAsync(CopyFrameToClipboardAsync), "Copies the current frame to the clipboard as an image or tab-separated text.", icon: MenuIcons.Copy),
                 ControlFactory.MakeChildMenuItem("Duplicate Window",  ActAsync(DuplicateWindowAsync),      "Opens a new window with an independent deep copy of the data.", icon: MenuIcons.Duplicate),
-                ControlFactory.MakeChildMenuItem("Convert Value Type\u2026", Act(ConvertValueTypeAsync), "Converts the matrix data to a different numerical type (e.g., float to ushort).", icon: MenuIcons.ConvertType),
+                ControlFactory.MakeChildMenuItem(convertLabel, Act(ConvertValueTypeAsync), convertHint, icon: MenuIcons.ConvertType),
             ], icon: MenuIcons.Edit));
             var processingItems = new List<Control>
             {
@@ -187,7 +503,10 @@ namespace MxPlot.UI.Avalonia.Views
                 };
             }
 
-            var tabControl = new TabControl { FontSize = MenuFontSize, Padding = new Thickness(0, 2, 0, 0) };
+            var tabControl = new TabControl { 
+                FontSize = MenuFontSize, 
+                Padding = new Thickness(0, 2, 0, 0) 
+            };
             tabControl.Items.Add(new TabItem
             {
                 Header = TabHdr("Actions", MenuIcons.Lightning),
@@ -278,7 +597,13 @@ namespace MxPlot.UI.Avalonia.Views
             });
             void onPluginsChanged() => RebuildPluginsGroup();
             MatrixPlotterPluginRegistry.PluginsChanged += onPluginsChanged;
-            Closed += (_, _) => MatrixPlotterPluginRegistry.PluginsChanged -= onPluginsChanged;
+            void onExportPluginsChanged() { _menuPanel = null; }
+            MatrixPlotterPluginRegistry.ExportPluginsChanged += onExportPluginsChanged;
+            Closed += (_, _) =>
+            {
+                MatrixPlotterPluginRegistry.PluginsChanged -= onPluginsChanged;
+                MatrixPlotterPluginRegistry.ExportPluginsChanged -= onExportPluginsChanged;
+            };
 
             // ── Metadata tab ──────────────────────────────────────────────────
             BuildMetadataTab(tabControl);
@@ -319,7 +644,7 @@ namespace MxPlot.UI.Avalonia.Views
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(3, 0, 0, 0),
                 Width = 400,
-                Height = 400,
+                Height = 300,
                 MinWidth = 220,
                 MinHeight = 120,
                 ClipToBounds = true,

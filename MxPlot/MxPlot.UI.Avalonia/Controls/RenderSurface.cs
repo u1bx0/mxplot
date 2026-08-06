@@ -10,11 +10,24 @@ using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Rendering;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Numerics;
 
 namespace MxPlot.UI.Avalonia.Controls
 {
+    /// <summary>
+    /// Anchor corner for <see cref="RenderSurface.OverlayInfoText"/> display.
+    /// </summary>
+    public enum OverlayInfoTextAnchor
+    {
+        /// <summary>Bottom-left corner (default, same position as the mouse coordinate overlay).</summary>
+        BottomLeft,
+        /// <summary>Top-right corner.</summary>
+        TopRight,
+    }
+
     /// <summary>
     /// Core rendering surface for <see cref="IMatrixData"/> display.
     /// Handles bitmap generation via <see cref="BitmapWriter"/>, and manages
@@ -55,7 +68,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── State ────────────────────────────────────────────────────────────
         private WriteableBitmap? _bitmap;
-        private BitmapWriter? _writer;
+        private IBitmapWriter? _writer;
         private EventHandler? _scaleChangedHandler;
         private double _zoom = 1.0;
         private double _transX = 0.0;
@@ -78,6 +91,9 @@ namespace MxPlot.UI.Avalonia.Controls
         private bool _isDraggingV;   // vertical line (X) is being moved
         private Point? _crosshairDataPos;
         private const double CrosshairHitTolerance = 8.0;
+
+        // ── ComplexValueMode ─────────────────────────────────────────────────
+        private ComplexValueMode _complexValueMode = ComplexValueMode.Magnitude;
 
         // ── Axis indicator drag ──────────────────────────────────────────────
         private bool _isDraggingAxisIndicator;
@@ -145,6 +161,12 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public string? OverlayInfoText { get; set; }
 
+        /// <summary>
+        /// Corner where <see cref="OverlayInfoText"/> is anchored when it is non-<c>null</c>.
+        /// Has no effect on the normal mouse-coordinate display.
+        /// </summary>
+        public OverlayInfoTextAnchor OverlayInfoTextAnchor { get; set; } = OverlayInfoTextAnchor.BottomLeft;
+
         /// <summary>Visual transform applied to the rendered bitmap.</summary>
         public ViewTransform Transform { get; set; } = ViewTransform.None;
 
@@ -169,14 +191,14 @@ namespace MxPlot.UI.Avalonia.Controls
         // Returns the screen-space X origin for a fitting image given the current ContentAlignment.
         private double AlignedTransX(double bmpW, double vpW) => _contentAlignment switch
         {
-            ContentAlignment.TopLeft   or ContentAlignment.Left   or ContentAlignment.BottomLeft  => PanMargin,
-            ContentAlignment.TopRight  or ContentAlignment.Right  or ContentAlignment.BottomRight => Math.Max(0.0, vpW - bmpW - PanMargin),
+            ContentAlignment.TopLeft or ContentAlignment.Left or ContentAlignment.BottomLeft => PanMargin,
+            ContentAlignment.TopRight or ContentAlignment.Right or ContentAlignment.BottomRight => Math.Max(0.0, vpW - bmpW - PanMargin),
             _ => (vpW - bmpW) / 2.0,
         };
         // Returns the screen-space Y origin for a fitting image given the current ContentAlignment.
         private double AlignedTransY(double bmpH, double vpH) => _contentAlignment switch
         {
-            ContentAlignment.TopLeft   or ContentAlignment.Top    or ContentAlignment.TopRight    => PanMargin,
+            ContentAlignment.TopLeft or ContentAlignment.Top or ContentAlignment.TopRight => PanMargin,
             ContentAlignment.BottomLeft or ContentAlignment.Bottom or ContentAlignment.BottomRight => Math.Max(0.0, vpH - bmpH - PanMargin),
             _ => (vpH - bmpH) / 2.0,
         };
@@ -232,6 +254,22 @@ namespace MxPlot.UI.Avalonia.Controls
         public static readonly StyledProperty<int> LutLevelProperty =
             AvaloniaProperty.Register<RenderSurface, int>(nameof(LutLevel)); // 0 = use LUT.Levels
 
+        public static readonly StyledProperty<RenderingMode> RenderingModeProperty =
+            AvaloniaProperty.Register<RenderSurface, RenderingMode>(
+                nameof(RenderingMode), defaultValue: RenderingMode.Lut);
+
+        public static readonly StyledProperty<IReadOnlyList<BlendRecipe>?> CompositeRecipesProperty =
+            AvaloniaProperty.Register<RenderSurface, IReadOnlyList<BlendRecipe>?>(
+                nameof(CompositeRecipes));
+
+        public static readonly StyledProperty<BlendMode> CompositeBlendModeProperty =
+            AvaloniaProperty.Register<RenderSurface, BlendMode>(
+                nameof(CompositeBlendMode), defaultValue: BlendMode.Additive);
+
+        public static readonly StyledProperty<int[]?> CompositeFrameIndicesProperty =
+            AvaloniaProperty.Register<RenderSurface, int[]?>(
+                nameof(CompositeFrameIndices));
+
         public IMatrixData? MatrixData
         {
             get => GetValue(MatrixDataProperty);
@@ -262,12 +300,62 @@ namespace MxPlot.UI.Avalonia.Controls
         public bool IsInvertedColor { get => GetValue(IsInvertedColorProperty); set => SetValue(IsInvertedColorProperty, value); }
         public int LutLevel { get => GetValue(LutLevelProperty); set => SetValue(LutLevelProperty, value); }
 
+        public RenderingMode RenderingMode
+        {
+            get => GetValue(RenderingModeProperty);
+            set => SetValue(RenderingModeProperty, value);
+        }
+        public IReadOnlyList<BlendRecipe>? CompositeRecipes
+        {
+            get => GetValue(CompositeRecipesProperty);
+            set => SetValue(CompositeRecipesProperty, value);
+        }
+        public BlendMode CompositeBlendMode
+        {
+            get => GetValue(CompositeBlendModeProperty);
+            set => SetValue(CompositeBlendModeProperty, value);
+        }
+        public int[]? CompositeFrameIndices
+        {
+            get => GetValue(CompositeFrameIndicesProperty);
+            set => SetValue(CompositeFrameIndicesProperty, value);
+        }
+
+        /// <summary>
+        /// Gets or sets the display mode for Complex-valued matrix data.
+        /// Changing this property triggers a full bitmap rebuild when
+        /// the current MatrixData is of type MatrixData&lt;Complex&gt;.
+        /// Has no effect on non-Complex data types.
+        /// </summary>
+        public ComplexValueMode ComplexValueMode
+        {
+            get => _complexValueMode;
+            set
+            {
+                if (_complexValueMode == value) return;
+                _complexValueMode = value;
+                if (MatrixData?.ValueType == typeof(Complex))
+                {
+                    if (_writer != null)
+                        _writer.StructValueConverter = GetComplexConverter();
+                    RebuildAndInvalidate();
+                }
+            }
+        }
+
         /// <summary>Fired (on the UI thread) each time the auto value range is computed. Carries (Min, Max).</summary>
         public event EventHandler<(double Min, double Max)>? AutoRangeComputed;
 
         /// <summary>Returns the computed value range for the current frame (seed for Fixed mode or ?? buttons).</summary>
         public (double Min, double Max) ScanCurrentFrameRange() =>
             MatrixData != null ? MatrixData.GetValueRange(FrameIndex) : (0, 1);
+
+        /// <summary>
+        /// Returns the computed value range for the current frame using the specified value mode.
+        /// For Complex data, use the appropriate mode index; for primitives, valueMode is ignored.
+        /// </summary>
+        internal (double Min, double Max) ScanCurrentFrameRange(int valueMode) =>
+            MatrixData != null ? MatrixData.GetValueRange(FrameIndex, valueMode) : (0, 1);
 
 
         // ── Overlay support ───────────────────────────────────────────────────
@@ -284,14 +372,19 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         internal AvaloniaViewport GetOverlayViewport()
         {
-            var (ax, ay)     = GetAspectScales();
+            var (ax, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             return new AvaloniaViewport
             {
-                Zoom = _zoom, TransX = rx, TransY = ry,
-                Ax = ax, Ay = ay, EffW = effW, EffH = effH,
+                Zoom = _zoom,
+                TransX = rx,
+                TransY = ry,
+                Ax = ax,
+                Ay = ay,
+                EffW = effW,
+                EffH = effH,
                 Transform = Transform,
             };
         }
@@ -307,7 +400,7 @@ namespace MxPlot.UI.Avalonia.Controls
         internal double RightInset { get; set; }
         public double Zoom => _zoom;
         public bool IsFitToView => _isFitToView;
-        public double TransX => ClampedTrans(_transX, GetEffectiveBmpDims().w, Bounds.Width,  true);
+        public double TransX => ClampedTrans(_transX, GetEffectiveBmpDims().w, Bounds.Width, true);
         public double TransY => ClampedTrans(_transY, GetEffectiveBmpDims().h, Bounds.Height, false);
         /// <summary>Raw horizontal translation before clamping (used for cross-view sync).</summary>
         internal double RawTransX => _transX;
@@ -347,6 +440,14 @@ namespace MxPlot.UI.Avalonia.Controls
                 (s, _) => s.RebuildAndInvalidate());
             LutLevelProperty.Changed.AddClassHandler<RenderSurface>(
                 (s, _) => s.RebuildAndInvalidate());
+            RenderingModeProperty.Changed.AddClassHandler<RenderSurface>(
+                (s, _) => s.RebuildAndInvalidate());
+            CompositeRecipesProperty.Changed.AddClassHandler<RenderSurface>(
+                (s, _) => s.RebuildAndInvalidate());
+            CompositeBlendModeProperty.Changed.AddClassHandler<RenderSurface>(
+                (s, _) => s.RebuildAndInvalidate());
+            CompositeFrameIndicesProperty.Changed.AddClassHandler<RenderSurface>(
+                (s, _) => s.RebuildAndInvalidate());
             // Redraw debug overlay when focus changes (IsFocused is a built-in AvaloniaObject property)
             IsFocusedProperty.Changed.AddClassHandler<RenderSurface>(
                 (s, _) => s.InvalidateVisual());
@@ -371,13 +472,32 @@ namespace MxPlot.UI.Avalonia.Controls
                 newData.ScaleChanged += _scaleChangedHandler;
             }
 
+            // Remember previous bitmap dimensions before reallocation.
+            var prevSize = _bitmap?.PixelSize;
             AllocateBitmap();
             RefreshBitmap();
-            // Defer FitToView until Bounds are valid (first layout might not have happened yet)
-            if (Bounds.Width > 0 && Bounds.Height > 0)
-                FitToView();
-            else
-                _pendingFitToView = true;
+
+            // Only reset the view when the bitmap dimensions actually changed or this is the
+            // first load (_bitmap was null before). When the same-sized data is swapped in
+            // (e.g. during an export loop where each frame replaces the slice MatrixData with
+            // the same XCount×YCount), the user's zoom/pan state is preserved.
+            bool dimsChanged = _bitmap == null
+                ? prevSize != null
+                : prevSize == null || prevSize.Value != _bitmap.PixelSize;
+
+            if (dimsChanged)
+            {
+                if (Bounds.Width > 0 && Bounds.Height > 0)
+                    FitToView();
+                else
+                    _pendingFitToView = true;
+            }
+            else if (_isFitToView && _bitmap != null)
+            {
+                // Dimensions are the same but aspect scales may differ; re-fit to stay accurate.
+                if (Bounds.Width > 0 && Bounds.Height > 0)
+                    FitToView();
+            }
         }
 
         /// <summary>
@@ -408,8 +528,9 @@ namespace MxPlot.UI.Avalonia.Controls
         private void AllocateBitmap()
         {
             var data = MatrixData;
-            var lut = Lut;
-            if (data == null || lut == null)
+            var mode = RenderingMode;
+
+            if (data == null || (Lut == null && mode == RenderingMode.Lut))
             {
                 _bitmap = null;
                 _writer = null;
@@ -424,16 +545,42 @@ namespace MxPlot.UI.Avalonia.Controls
                 _bitmap?.Dispose();
                 _bitmap = new WriteableBitmap(
                     new PixelSize(data.XCount, data.YCount),
-                    new Vector(96, 96),
+                    new global::Avalonia.Vector(96, 96),
                     PixelFormat.Bgra8888,
                     AlphaFormat.Premul);
             }
 
-            // Recreate the writer only when the value type changes
-            if (_writer == null || _writer.ValueType != data.ValueType)
-                _writer = new BitmapWriter(lut, data.ValueType);
+            // Recreate the writer when type or mode changes
+            bool needsNewWriter = _writer == null
+                || _writer.ValueType != data.ValueType
+                || !IsWriterCompatible(_writer, mode);
+
+            if (needsNewWriter)
+            {
+                _writer = mode switch
+                {
+                    RenderingMode.Lut => new LutBitmapWriter(data.ValueType),
+                    RenderingMode.Composite => new CompositeBitmapWriter(data.ValueType),
+                    RenderingMode.ColorCoded => new CompositeBitmapWriter(data.ValueType),
+                    _ => throw new NotSupportedException($"RenderingMode {mode} is not supported.")
+                };
+            }
+
             _writer.FlipY = FlipY;
+
+            // Set Complex projection function when data is Complex
+            if (data.ValueType == typeof(Complex))
+                _writer.StructValueConverter = GetComplexConverter();
         }
+
+        private static bool IsWriterCompatible(IBitmapWriter writer, RenderingMode mode)
+            => mode switch
+            {
+                RenderingMode.Lut => writer is LutBitmapWriter,
+                RenderingMode.Composite => writer is CompositeBitmapWriter,
+                RenderingMode.ColorCoded => writer is CompositeBitmapWriter,
+                _ => false
+            };
 
         /// <summary>
         /// Writes the current frame into the existing <see cref="_bitmap"/>.
@@ -442,8 +589,27 @@ namespace MxPlot.UI.Avalonia.Controls
         private void RefreshBitmap()
         {
             var data = MatrixData;
-            var lut = Lut;
-            if (data == null || lut == null || _bitmap == null || _writer == null) return;
+            if (data == null || _bitmap == null || _writer == null) return;
+
+            var context = BuildContext(data);
+            if (context == null) return;
+
+            _writer.Render(data, _bitmap, context);
+            BitmapRefreshed?.Invoke(this, EventArgs.Empty);
+        }
+
+        private IRenderingContext? BuildContext(IMatrixData data)
+            => RenderingMode switch
+            {
+                RenderingMode.Lut => BuildLutContext(data, Lut),
+                RenderingMode.Composite => BuildCompositeContext(),
+                RenderingMode.ColorCoded => BuildCompositeContext(),
+                _ => null
+            };
+
+        private LutRenderingContext? BuildLutContext(IMatrixData data, LookupTable? lut)
+        {
+            if (lut == null) return null;
 
             // Apply palette depth: resample LUT when a custom level count is requested
             int depth = LutLevel;
@@ -457,13 +623,20 @@ namespace MxPlot.UI.Avalonia.Controls
             }
             else
             {
-                (min, max) = data.GetValueRange(FrameIndex);
+                int valueMode = data.ValueType == typeof(Complex) ? (int)_complexValueMode : 0;
+                (min, max) = data.GetValueRange(FrameIndex, valueMode);
                 AutoRangeComputed?.Invoke(this, (min, max));
             }
 
-            _writer.SetProperties(effectiveLut, min, max, IsInvertedColor);
-            _writer.Render(data, FrameIndex, _bitmap);
-            BitmapRefreshed?.Invoke(this, EventArgs.Empty);
+            return new LutRenderingContext(FrameIndex, effectiveLut, min, max, IsInvertedColor);
+        }
+
+        private CompositeRenderingContext? BuildCompositeContext()
+        {
+            var recipes = CompositeRecipes;
+            var indices = CompositeFrameIndices;
+            if (recipes is not { Count: > 0 } || indices is not { Length: > 0 }) return null;
+            return new CompositeRenderingContext(indices, recipes, CompositeBlendMode);
         }
 
         // Detect Bounds changes (size changed → clamp translation / deferred FitToView)
@@ -502,7 +675,7 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_bitmap == null) return;
 
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             var (ax, ay) = GetAspectScales();
             double origW = _bitmap.PixelSize.Width * _zoom * ax;
@@ -553,9 +726,9 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_bitmap == null) return;
             var (ax, ay) = GetAspectScales();
             var (natW, _) = GetNaturalDims();
-            double origW  = _bitmap.PixelSize.Width  * ax;
-            double origH  = _bitmap.PixelSize.Height * ay;
-            double scale  = natW > 0 ? width / natW : 1.0;
+            double origW = _bitmap.PixelSize.Width * ax;
+            double origH = _bitmap.PixelSize.Height * ay;
+            double scale = natW > 0 ? width / natW : 1.0;
             double scaledW = origW * scale;
             double scaledH = origH * scale;
 
@@ -568,7 +741,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 }
                 else
                 {
-                    double cx = width  / 2.0;
+                    double cx = width / 2.0;
                     double cy = height / 2.0;
                     var mat = Matrix.CreateTranslation(-cx, -cy)
                             * GetTransformMatrix()
@@ -582,9 +755,13 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 var vp = new AvaloniaViewport
                 {
-                    Zoom = scale, TransX = 0, TransY = 0,
-                    Ax = ax, Ay = ay,
-                    EffW = width, EffH = height,
+                    Zoom = scale,
+                    TransX = 0,
+                    TransY = 0,
+                    Ax = ax,
+                    Ay = ay,
+                    EffW = width,
+                    EffH = height,
                     Transform = Transform,
                 };
                 OverlayManager.BeginCapture(withOverlays);
@@ -615,17 +792,17 @@ namespace MxPlot.UI.Avalonia.Controls
             // When ContentAlignment pins an edge, the image is offset by PanMargin in that
             // direction, so the available space for fitting is reduced accordingly.
             // Left/Right pin the X edge; Top/Bottom pin the Y edge; Center has no pin.
-            double mX = _contentAlignment is ContentAlignment.Left   or ContentAlignment.TopLeft   or ContentAlignment.BottomLeft
-                                          or ContentAlignment.Right  or ContentAlignment.TopRight  or ContentAlignment.BottomRight
+            double mX = _contentAlignment is ContentAlignment.Left or ContentAlignment.TopLeft or ContentAlignment.BottomLeft
+                                          or ContentAlignment.Right or ContentAlignment.TopRight or ContentAlignment.BottomRight
                         ? PanMargin : 0.0;
-            double mY = _contentAlignment is ContentAlignment.Top    or ContentAlignment.TopLeft    or ContentAlignment.TopRight
+            double mY = _contentAlignment is ContentAlignment.Top or ContentAlignment.TopLeft or ContentAlignment.TopRight
                                           or ContentAlignment.Bottom or ContentAlignment.BottomLeft or ContentAlignment.BottomRight
                         ? PanMargin : 0.0;
             // Add BitmapPadding on each side (×2 for both edges)
-            double availW = Math.Max(1.0, Bounds.Width  - mX - BitmapPadding * 2);
+            double availW = Math.Max(1.0, Bounds.Width - mX - BitmapPadding * 2);
             double availH = Math.Max(1.0, Bounds.Height - mY - BitmapPadding * 2);
 
-            _zoom   = Math.Min(availW / contentW, availH / contentH);
+            _zoom = Math.Min(availW / contentW, availH / contentH);
             _transX = AlignedTransX(contentW * _zoom, Bounds.Width);
             _transY = AlignedTransY(contentH * _zoom, Bounds.Height);
             ScrollStateChanged?.Invoke(this, EventArgs.Empty);
@@ -686,59 +863,59 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var (_, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            int  idx     = AxisIndicatorPx.Value;
-            int  bmpRow  = FlipY ? _bitmap.PixelSize.Height - 1 - idx : idx;
+            int idx = AxisIndicatorPx.Value;
+            int bmpRow = FlipY ? _bitmap.PixelSize.Height - 1 - idx : idx;
             bool changed = false;
 
             switch (Transform)
             {
                 case ViewTransform.None:
                 case ViewTransform.FlipH:
-                {
-                    double ry = ClampedTrans(_transY, effH, Bounds.Height, false);
-                    double y  = ry + (bmpRow + 0.5) * _zoom * ay;
-                    if (forceCenter || y < 0 || y > Bounds.Height)
                     {
-                        _transY = Bounds.Height / 2.0 - (bmpRow + 0.5) * _zoom * ay;
-                        changed = true;
+                        double ry = ClampedTrans(_transY, effH, Bounds.Height, false);
+                        double y = ry + (bmpRow + 0.5) * _zoom * ay;
+                        if (forceCenter || y < 0 || y > Bounds.Height)
+                        {
+                            _transY = Bounds.Height / 2.0 - (bmpRow + 0.5) * _zoom * ay;
+                            changed = true;
+                        }
+                        break;
                     }
-                    break;
-                }
                 case ViewTransform.FlipV:
                 case ViewTransform.Rotate180:
-                {
-                    double ry = ClampedTrans(_transY, effH, Bounds.Height, false);
-                    double y  = ry + effH - (bmpRow + 0.5) * _zoom * ay;
-                    if (forceCenter || y < 0 || y > Bounds.Height)
                     {
-                        _transY = Bounds.Height / 2.0 - effH + (bmpRow + 0.5) * _zoom * ay;
-                        changed = true;
+                        double ry = ClampedTrans(_transY, effH, Bounds.Height, false);
+                        double y = ry + effH - (bmpRow + 0.5) * _zoom * ay;
+                        if (forceCenter || y < 0 || y > Bounds.Height)
+                        {
+                            _transY = Bounds.Height / 2.0 - effH + (bmpRow + 0.5) * _zoom * ay;
+                            changed = true;
+                        }
+                        break;
                     }
-                    break;
-                }
                 case ViewTransform.Transpose:
                 case ViewTransform.Rotate90CCW:
-                {
-                    double rx = ClampedTrans(_transX, effW, Bounds.Width, true);
-                    double x  = rx + (bmpRow + 0.5) * _zoom * ay;
-                    if (forceCenter || x < 0 || x > Bounds.Width)
                     {
-                        _transX = Bounds.Width / 2.0 - (bmpRow + 0.5) * _zoom * ay;
-                        changed = true;
+                        double rx = ClampedTrans(_transX, effW, Bounds.Width, true);
+                        double x = rx + (bmpRow + 0.5) * _zoom * ay;
+                        if (forceCenter || x < 0 || x > Bounds.Width)
+                        {
+                            _transX = Bounds.Width / 2.0 - (bmpRow + 0.5) * _zoom * ay;
+                            changed = true;
+                        }
+                        break;
                     }
-                    break;
-                }
                 case ViewTransform.Rotate90CW:
-                {
-                    double rx = ClampedTrans(_transX, effW, Bounds.Width, true);
-                    double x  = rx + effW - (bmpRow + 0.5) * _zoom * ay;
-                    if (forceCenter || x < 0 || x > Bounds.Width)
                     {
-                        _transX = Bounds.Width / 2.0 - effW + (bmpRow + 0.5) * _zoom * ay;
-                        changed = true;
+                        double rx = ClampedTrans(_transX, effW, Bounds.Width, true);
+                        double x = rx + effW - (bmpRow + 0.5) * _zoom * ay;
+                        if (forceCenter || x < 0 || x > Bounds.Width)
+                        {
+                            _transX = Bounds.Width / 2.0 - effW + (bmpRow + 0.5) * _zoom * ay;
+                            changed = true;
+                        }
+                        break;
                     }
-                    break;
-                }
             }
 
             if (changed)
@@ -806,7 +983,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
         protected override void OnPointerPressed(PointerPressedEventArgs e)
         {
-            if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
+            if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+            {
+                base.OnPointerPressed(e);
+                return;
+            }
             if (_bitmap == null) return;
 
             // Take keyboard focus so arrow / Delete / Escape keys work
@@ -870,7 +1051,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
         protected override void OnPointerMoved(PointerEventArgs e)
         {
-            
+
             _lastPointerModifiers = e.KeyModifiers;
             var pos = e.GetPosition(this);
             _lastScreenPos = pos;
@@ -1037,6 +1218,20 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── Helpers ──────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Returns a projection function from Complex to double
+        /// corresponding to the current ComplexValueMode.
+        /// </summary>
+        private Func<Complex, double> GetComplexConverter() => _complexValueMode switch
+        {
+            ComplexValueMode.Magnitude => c => c.Magnitude,
+            ComplexValueMode.Real => c => c.Real,
+            ComplexValueMode.Imaginary => c => c.Imaginary,
+            ComplexValueMode.Phase => c => c.Phase,
+            ComplexValueMode.Power => c => c.Real * c.Real + c.Imaginary * c.Imaginary,
+            _ => c => c.Magnitude,
+        };
+
         private void ClampTranslation()
         {
             _snapTimer?.Stop();
@@ -1090,7 +1285,7 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_bitmap == null) return dataPos;
             var (ax, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             var md = MatrixData;
             double bx, by;
@@ -1108,12 +1303,12 @@ namespace MxPlot.UI.Avalonia.Controls
             // effW/effH are already swapped for Rotate90CW/CCW/Transpose by GetEffectiveBmpDims.
             return Transform switch
             {
-                ViewTransform.FlipH      => new Point(rx + effW - bx * _zoom * ax, by * _zoom * ay + ry),
-                ViewTransform.FlipV      => new Point(bx * _zoom * ax + rx, ry + effH - by * _zoom * ay),
-                ViewTransform.Rotate180  => new Point(rx + effW - bx * _zoom * ax, ry + effH - by * _zoom * ay),
-                ViewTransform.Rotate90CW  => new Point(rx + effW - by * _zoom * ay, bx * _zoom * ax + ry),
+                ViewTransform.FlipH => new Point(rx + effW - bx * _zoom * ax, by * _zoom * ay + ry),
+                ViewTransform.FlipV => new Point(bx * _zoom * ax + rx, ry + effH - by * _zoom * ay),
+                ViewTransform.Rotate180 => new Point(rx + effW - bx * _zoom * ax, ry + effH - by * _zoom * ay),
+                ViewTransform.Rotate90CW => new Point(rx + effW - by * _zoom * ay, bx * _zoom * ax + ry),
                 ViewTransform.Rotate90CCW => new Point(by * _zoom * ay + rx, ry + effH - bx * _zoom * ax),
-                ViewTransform.Transpose  => new Point(by * _zoom * ay + rx, bx * _zoom * ax + ry),
+                ViewTransform.Transpose => new Point(by * _zoom * ay + rx, bx * _zoom * ax + ry),
                 _ => new Point(bx * _zoom * ax + rx, by * _zoom * ay + ry),
             };
         }
@@ -1133,10 +1328,10 @@ namespace MxPlot.UI.Avalonia.Controls
             string line1 = $"({_lastScreenPos.X:F0}, {_lastScreenPos.Y:F0})";
             string line2 = (sOn, cOn) switch
             {
-                (true,  true)  => "Shift  Ctrl",
-                (true,  false) => "Shift",
-                (false, true)  => "Ctrl",
-                _              => "\u2014",
+                (true, true) => "Shift  Ctrl",
+                (true, false) => "Shift",
+                (false, true) => "Ctrl",
+                _ => "\u2014",
             };
             string line3 = focused ? "Focus \u2713" : "Focus \u2013";
 
@@ -1174,7 +1369,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             var (ax, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             return Transform switch
             {
@@ -1203,7 +1398,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
                 // Hide when the cursor is outside the effective image rect
                 var (effW, effH) = GetEffectiveBmpDims();
-                double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+                double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
                 double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
                 if (_lastScreenPos.X < rx || _lastScreenPos.X >= rx + effW ||
                     _lastScreenPos.Y < ry || _lastScreenPos.Y >= ry + effH) return;
@@ -1224,11 +1419,26 @@ namespace MxPlot.UI.Avalonia.Controls
                         : md.YMin + (fby - 0.5) * md.YStep;
                     string xu = md.XUnit.Length > 0 ? $" {md.XUnit}" : "";
                     string yu = md.YUnit.Length > 0 ? $" {md.YUnit}" : "";
-                    double value = md.GetValueAt(rawIx, rawIy);
-                    string valStr = md.ValueType == typeof(float)  ? value.ToString("G6", CultureInfo.InvariantCulture) :
-                                    md.ValueType == typeof(double) ? value.ToString("G5", CultureInfo.InvariantCulture) :
+                    double value;
+                    string cmplxValue = "";
+                    if (md.ValueType == typeof(Complex)
+                        && _writer?.StructValueConverter is Func<Complex, double> conv)
+                    {
+                        var typedData = (MatrixData<Complex>)md;
+                        var span = typedData.AsSpan(FrameIndex);
+
+                        var z = span[rawIy * md.XCount + rawIx];
+                        value = conv(z);
+                        cmplxValue = $" ({z.Real:G5}{(z.Imaginary >= 0 ? "+" : "-")}{Math.Abs(z.Imaginary):G5}i)";
+                    }
+                    else
+                    {
+                        value = md.GetValueAt(rawIx, rawIy, FrameIndex);
+                    }
+                    string valStr = md.ValueType == typeof(float) ? value.ToString("G5", CultureInfo.InvariantCulture) :
+                                    (md.ValueType == typeof(double) || md.ValueType == typeof(Complex)) ? value.ToString("G6", CultureInfo.InvariantCulture) :
                                     value.ToString(CultureInfo.InvariantCulture);
-                    label = $"({dx:F2}{xu}, {dy:F2}{yu}) [{rawIx},{rawIy}] = {valStr}";
+                    label = $"({dx:F2}{xu}, {dy:F2}{yu}) [{rawIx},{rawIy}] = {valStr}{cmplxValue}";
                 }
                 else
                 {
@@ -1249,12 +1459,21 @@ namespace MxPlot.UI.Avalonia.Controls
             double bw = ft.Width + pad * 2;
             double bh = ft.Height + pad * 2;
 
-            double ox = margin;
-            double oyBL = Bounds.Height - margin - bh;
-            double oy = (_lastScreenPos.X >= margin && _lastScreenPos.X < margin + bw &&
-                           _lastScreenPos.Y >= oyBL && _lastScreenPos.Y < oyBL + bh)
-                          ? margin
-                          : oyBL;
+            double ox, oy;
+            if (OverlayInfoText != null && OverlayInfoTextAnchor == OverlayInfoTextAnchor.TopRight)
+            {
+                ox = Bounds.Width - margin - bw;
+                oy = margin;
+            }
+            else
+            {
+                ox = margin;
+                double oyBL = Bounds.Height - margin - bh;
+                oy = (_lastScreenPos.X >= margin && _lastScreenPos.X < margin + bw &&
+                      _lastScreenPos.Y >= oyBL && _lastScreenPos.Y < oyBL + bh)
+                     ? margin
+                     : oyBL;
+            }
 
             ctx.FillRectangle(
                 new SolidColorBrush(Color.FromArgb(160, 48, 48, 48)),
@@ -1277,7 +1496,7 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 // Elastic pull around the alignment-defined home position
                 double home = isX ? AlignedTransX(bmpSize, viewSize) : AlignedTransY(bmpSize, viewSize);
-                double raw  = trans - home;
+                double raw = trans - home;
                 return raw == 0 ? home : home + raw * limit / (limit + Math.Abs(raw));
             }
             double maxT = PanMargin;
@@ -1383,7 +1602,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             if (_bitmap == null) return (0, 0);
             var (ax, ay) = GetAspectScales();
-            double w = _bitmap.PixelSize.Width  * ax;
+            double w = _bitmap.PixelSize.Width * ax;
             double h = _bitmap.PixelSize.Height * ay;
             return Transform is ViewTransform.Rotate90CW
                              or ViewTransform.Rotate90CCW
@@ -1402,8 +1621,17 @@ namespace MxPlot.UI.Avalonia.Controls
                                               : BitmapInterpolationMode.LowQuality;
 
         /// <summary>
+        /// When set, replaces <c>MatrixData.YStep</c> in <see cref="GetAspectScales"/>.
+        /// Used by <see cref="OrthogonalViewController"/> in Custom scale mode to adjust the
+        /// orthogonal axis display size without mutating the underlying matrix data geometry.
+        /// Set to <c>null</c> to use the actual <c>YStep</c> (default).
+        /// </summary>
+        internal double? OrthoAxisStepOverride { get; set; }
+
+        /// <summary>
         /// Returns the aspect scaling factors derived from <see cref="MatrixData"/> step sizes:
         /// (ax, ay) = (XStep/minStep, YStep/minStep).
+        /// When <see cref="OrthoAxisStepOverride"/> is set, it replaces <c>YStep</c> in the calculation.
         /// Returns (1, 1) when <see cref="IsAspectCorrectionEnabled"/> is false or data is unavailable.
         /// </summary>
         internal (double ax, double ay) GetAspectScales()
@@ -1411,8 +1639,9 @@ namespace MxPlot.UI.Avalonia.Controls
             if (!_isAspectCorrectionEnabled) return (1.0, 1.0);
             var md = MatrixData;
             if (md == null || md.XStep <= 0 || md.YStep <= 0) return (1.0, 1.0);
-            double minStep = Math.Min(md.XStep, md.YStep);
-            return (md.XStep / minStep, md.YStep / minStep);
+            double yStep = OrthoAxisStepOverride > 0 ? OrthoAxisStepOverride.Value : md.YStep;
+            double minStep = Math.Min(md.XStep, yStep);
+            return (md.XStep / minStep, yStep / minStep);
         }
 
         /// <summary>Returns the effective pixel dimensions (without zoom).</summary>
@@ -1616,7 +1845,7 @@ namespace MxPlot.UI.Avalonia.Controls
             if (!AxisIndicatorPx.HasValue || _bitmap == null) return false;
             var (_, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             int idx = AxisIndicatorPx.Value;
             int bmpRow = FlipY ? _bitmap.PixelSize.Height - 1 - idx : idx;
@@ -1659,7 +1888,7 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_bitmap == null || _zoom == 0) return 0;
             var (_, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, effW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
             int maxIdx = _bitmap.PixelSize.Height - 1;
             int idx;
@@ -1738,7 +1967,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             if (!ShowCrosshair || !_crosshairDataPos.HasValue || _bitmap == null) return;
             var (bmpW, bmpH) = GetEffectiveBmpDims();
-            double rx = GetRenderTrans(_transX, bmpW, Bounds.Width,  true);
+            double rx = GetRenderTrans(_transX, bmpW, Bounds.Width, true);
             double ry = GetRenderTrans(_transY, bmpH, Bounds.Height, false);
             var sp = DataToScreen(_crosshairDataPos.Value);
 
@@ -1780,4 +2009,5 @@ namespace MxPlot.UI.Avalonia.Controls
             }
         }
     }
+
 }

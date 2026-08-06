@@ -18,6 +18,7 @@
 		<ProjectReference Include="..\MxPlot.Extensions.Images\MxPlot.Extensions.Images.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Tiff\MxPlot.Extensions.Tiff.csproj" />
 		<ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
+		<ProjectReference Include="..\MxPlot.UI.Avalonia.Video\MxPlot.UI.Avalonia.Video.csproj" />
 	</ItemGroup>
 
 </Project>

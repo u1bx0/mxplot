@@ -81,10 +81,40 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             g.DrawRectangle(AccentColor, 1.0, OverlayDashStyle.Solid, X, Y, Width, Height);
             // Corner L-shapes and edge-midpoint bars (always visible, zoom-independent)
             DrawRoiMarkers(g);
+            // Center crosshair marker (+ shape)
+            DrawCenterMarker(g);
             // Size label near the top-left corner
             if (ShowLabel) DrawLabel(g);
             // Position label at the bottom-left corner
             if (PositionLabel != null) DrawPositionLabel(g);
+        }
+
+        /// <summary>
+        /// Draws a centered "+" crosshair marker with the same style as the ROI border.
+        /// Outer black 3 px stroke + inner white 1 px stroke.
+        /// </summary>
+        private void DrawCenterMarker(AvaloniaOverlayGraphics g)
+        {
+            // Calculate center in world coordinates
+            double centerX = X + Width / 2.0;
+            double centerY = Y + Height / 2.0;
+            var screenCenter = g.WorldToScreen(centerX, centerY);
+
+            // Fixed pixel-length arms (12 px each direction)
+            const double armLength = 12.0;
+
+            var horizLeft = new Point(screenCenter.X - armLength, screenCenter.Y);
+            var horizRight = new Point(screenCenter.X + armLength, screenCenter.Y);
+            var vertTop = new Point(screenCenter.X, screenCenter.Y - armLength);
+            var vertBottom = new Point(screenCenter.X, screenCenter.Y + armLength);
+
+            // Draw black outer strokes (3 px)
+            g.DrawLineAtScreen(Colors.Black, 3.0, horizLeft, horizRight);
+            g.DrawLineAtScreen(Colors.Black, 3.0, vertTop, vertBottom);
+
+            // Draw white inner strokes (1 px)
+            g.DrawLineAtScreen(Colors.White, 1.0, horizLeft, horizRight);
+            g.DrawLineAtScreen(Colors.White, 1.0, vertTop, vertBottom);
         }
 
         private void DrawPositionLabel(AvaloniaOverlayGraphics g)

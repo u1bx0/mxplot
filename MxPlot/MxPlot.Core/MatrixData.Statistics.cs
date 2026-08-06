@@ -399,6 +399,137 @@ namespace MxPlot.Core
         }
 
         /// <summary>
+        /// Calculates the global minimum and maximum values across multi-dimensional frames for a specific axis and value mode.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Performance Optimization (multi-dimensional Iterator):</b></para>
+        /// <para>
+        /// Instead of iterating through all frames and executing a conditional branch to discard irrelevant ones 
+        /// (an O(N) operation, where N is the total frame count), this method utilizes a multi-dimensional counter. 
+        /// By locking the target axis and solely incrementing the coordinates of the remaining axes, it guarantees 
+        /// zero wasted CPU cycles and completely eliminates branch misprediction penalties. 
+        /// The loop executes exactly (Total Frames / Target Axis Count) times.
+        /// </para>
+        /// <para><b>Cache and Memory-Sharing Safety:</b></para>
+        /// <para>
+        /// To maximize efficiency with Virtual Data or shallow-copied frames, a <see cref="HashSet{T}"/> is used to track 
+        /// the underlying physical data arrays (<c>T[]</c>). 
+        /// If a frame is already cached in memory and not marked as dirty, the heavy X-Y pixel scanning is entirely bypassed 
+        /// in favor of instant O(1) dictionary lookups.
+        /// </para>
+        /// </remarks>
+        /// <param name="targetAxis">The axis to hold constant.</param>
+        /// <param name="indexInAxis">The specific zero-based index on the target axis to evaluate.</param>
+        /// <param name="valueMode">The specific value mode index (e.g., Magnitude, Phase) for structured value types.</param>
+        /// <param name="invalids">
+        /// Contains a list of representative frame indices that are currently uncalculated (invalid).
+        /// Used to schedule background processing while keeping the UI responsive.
+        /// </param>
+        /// <param name="forceRefresh">
+        /// If <c>true</c>, forces an immediate full-pixel scan for all invalid frames before returning. 
+        /// Set to <c>false</c> to maintain high UI responsiveness by retrieving only currently available data.
+        /// </param>
+        /// <returns>
+        /// A tuple containing the global minimum and maximum values. 
+        /// Returns <c>(NaN, NaN)</c> if no valid frames are found and <paramref name="forceRefresh"/> is false.
+        /// </returns>
+        /// <exception cref="ArgumentException">Thrown when the target axis does not exist in the dimensions.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when the index is outside the bounds of the target axis.</exception>
+        public (double Min, double Max) GetGlobalValueRange(Axis targetAxis, int indexInAxis, int valueMode, 
+            out List<int> invalids, bool forceRefresh = false)
+        {
+            invalids = [];
+
+            if (FrameCount == 1)
+            {
+                //Fall back to the simple case when there's only one frame, or no dimensions at all (e.g., single-frame data).
+                return GetValueRange(0, valueMode);
+            }
+
+            if (!Dimensions.Contains(targetAxis.Name))
+                throw new ArgumentException($"Axis '{targetAxis.Name}' is not found.", nameof(targetAxis));
+            if (indexInAxis < 0 || indexInAxis >= targetAxis.Count)
+                throw new ArgumentOutOfRangeException(nameof(indexInAxis));
+
+            double min = double.PositiveInfinity;
+            double max = double.NegativeInfinity;
+
+            int targetAxisOrder = Dimensions.GetAxisOrder(targetAxis);
+            int numAxes = Dimensions.Axes.Count;
+
+            // To prevent processing the same underlying data array multiple times 
+            // (e.g., VirtualFrames or shallow copies), we track processed keys.
+            var processedKeys = new HashSet<T[]>();
+
+            // Initialize the N-dimensional coordinate array
+            int[] pos = new int[numAxes];
+            pos[targetAxisOrder] = indexInAxis; // Lock the target axis
+
+            // Odometer loop: generates only the combinations for the OTHER axes
+            bool done = false;
+            while (!done)
+            {
+                // Get the exact frame index for the current N-dimensional position
+                int frameIndex = Dimensions.GetFrameIndexAt(pos);
+                var key = GetFrameKey(frameIndex);
+
+                // Process only if we haven't seen this underlying data array yet
+                if (processedKeys.Add(key))
+                {
+                    if (RefreshValueRangeRequired(frameIndex))
+                    {
+                        if (forceRefresh)
+                        {
+                            RefreshValueRange(frameIndex);
+                        }
+                        else
+                        {
+                            invalids.Add(frameIndex);
+                        }
+                    }
+
+                    // Fetch and aggregate values
+                    if (_valueRangeMap.TryGetValue(key, out var range) && range.IsValid)
+                    {
+                        double vmin = range.MinValues[valueMode];
+                        double vmax = range.MaxValues[valueMode];
+
+                        if (vmin < min) min = vmin;
+                        if (vmax > max) max = vmax;
+                    }
+                }
+
+                // --- Increment the odometer (skip the locked axis) ---
+                done = true;
+                for (int i = numAxes - 1; i >= 0; i--)
+                {
+                    if (i == targetAxisOrder) continue; // Skip the locked axis
+
+                    pos[i]++;
+                    if (pos[i] < Dimensions.Axes[i].Count)
+                    {
+                        done = false; // Successfully incremented, continue while loop
+                        break;
+                    }
+                    // Carry over to the next digit
+                    pos[i] = 0;
+                }
+            }
+
+            if (double.IsPositiveInfinity(min) || double.IsNegativeInfinity(max))
+            {
+                return (double.NaN, double.NaN);
+            }
+            return (min, max);
+        }
+
+        public (double Min, double Max) GetGlobalValueRange(Axis targetAxis, int indexInAxis)
+            => GetGlobalValueRange(targetAxis, indexInAxis, 0, out _, false);
+
+        public (double Min, double Max) GetGlobalValueRange(Axis targetAxis, int indexInAxis, out List<int> invalids, bool forceRefresh = false)
+            => GetGlobalValueRange(targetAxis, indexInAxis, 0, out invalids, forceRefresh);
+
+        /// <summary>
         /// Refreshes the min/max statistics for a specific frame.
         /// Implement a fail-safe mechanism that returns NaN instead of throwing an exception 
         /// when a suitable MinMaxFinder is not registered for the data type.

@@ -4,6 +4,7 @@ using MxPlot.Core.IO.CacheStrategies;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Controls;
 using System;
+using System.Diagnostics;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -11,7 +12,7 @@ namespace MxPlot.UI.Avalonia.Views
     {
         // ── Orthogonal side panel ──────────────────────────────────────────────
 
-        private bool _suppressOrthoResize;
+        //private bool _suppressOrthoResize;
 
         /// <summary>
         /// Wires the <see cref="AxisTracker.FreezeButton"/> toggle to activate/deactivate
@@ -25,14 +26,14 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     // When switching axes, suppress the resize fired by deactivating the old button
                     bool wasShowing = _orthoPanel.ShowRight;
-                    _suppressOrthoResize = true;
+                    using var _ = _reentrancy.Begin(GuardContext.Operating);
                     foreach (var child in _trackerPanel.Children)
                         if (child is AxisTracker t && t != tracker)
                             t.FreezeButton.IsChecked = false;
-                    _suppressOrthoResize = false;
 
                     if (_currentData != null)
                     {
+                        Debug.WriteLine($"[OrthoScale] Activate: axis={axis.Name}");
                         ApplyCacheStrategy(_currentData, axis);
                         _orthoController.Activate(_currentData, axis.Name);
                         // Guard: clamp any active action's ROIs to the new axis dimensions.
@@ -48,6 +49,7 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     // Capture sizes BEFORE deactivating (panels are hidden after Deactivate)
                     var (deltaW, deltaH) = _orthoPanel.GetCurrentSideSizes();
+                    Debug.WriteLine($"[OrthoScale] Deactivate: axis={_orthoController.ActiveAxisName ?? "(none)"}");
                     _orthoController.Deactivate();
                     // Notify any active action that orthogonal views are no longer available.
                     _activeAction?.NotifyContextChanged(CreateActionContext());
@@ -65,13 +67,38 @@ namespace MxPlot.UI.Avalonia.Views
                     if (!anyFrozen && _currentData != null)
                         ApplyCacheStrategy(_currentData, null);
 
-                    if (!_suppressOrthoResize && deltaW > 0 && WindowState != WindowState.Maximized)
+                    if (!_reentrancy.IsActive(GuardContext.Operating) && deltaW > 0 && WindowState != WindowState.Maximized)
                     {
                         Width -= deltaW;
                         Height -= deltaH;
                     }
                 }
             };
+        }
+
+        /// <summary>
+        /// Sets <see cref="MxView.OverlayInfoText"/> to the current axis position (and global frame
+        /// when there are multiple axes) while the user is dragging an <see cref="AxisTracker"/> slider.
+        /// Called on <see cref="AxisTracker.SliderDragStarted"/> and on every <see cref="AxisTracker.IndexChanged"/>
+        /// while <c>_isDraggingAxisTracker</c> is <c>true</c>.
+        /// </summary>
+        private void UpdateAxisDragOverlay(AxisTracker tracker)
+        {
+            _isDraggingAxisTracker = true;
+            string text;
+            int axisCount = _currentData?.Axes.Count ?? 0;
+            if (axisCount > 1)
+            {
+                int globalFrame = _currentData?.ActiveIndex ?? 0;
+                int totalFrames = _currentData?.FrameCount ?? 1;
+                text = $"{tracker.BuildPositionText()}  [{globalFrame + 1}/{totalFrames}]";
+            }
+            else
+            {
+                text = tracker.BuildPositionText();
+            }
+            _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.TopRight;
+            _view.OverlayInfoText = text;
         }
 
         /// <summary>
@@ -157,36 +184,45 @@ namespace MxPlot.UI.Avalonia.Views
                 return;
             }
 
+            string modeName = _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY) switch
+            {
+                ProjectionMode.Minimum => "Min",
+                ProjectionMode.Average => "Avg",
+                _ => "Max",
+            };
+            string orthoAxisName = _orthoController.ActiveAxisName ?? "Z";
+
             if (_xyProjectionWindow == null || !_xyProjectionWindow.IsVisible)
             {
-                string modeName = _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY) switch
-                {
-                    ProjectionMode.Minimum => "Min",
-                    ProjectionMode.Average => "Avg",
-                    _ => "Max",
-                };
                 _xyProjectionWindow = MatrixPlotter.Create(projectionData, _view.Lut,
                     $"{modeName} Z-Projection — {Title}");
+                _xyProjectionWindow.IsSecondaryWindow = true;
+                // Establish LinkedSource so the child delegates Export / token resolution to this plotter.
+                _xyProjectionWindow.LinkedSource = this;
+                _xyProjectionWindow.LinkedSourceExcludedAxes = [orthoAxisName];
                 _xyProjectionWindow.Closed += OnXYProjectionWindowClosed;
                 PlotWindowNotifier.SetParentLink(_xyProjectionWindow, this);
                 _xyProjectionWindow.Show();
             }
             else
             {
-                string modeName = _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY) switch
-                {
-                    ProjectionMode.Minimum => "Min",
-                    ProjectionMode.Average => "Avg",
-                    _ => "Max",
-                };
                 _xyProjectionWindow.Title = $"{modeName} Z-Projection — {Title}";
-                if (_xyProjectionWindow.ViewModel != null)
-                    _xyProjectionWindow.ViewModel.MatrixData = projectionData;
+                // Keep LinkedSourceExcludedAxes in sync if the ortho axis changed.
+                _xyProjectionWindow.LinkedSourceExcludedAxes = [orthoAxisName];
+                // Use UpdateProjectionData instead of ViewModel.MatrixData= to avoid a full
+                // SetMatrixData re-initialization that would clear overlay state (ROI mode,
+                // line profiles, region statistics) on every parent frame change.
+                _xyProjectionWindow.UpdateProjectionData(projectionData);
             }
         }
 
         private void OnXYProjectionWindowClosed(object? sender, EventArgs e)
         {
+            if (_xyProjectionWindow != null)
+            {
+                _xyProjectionWindow.LinkedSource = null;
+                _xyProjectionWindow.LinkedSourceExcludedAxes = null;
+            }
             _xyProjectionWindow = null;
             _orthoPanel.ProjectionSelector.SetState(ProjectionPlane.XY, false,
                 _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY));
@@ -198,11 +234,76 @@ namespace MxPlot.UI.Avalonia.Views
             if (_xyProjectionWindow != null)
             {
                 _xyProjectionWindow.Closed -= OnXYProjectionWindowClosed;
+                _xyProjectionWindow.LinkedSource = null;
+                _xyProjectionWindow.LinkedSourceExcludedAxes = null;
                 _xyProjectionWindow.Close();
                 _xyProjectionWindow = null;
                 _orthoPanel.ProjectionSelector.SetState(ProjectionPlane.XY, false,
                     _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY));
                 _orthoController.ClearXYProjection();
+            }
+        }
+
+        // ── Axis Scale context menu for side views ────────────────────────────
+
+        private System.Collections.Generic.IEnumerable<MenuItem> BuildSideViewContextMenuItems()
+        {
+            var scaleItem = new MenuItem { Header = "Axis View Scale\u2026", FontSize = 11 };
+            scaleItem.Icon = new global::Avalonia.Controls.PathIcon
+            {
+                Data = MxPlot.UI.Avalonia.Helpers.MenuIcons.Ruler,
+                Width = 12,
+                Height = 12,
+            };
+            scaleItem.Click += async (_, _) => await ShowAxisScaleDialogAsync();
+            yield return scaleItem;
+        }
+
+        private async System.Threading.Tasks.Task ShowAxisScaleDialogAsync()
+        {
+            var data = _currentData;
+            string axisName = _orthoController.ActiveAxisName ?? "";
+            double xStep = data?.XStep ?? 0;
+            string xUnit = data?.XUnit ?? "";
+            double yStep = data?.YStep ?? 0;
+            string yUnit = data?.YUnit ?? "";
+
+            // Convert current CustomAxisStep (d, physical units) → display ratio.
+            // ratio = ZCount × d / (XCount × XStep)
+            // When ScaleMode is Physical, Custom has never been configured for this axis,
+            // so default the ratio to 1.0 instead of back-calculating from the placeholder value.
+            int xCount = data?.XCount ?? 1;
+            int zCount = _orthoPanel.BottomView.MatrixData?.YCount ?? 1;
+            double axisStep = _orthoPanel.BottomView.MatrixData?.YStep ?? 0;
+            var (xyDisplayW, xyDisplayH) = _orthoPanel.MainView.GetNaturalDims();
+            int physicalAxisPx = (xStep > 0 && axisStep > 0 && xyDisplayW > 0)
+                ? (int)System.Math.Round(xyDisplayW * axisStep / xStep)
+                : zCount;
+            double currentRatio;
+            if (_orthoController.ScaleMode == OrthoScaleMode.Custom)
+            {
+                double currentD = _orthoController.CustomAxisStep;
+                currentRatio = (xCount > 0 && xStep > 0 && zCount > 0)
+                    ? zCount * currentD / (xCount * xStep)
+                    : currentD;
+            }
+            else
+            {
+                currentRatio = 1.0;
+            }
+
+            var dlg = new OrthogonalScaleDialog(
+                _orthoController.ScaleMode,
+                currentRatio,
+                axisName,
+                xStep, xUnit,
+                yStep, yUnit,
+                xyDisplayW, xyDisplayH, physicalAxisPx);
+            await dlg.ShowDialog(this);
+            if (dlg.ResultMode.HasValue)
+            {
+                _orthoController.ApplyOrthoViewScale(dlg.ResultMode.Value, dlg.ResultCustomRatio);
+                SetScaleDirty(true);
             }
         }
     }

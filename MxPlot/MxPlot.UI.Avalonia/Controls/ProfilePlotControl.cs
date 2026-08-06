@@ -96,11 +96,11 @@ namespace MxPlot.UI.Avalonia.Controls
         private static readonly Typeface LabelTypeface = Typeface.Default;
 
         /// <summary>Font size for tick labels and crosshair readout.</summary>
-        public double TickFontSize { get; set; } = 14;
+        public double TickFontSize { get; set; } = 18;
         /// <summary>Font size for axis labels (X / Y).</summary>
-        public double LabelFontSize { get; set; } = 14;
+        public double LabelFontSize { get; set; } = 18;
         /// <summary>Font size for legend entries.</summary>
-        public double LegendFontSize { get; set; } = 14;
+        public double LegendFontSize { get; set; } = 18;
         /// <summary>Font size for the plot title.</summary>
         public double TitleFontSize { get; set; } = 18;
 
@@ -138,13 +138,45 @@ namespace MxPlot.UI.Avalonia.Controls
         public bool XAxisFixed
         {
             get => _xAxisFixed;
-            set { if (_xAxisFixed == value) return; _xAxisFixed = value; if (value) { _xFixedMin = _vxMin; _xFixedMax = _vxMax; } InvalidateVisual(); }
+            set
+            {
+                if (_xAxisFixed == value) 
+                    return; 
+                _xAxisFixed = value;
+                if (value)
+                {
+                    _xFixedMin = _vxMin; 
+                    _xFixedMax = _vxMax;
+                }
+                else
+                {
+                    _vxMin = _dxMin;
+                    _vxMax = _dxMax;
+                }
+                InvalidateVisual();
+            }
         }
         /// <summary>When <c>true</c>, locks the Y view range and disables Y pan/zoom.</summary>
         public bool YAxisFixed
         {
             get => _yAxisFixed;
-            set { if (_yAxisFixed == value) return; _yAxisFixed = value; if (value) { _yFixedMin = _vyMin; _yFixedMax = _vyMax; } InvalidateVisual(); }
+            set
+            {
+                if (_yAxisFixed == value)
+                    return;
+                _yAxisFixed = value; 
+                if (value)
+                {
+                    _yFixedMin = _vyMin;
+                    _yFixedMax = _vyMax;
+                }
+                else
+                {
+                    _vyMin = _dyMin;
+                    _vyMax = _dyMax;
+                }
+                InvalidateVisual();
+            }
         }
         /// <summary>Fixed minimum for the X axis (effective when <see cref="XAxisFixed"/> is <c>true</c>).</summary>
         public double XFixedMin { get => _xFixedMin; set { _xFixedMin = value; if (_xAxisFixed) { _vxMin = value; InvalidateVisual(); } } }
@@ -159,7 +191,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private static readonly IBrush BgBrush     = Brushes.White;
         private static readonly IBrush PlotBgBrush = new SolidColorBrush(Color.FromRgb(252, 252, 252));
         private static readonly IBrush TextBrush   = Brushes.Black;
-        private IPen _axisPen = new Pen(Brushes.Black, 1.0);
+        private IPen? _axisPen = null;
         private static readonly IPen GridPen = new Pen(new SolidColorBrush(Color.FromRgb(225, 225, 225)), 0.5);
         private static readonly IPen CrosshairPen = new Pen(
             new SolidColorBrush(Color.FromArgb(120, 100, 100, 100)), 1.0,
@@ -185,10 +217,11 @@ namespace MxPlot.UI.Avalonia.Controls
             get => _axisThickness;
             set { _axisThickness = Math.Max(0.1, value); _axisPen = new Pen(Brushes.Black, _axisThickness); InvalidateVisual(); }
         }
-        private double _axisThickness = 1.0;
+        private double _axisThickness = 1.5;
 
         // ── Data ───────────────────────────────────────────────────────────────
         private readonly List<(PlotSeries Series, Color Color)> _entries = [];
+        private readonly List<bool> _seriesVisible = [];
         private string _xLabel = "";
         private string _yLabel = "";
         private string _title = "";
@@ -211,6 +244,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             Focusable = true;
             ClipToBounds = true;
+            _axisPen = new Pen(Brushes.Black, _axisThickness);
         }
 
         public ProfilePlotControl(
@@ -226,6 +260,7 @@ namespace MxPlot.UI.Avalonia.Controls
         public void SetData(IReadOnlyList<PlotSeries> series, string xLabel = "", string yLabel = "", string title = "")
         {
             _entries.Clear();
+            _seriesVisible.Clear();
             _xLabel = xLabel;
             _yLabel = yLabel;
             _title = title;
@@ -233,6 +268,7 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 var s = series[i];
                 _entries.Add((s, s.Color ?? Palette[i % Palette.Length]));
+                _seriesVisible.Add(true);
             }
             ComputeDataBounds();
             FitToData();
@@ -392,6 +428,18 @@ namespace MxPlot.UI.Avalonia.Controls
             if ((uint)index >= (uint)_entries.Count) return;
             var (old, color) = _entries[index];
             _entries[index] = (new PlotSeries(old.Points, old.Name, old.Style, old.Color, width), color);
+            InvalidateVisual();
+        }
+
+        /// <summary>Gets the visibility state of a series by index.</summary>
+        public bool GetSeriesVisible(int index) =>
+            (uint)index < (uint)_seriesVisible.Count ? _seriesVisible[index] : true;
+
+        /// <summary>Sets the visibility of a single series by index and redraws.</summary>
+        public void SetSeriesVisible(int index, bool visible)
+        {
+            if ((uint)index >= (uint)_seriesVisible.Count) return;
+            _seriesVisible[index] = visible;
             InvalidateVisual();
         }
 
@@ -591,8 +639,14 @@ namespace MxPlot.UI.Avalonia.Controls
             // Data series (clipped)
             using (ctx.PushClip(pa))
             {
-                foreach (var (series, color) in _entries)
-                    DrawSeries(ctx, series, color, pa);
+                for (int i = 0; i < _entries.Count; i++)
+                {
+                    if (_seriesVisible[i])
+                    {
+                        var (series, color) = _entries[i];
+                        DrawSeries(ctx, series, color, pa);
+                    }
+                }
                 if (_fitOverlayPoints != null && _fitOverlayPoints.Count > 1)
                     DrawFitOverlay(ctx, pa);
             }
@@ -716,7 +770,12 @@ namespace MxPlot.UI.Avalonia.Controls
 
         private void DrawLegend(DrawingContext ctx, Rect pa, double legendAbsY)
         {
-            var named  = _entries.Where(e => e.Series.Name.Length > 0).ToList();
+            var named = new List<(PlotSeries Series, Color Color)>();
+            for (int i = 0; i < _entries.Count; i++)
+            {
+                if (_seriesVisible[i] && _entries[i].Series.Name.Length > 0)
+                    named.Add(_entries[i]);
+            }
             bool hasFit = _fitOverlayPoints is { Count: > 0 } && _fitOverlayName.Length > 0;
             if (named.Count == 0 && !hasFit) return;
 

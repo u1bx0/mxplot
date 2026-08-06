@@ -32,6 +32,8 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double ComponentHeight = 20;
         private const int DefaultInterval = 100;   // ms
 
+        private const double BaseFontSize = 11;
+
         // ── Model ─────────────────────────────────────────────────────────────
         private readonly Axis _axis;
 
@@ -63,6 +65,12 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Fired after every index change (0-based).</summary>
         public event EventHandler<int>? IndexChanged;
 
+        /// <summary>Fired when the user starts dragging the slider thumb.</summary>
+        public event EventHandler? SliderDragStarted;
+
+        /// <summary>Fired when the user releases the slider thumb after dragging.</summary>
+        public event EventHandler? SliderDragEnded;
+
         public bool IsAnimating => _timer.IsEnabled;
         public double DisplayFrameRate => IsAnimating ? _frameRate : 0;
 
@@ -78,8 +86,6 @@ namespace MxPlot.UI.Avalonia.Controls
 
         public AxisTracker(Axis axis)
         {
-
-
             _axis = axis ?? throw new ArgumentNullException(nameof(axis));
 
             // ── Name label ────────────────────────────────────────────────────
@@ -89,10 +95,12 @@ namespace MxPlot.UI.Avalonia.Controls
                 Width = LabelWidth,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextAlignment = TextAlignment.Right,
-                FontSize = 12,
+                FontSize = BaseFontSize,
                 Margin = new Thickness(0, 0, 6, 0),
                 MinHeight = 0,
+                TextTrimming = TextTrimming.CharacterEllipsis,
             };
+            ToolTip.SetTip(_nameLabel, axis.Name);
 
             // ── Slider ────────────────────────────────────────────────────────
             _slider = new Slider
@@ -142,7 +150,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 TextAlignment = TextAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
-                FontSize = 12,
+                FontSize = BaseFontSize,
                 Margin = new Thickness(5, 0, 0, 0),
                 Padding = new Thickness(0, 0),
                 MinHeight = ComponentHeight,
@@ -189,6 +197,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
             // ── Wire events ───────────────────────────────────────────────────
             _slider.ValueChanged += OnSliderValueChanged;
+            _slider.AddHandler(PointerPressedEvent, OnSliderPointerPressed, handledEventsToo: true);
+            _slider.AddHandler(PointerReleasedEvent, OnSliderPointerReleased, handledEventsToo: true);
+            _slider.AddHandler(PointerWheelChangedEvent, OnSliderPointerWheelChanged, handledEventsToo: true);
             _indicator.GotFocus += OnIndicatorGotFocus;
             _indicator.LostFocus += OnIndicatorLostFocus;
             _indicator.KeyDown += OnIndicatorKeyDown;
@@ -196,7 +207,12 @@ namespace MxPlot.UI.Avalonia.Controls
             _playButton.ContextMenu = BuildPlayButtonContextMenu();
             UpdatePlayButtonToolTip();
             _axis.IndexChanged += OnAxisIndexChanged;
-            _axis.NameChanged += (_, _) => _nameLabel.Text = _axis.Name;
+            _axis.NameChanged += (_, _) =>
+            {
+                _nameLabel.Text = _axis.Name;
+                ToolTip.SetTip(_nameLabel, _axis.Name);
+                ToolTip.SetTip(_freezeButton, $"Volume: XY-{_axis.Name}");
+            };
 
             // ── Function slot spacer (reserves column for specialized buttons) ──
             var funcSpacer = new Border { Width = ButtonSize, Height = ButtonSize };
@@ -258,6 +274,24 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             if (!_indicator.IsFocused)
                 _indicator.Text = $"{_axis.Index + 1}/{_axis.Count}";
+            ToolTip.SetTip(_indicator, BuildPositionText());
+        }
+
+        /// <summary>
+        /// Builds the axis position string shown in the indicator tooltip and, while dragging,
+        /// in the <see cref="MxView"/> top-right overlay.
+        /// Format: <c>"Z: 12.500 um (8/100)"</c> for scaled axes, <c>"Z: 8/100"</c> for index-based.
+        /// </summary>
+        internal string BuildPositionText()
+        {
+            if (_axis is TaggedAxis tagAx)
+                return $"{_axis.Name}: {tagAx.CurrentTag} ({_axis.Index + 1}/{_axis.Count})";
+            else if (_axis.IsIndexBased)
+                return $"{_axis.Name}: {_axis.Index + 1}/{_axis.Count}";
+
+            double val = _axis.ValueAt(_axis.Index);
+            string unit = string.IsNullOrEmpty(_axis.Unit) ? "" : $" {_axis.Unit}";
+            return $"{_axis.Name}: {val:F4}{unit} ({_axis.Index + 1}/{_axis.Count})";
         }
 
         private void StopAnimation()
@@ -275,6 +309,28 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             if (_isUpdating) return;
             ApplyIndex((int)Math.Round(e.NewValue));
+        }
+
+        private void OnSliderPointerPressed(object? sender, PointerPressedEventArgs e)
+        {
+            if (e.GetCurrentPoint(_slider).Properties.IsLeftButtonPressed)
+                SliderDragStarted?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnSliderPointerReleased(object? sender, PointerReleasedEventArgs e)
+        {
+            SliderDragEnded?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnSliderPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+        {
+            if (_isUpdating) return;
+
+            int delta = e.Delta.Y > 0 ? 1 : -1;
+            int newIndex = Math.Clamp(_axis.Index + delta, 0, _axis.Count - 1);
+
+            ApplyIndex(newIndex);
+            e.Handled = true;
         }
 
         /// <summary>Axis.Index was changed externally (e.g., by DimensionStructure sync).</summary>
@@ -353,7 +409,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
         private ContextMenu BuildPlayButtonContextMenu()
         {
-            var item = new MenuItem { Header = "Setup frame rate", FontSize = 11 };
+            var item = new MenuItem { Header = "Setup frame rate", FontSize = BaseFontSize };
             item.Click += async (_, _) => await ShowFrameRateDialogAsync();
             return new ContextMenu { Items = { item } };
         }

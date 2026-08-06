@@ -21,7 +21,15 @@ License: MIT License
 Copyright: Copyright (c) .NET Foundation and Contributors.
 
 -------------------------------------------------------------------------
-3. .NET Runtime and Libraries (note)
+3. SharpAvi
+-------------------------------------------------------------------------
+Components: SharpAvi (version: 3.0.1)
+License: MIT License
+Copyright: Copyright (c) 2013-2022 Vasili Maslov
+Project URL: https://github.com/baSSiLL/SharpAvi
+
+-------------------------------------------------------------------------
+4. .NET Runtime and Libraries (note)
 -------------------------------------------------------------------------
 This library depends on the .NET runtime and standard libraries (System.*,
 Microsoft.* and related packages). Licenses for those components are provided

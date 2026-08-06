@@ -2,13 +2,10 @@
 //#define VF_DEBUG
 //#define VF_CANCEL_NOTICE
 
-using MxPlot.Core.IO;
 using MxPlot.Core.IO.CacheStrategies;
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Text;

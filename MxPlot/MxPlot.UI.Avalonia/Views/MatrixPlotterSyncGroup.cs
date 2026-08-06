@@ -65,6 +65,7 @@ namespace MxPlot.UI.Avalonia.Views
             p.SyncRangeModeChanged  += OnRangeModeChanged;
             p.SyncFixedRangeChanged += OnFixedRangeChanged;
             p.SyncAxisIndexChanged  += OnAxisIndexChanged;
+            p.SyncScaleChanged      += OnScaleChanged;
             p.SyncCropStarted       += OnCropStarted;
             p.SyncCropRoiChanged    += OnCropRoiChanged;
             p.SyncCropCompleted     += OnCropCompleted;
@@ -81,6 +82,7 @@ namespace MxPlot.UI.Avalonia.Views
             p.SyncRangeModeChanged  -= OnRangeModeChanged;
             p.SyncFixedRangeChanged -= OnFixedRangeChanged;
             p.SyncAxisIndexChanged  -= OnAxisIndexChanged;
+            p.SyncScaleChanged      -= OnScaleChanged;
             p.SyncCropStarted       -= OnCropStarted;
             p.SyncCropRoiChanged    -= OnCropRoiChanged;
             p.SyncCropCompleted     -= OnCropCompleted;
@@ -159,6 +161,27 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void OnAxisIndexChanged(object? sender, (string AxisName, int Index) args) =>
             Propagate((MatrixPlotter)sender!, p => p.SyncApplyAxisIndex(args.AxisName, args.Index));
+
+        private void OnScaleChanged(object? sender, (string TargetAxis, ScaleParameter Parameter, double Value) args)
+        {
+            if (_propagating) return;
+            _propagating = true;
+            try
+            {
+                bool anyApplied = false;
+                foreach (var p in _plotters)
+                {
+                    if (ReferenceEquals(p, sender)) continue;
+                    p.CloseMenuPanelIfOpen();
+                    if (p.SyncApplyScale(args.TargetAxis, args.Parameter, args.Value))
+                        anyApplied = true;
+                }
+                // Only set dirty if at least one plotter actually applied the scale change
+                if (anyApplied)
+                    SetDirty(true);
+            }
+            finally { _propagating = false; }
+        }
 
         // Crop sync uses a separate helper that does NOT call SetDirty for ROI-only changes.
         // Replace-data crops DO call SetDirty(true) so the App Revert button becomes active,

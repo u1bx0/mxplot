@@ -1,5 +1,6 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Primitives;
 using Avalonia.Controls.Templates;
 using Avalonia.Input;
@@ -21,6 +22,7 @@ using MxPlot.UI.Avalonia.Plugins;
 using MxPlot.UI.Avalonia.Views;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -30,16 +32,59 @@ using System.Threading.Tasks;
 
 namespace MxPlot.App.Views
 {
+    /// <summary>
+    /// Main dashboard window for MxPlot application.
+    /// Manages open plot windows, synchronization, drag-drop loading, clipboard operations, and view modes.
+    /// </summary>
+    /// <remarks>
+    /// <para><strong>Partial class organization:</strong></para>
+    /// <list type="bullet">
+    ///   <item><term>MxPlotAppWindow.axaml.cs</term>
+    ///         <description>Core UI initialization, lifecycle management (minimize/restore/close), hamburger menu handlers,
+    ///                      window list selection/activation, overlap avoidance, export orchestration, and topmost behavior.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.Clipboard.cs</term>
+    ///         <description>Clipboard detection (image/CSV/TSV), format conversion, plotter-choice dialogs,
+    ///                      and profile data parsing for the "Open from Clipboard" feature.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.Dialogs.cs</term>
+    ///         <description>Reusable dialog helpers: error messages, about dialog, export overwrite confirmation,
+    ///                      and toast notifications with fade-in/fade-out animations.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.FileOperations.cs</term>
+    ///         <description>File picker integration, loading-mode resolution for large files,
+    ///                      new window positioning with cascade, and topmost suspension during dialogs.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.Plugins.cs</term>
+    ///         <description>Plugin menu rebuilding, plugin context implementation (<see cref="IMxPlotContext"/>),
+    ///                      and test data generation handlers (Mandelbrot, Julia, Hyperstack, 2D linear scale).</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.SyncFeature.cs</term>
+    ///         <description>Synchronization mode activation/deactivation, snapshot management,
+    ///                      and revert-button overlay for dirty sync state.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.ViewMode.cs</term>
+    ///         <description>List display mode (Details/Icons), card size step resource updates,
+    ///                      and view-mode control initialization (toggle buttons, slider, wheel zoom).</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.WindowManagement.cs</term>
+    ///         <description>Window focus synchronization, dynamic context menu generation for rename/show/hide/close,
+    ///                      and selection cleanup before tile/sync operations.</description>
+    ///   </item>
+    ///   <item><term>MxPlotAppWindow.ContextMenu.cs</term>
+    ///         <description>Reserved for future menu-related consolidation (currently empty; context menu logic resides in WindowManagement).</description>
+    ///   </item>
+    /// </list>
+    /// </remarks>
     public partial class MxPlotAppWindow : Window
     {
-        private enum ViewMode { Details, Icons }
-        private ViewMode _viewMode = ViewMode.Details;
         private ListBox _windowList = null!;
         private Button _viewDetailsBtn = null!;
         private Button _viewIconsBtn = null!;
         private Slider _cardSizeSlider = null!;
         private int _cardSizeStep = 2;
         private bool _applyingCardSize = false;
+        private ViewMode _viewMode = ViewMode.Details;
         private bool _topmostEnabled = false;
         private bool _processingSelectionChange = false;
         private Button _syncBtn = null!;
@@ -69,17 +114,6 @@ namespace MxPlot.App.Views
         private Border _toastPanel = null!;
         private TextBlock _toastText = null!;
         private CancellationTokenSource? _toastCts;
-
-        private static readonly (double Outer, double Thumb, double Icon)[] CardSizeSteps =
-        [
-            (54,  42, 22),
-            (66,  52, 28),
-            (76,  62, 34),
-            (96,  80, 44),
-            (116, 96, 54),
-            (140, 120, 66),
-            (160, 146, 80),
-        ];
 
         /// <summary>Threshold above which the loading-mode dialog is shown.</summary>
         private const long LargeFileThresholdBytes = 500 * 1024 * 1024;
@@ -245,23 +279,7 @@ namespace MxPlot.App.Views
             }, RoutingStrategies.Tunnel);
 
             // ── View mode toggle buttons ──────────────────────────────────
-            _viewDetailsBtn = this.FindControl<Button>("ViewDetailsBtn")!;
-            _viewIconsBtn = this.FindControl<Button>("ViewIconsBtn")!;
-            _viewDetailsBtn.Click += (_, _) => ApplyViewMode(ViewMode.Details);
-            _viewIconsBtn.Click += (_, _) => ApplyViewMode(ViewMode.Icons);
-
-            _cardSizeSlider = this.FindControl<Slider>("CardSizeSlider")!;
-            _cardSizeSlider.ValueChanged += (_, e) => ApplyCardSize((int)e.NewValue);
-
-            _windowList.PointerWheelChanged += (_, e) =>
-            {
-                if (e.KeyModifiers.HasFlag(KeyModifiers.Control) && _viewMode == ViewMode.Icons)
-                {
-                    e.Handled = true;
-                    var delta = e.Delta.Y > 0 ? 1 : -1;
-                    ApplyCardSize(Math.Clamp(_cardSizeStep + delta, 0, CardSizeSteps.Length - 1));
-                }
-            };
+            InitializeViewModeControls();
 
             // Tile: after the command runs, deselect hidden items so only visible windows remain selected.
             // Dispatcher.UIThread.Post ensures this runs after TileWindowsCommand.Execute() completes.
@@ -386,7 +404,9 @@ namespace MxPlot.App.Views
             => Close();
 
         private bool _suppressExitConfirmation = false;
+        private bool _isCheckingExit = false;
 
+        /*
         protected override async void OnClosing(WindowClosingEventArgs e)
         {
             if (!_suppressExitConfirmation)
@@ -402,7 +422,7 @@ namespace MxPlot.App.Views
                     var titles = unsaved
                         .Select(vm => vm.FileName)
                         .ToList();
-                    bool discard = await AppExitConfirmDialog.ShowAsync(this, titles);
+                    bool discard = await UnsavedChangesConfirmDialog.ShowAsync(this, titles);
                     if (discard)
                     {
                         // Suppress both the app-level guard and each individual plotter's dialog.
@@ -410,910 +430,119 @@ namespace MxPlot.App.Views
                         foreach (var item in ViewModel.ManagedWindows.ToList())
                             if (item.Window is MatrixPlotter p)
                                 p.SuppressCloseConfirmation = true;
-                        Close();
+                        
+                        if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktopLifetime)
+                        {
+                            desktopLifetime.Shutdown();
+                        }
+                        else
+                        {
+                            Close(); 
+                        }
                     }
                     return;
                 }
             }
             base.OnClosing(e);
         }
-
-        /// <summary>Shows an error dialog above the always-on-top main window.</summary>
-        internal async System.Threading.Tasks.Task ShowErrorAsync(string message)
-        {
-            var ok = new Button
-            {
-                Content = "OK",
-                Width = 70,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 16, 0, 0),
-            };
-            var stack = new StackPanel { Margin = new Thickness(20) };
-            stack.Children.Add(new TextBlock
-            {
-                Text = message,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 320,
-                FontSize = 11,
-            });
-            stack.Children.Add(ok);
-            var dlg = new Window
-            {
-                Title = "Error",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Content = stack,
-                FontSize = 11,
-            };
-            ok.Click += (_, _) => dlg.Close();
-            await WithTopmostSuspended(() => dlg.ShowDialog<object?>(this));
-        }
-
-        private async System.Threading.Tasks.Task ShowAboutAsync()
-        {
-            var ok = new Button
-            {
-                Content = "OK",
-                Width = 60,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 12, 0, 0),
-            };
-
-            var verFull = Assembly.GetEntryAssembly()
-                ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
-                ?.InformationalVersion ?? string.Empty;
-            var plusIdx = verFull.IndexOf('+');
-            var ver = plusIdx >= 0 ? verFull[..plusIdx] : verFull;
-
-            var buildDate = Assembly.GetEntryAssembly()
-               ?.GetCustomAttributes<AssemblyMetadataAttribute>()
-               .FirstOrDefault(a => a.Key == "BuildDate")?.Value;
-
-            var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            textStack.Children.Add(new TextBlock { Text = "MxPlot", FontSize = 16, FontWeight = FontWeight.Bold });
-            textStack.Children.Add(new TextBlock { Text = "—Multi-Axis Matrix Visualization", FontSize = 11, Margin = new Thickness(0, 4, 0, 0), Opacity = 0.7 });
-            if (!string.IsNullOrEmpty(ver))
-                textStack.Children.Add(new TextBlock
-                {
-                    Text = $"Version {ver}",
-                    FontSize = 11,
-                    Margin = new Thickness(0, 2, 0, 0),
-                    Opacity = 0.55,
-                });
-            if (!string.IsNullOrEmpty(buildDate))
-                textStack.Children.Add(new TextBlock
-                {
-                    Text = $"Built {buildDate}",
-                    FontSize = 11,
-                    Margin = new Thickness(0, 2, 0, 0),
-                    Opacity = 0.55,
-                });
-
-            var headerRow = new StackPanel { Orientation = Orientation.Horizontal };
-            try
-            {
-                var uri = new Uri("avares://MxPlot/Assets/mxplot_logo_pre.png");
-                var bmp = new Bitmap(AssetLoader.Open(uri));
-                headerRow.Children.Add(new Image
-                {
-                    Source = bmp,
-                    Height = 64,
-                    Width = 64,
-                    Stretch = Stretch.Uniform,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 12, 0),
-                });
-            }
-            catch { }
-            headerRow.Children.Add(textStack);
-
-            var stack = new StackPanel { Margin = new Thickness(20) };
-            stack.Children.Add(headerRow);
-            stack.Children.Add(ok);
-
-            var dlg = new Window
-            {
-                Title = "About MxPlot",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Content = stack,
-            };
-            ok.Click += (_, _) => dlg.Close();
-
-            await WithTopmostSuspended(() => dlg.ShowDialog<object?>(this));
-        }
-
-        // ── View mode switching ──────────────────────────────────────────
-
-        private void ApplyViewMode(ViewMode mode)
-        {
-            _viewMode = mode;
-            if (mode == ViewMode.Icons)
-            {
-                _windowList.ItemTemplate = (IDataTemplate)Resources["IconTemplate"]!;
-                _windowList.ItemsPanel = (ITemplate<Panel>)Resources["IconsPanel"]!;
-                if (!_windowList.Classes.Contains("IconView"))
-                    _windowList.Classes.Add("IconView");
-                _viewDetailsBtn.Opacity = 0.35;
-                _viewIconsBtn.Opacity = 1.0;
-                ViewModel.IsIconView = true;
-            }
-            else
-            {
-                _windowList.ItemTemplate = (IDataTemplate)Resources["DetailsTemplate"]!;
-                _windowList.ItemsPanel = (ITemplate<Panel>)Resources["DetailsPanel"]!;
-                _windowList.Classes.Remove("IconView");
-                _viewDetailsBtn.Opacity = 1.0;
-                _viewIconsBtn.Opacity = 0.35;
-                ViewModel.IsIconView = false;
-            }
-        }
-
-        private void ApplyCardSize(int step)
-        {
-            if (_applyingCardSize) return;
-            _applyingCardSize = true;
-            _cardSizeStep = step;
-            var (outer, thumb, icon) = CardSizeSteps[step];
-            Resources["GridCardOuter"] = outer;
-            Resources["GridCardThumb"] = thumb;
-            Resources["GridCardIcon"] = icon;
-            if ((int)_cardSizeSlider.Value != step)
-                _cardSizeSlider.Value = step;
-            _applyingCardSize = false;
-        }
-
-        // ── File open helpers ────────────────────────────────────────────
-
+        */
 
         /// <summary>
-        /// Temporarily suspends <see cref="Window.Topmost"/> while awaiting a dialog so that
-        /// the dialog is not obscured by the always-on-top main window.
+        /// Intercepts the window closing event to check for unsaved changes across all managed plotters.
+        /// Implements re-entrancy protection, gracefully handles macOS lifecycle differences,
+        /// and enforces application-wide modality by temporarily disabling background windows.
         /// </summary>
-        private async System.Threading.Tasks.Task<T> WithTopmostSuspended<T>(
-            System.Func<System.Threading.Tasks.Task<T>> action)
+        protected override async void OnClosing(WindowClosingEventArgs e)
         {
-            bool wasTopmost = Topmost;
-            Topmost = false;
-            try { return await action(); }
-            finally { Topmost = wasTopmost; }
-        }
-
-        /// <summary>
-        /// Places a newly created plot window in the wider side of the screen relative to
-        /// this dashboard window, with a cascade offset so multiple windows don’t stack exactly.
-        /// </summary>
-        private void PositionNewWindow(Window window, int windowIndex)
-        {
-            const double Gap = 16.0;
-            const double CascadeStep = 28.0;
-
-            // Find the screen that contains this dashboard window.
-            var screen = Screens.All.FirstOrDefault(s =>
-                Position.X >= s.Bounds.X && Position.X < s.Bounds.X + s.Bounds.Width &&
-                Position.Y >= s.Bounds.Y && Position.Y < s.Bounds.Y + s.Bounds.Height)
-                ?? Screens.Primary;
-            if (screen == null) return;
-
-            double sc = screen.Scaling;
-            var wb = screen.WorkingArea;
-
-            // Convert everything to DIPs for easy arithmetic.
-            var screenRect = new Rect(wb.X / sc, wb.Y / sc, wb.Width / sc, wb.Height / sc);
-            var dashRect = new Rect(Position.X / sc, Position.Y / sc, Bounds.Width, Bounds.Height);
-
-            // Determine the available side: use whichever side of the dashboard is wider.
-            var available = screenRect;
-            if (dashRect.Intersects(screenRect))
+            // Pass through if the exit is already confirmed (e.g., the second pass from Shutdown)
+            if (_suppressExitConfirmation)
             {
-                double rightSpace = screenRect.Right - dashRect.Right - Gap;
-                double leftSpace = dashRect.Left - screenRect.X - Gap;
-                if (rightSpace >= leftSpace)
-                    available = new Rect(dashRect.Right + Gap, screenRect.Y, rightSpace, screenRect.Height);
-                else
-                    available = new Rect(screenRect.X, screenRect.Y, leftSpace, screenRect.Height);
+                base.OnClosing(e);
+                return;
             }
 
-            // Fallback: use full screen if the computed side is too narrow.
-            if (available.Width < 200 || available.Height < 200)
-                available = screenRect;
-
-            // Cascade: wrap within the available region so windows don’t drift off screen.
-            double maxStep = Math.Max(0, Math.Min(available.Width, available.Height) - 200);
-            double step = maxStep > 0 ? CascadeStep * windowIndex % maxStep : 0;
-
-            window.WindowStartupLocation = WindowStartupLocation.Manual;
-            window.Position = new PixelPoint(
-                (int)((available.X + Gap / 2 + step) * sc),
-                (int)((available.Y + Gap / 2 + step) * sc));
-        }
-
-        /// <summary>Shows the file picker dialog and loads selected files.</summary>
-        private async System.Threading.Tasks.Task OpenFileViaDialogAsync()
-        {
-            var descriptors = FormatRegistry.ReaderDescriptors;
-            var perFormat = descriptors
-                .Select(d => new FilePickerFileType(d.FormatName) { Patterns = d.DialogPatterns.ToList() })
+            var unsaved = ViewModel.ManagedWindows
+                .OfType<MatrixPlotterListItemViewModel>()
+                .Where(vm => vm.HasUnsavedChanges)
                 .ToList();
 
-            var allPatterns = descriptors.SelectMany(d => d.DialogPatterns).Distinct().ToList();
-            var allSupported = new FilePickerFileType("All Supported Files") { Patterns = allPatterns };
-
-            var fileTypes = new List<FilePickerFileType> { allSupported };
-            fileTypes.AddRange(perFormat);
-
-            var files = await WithTopmostSuspended(() =>
-                StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
-                {
-                    Title = "Open File",
-                    AllowMultiple = true,
-                    FileTypeFilter = fileTypes,
-                }));
-
-            foreach (var file in files)
+            // If there are no unsaved changes, proceed with normal shutdown
+            if (unsaved.Count == 0)
             {
-                var path = file.TryGetLocalPath();
-                if (path != null)
-                    await ViewModel.LoadAndOpenFileAsync(path, this);
-            }
-        }
-
-        /// <summary>
-        /// For large files, asks the user to choose between InMemory and Virtual loading.
-        /// Returns null if the user cancels.
-        /// </summary>
-        internal async System.Threading.Tasks.Task<LoadingMode?> ResolveLoadingModeAsync(string path)
-        {
-            var fileInfo = new FileInfo(path);
-            if (!fileInfo.Exists || fileInfo.Length < LargeFileThresholdBytes)
-                return LoadingMode.Auto;
-
-            var reader = FormatRegistry.CreateReader(path);
-            if (reader is not IVirtualLoadable)
-                return LoadingMode.InMemory;
-
-            return await WithTopmostSuspended(() =>
-                LoadingModeDialog.ShowAsync(this, Path.GetFileName(path), fileInfo.Length));
-        }
-
-        // ── Tools menu handlers ───────────────────────────────────────────────
-
-        private async void ToolsGenerateHyperstack_Click(object? sender, RoutedEventArgs e)
-        {
-            var progressBar = new ProgressBar { Minimum = 0, Maximum = 100, Value = 0, Width = 260, Height = 14 };
-            var progressText = new TextBlock
-            {
-                Text = "0%",
-                FontSize = 11,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 5, 0, 0),
-                Opacity = 0.7,
-            };
-            var pStack = new StackPanel { Margin = new Thickness(20) };
-            pStack.Children.Add(new TextBlock { Text = "Generating Mandelbulb…", FontSize = 11, Margin = new Thickness(0, 0, 0, 10) });
-            pStack.Children.Add(progressBar);
-            pStack.Children.Add(progressText);
-            var dlg = new Window
-            {
-                Title = "Please Wait",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Content = pStack,
-                FontSize = 11,
-            };
-            dlg.Show(this);
-
-            var progress = new Progress<double>(pct =>
-            {
-                progressBar.Value = pct;
-                progressText.Text = $"{pct:F0}%";
-            });
-
-            var md = await Task.Run(() => GenerateHyperstackTestData(progress));
-            dlg.Close();
-            MatrixPlotter.Create(md, title: "Mandelbulb  n=2/4/6  Z=81 / T=5  192×192").Show();
-        }
-
-        private void ToolsGenerate2DTestData_Click(object? sender, RoutedEventArgs e)
-        {
-            var md = Generate2DTestData();
-            MatrixPlotter.Create(md, title: "Test 2D Data").Show();
-        }
-
-        private void ToolsGenerateJulia_Click(object? sender, RoutedEventArgs e)
-        {
-            var md = GenerateJuliaData();
-            MatrixPlotter.Create(md, title: "Julia Set  1024×1024  ×8 frames (float)", lut: Core.Imaging.ColorThemes.BSMod).Show();
-        }
-
-        /// <summary>
-        /// Generates 8 Julia set frames (1024×1024 float), each with a visually distinct
-        /// complex parameter c chosen to showcase different fractal morphologies.
-        /// Smooth escape-time with gamma=0.5 compression: brighter than log but still
-        /// distributes values toward boundary detail, keeping the interior dark and the
-        /// full LUT gradient visible across thin boundary zones.
-        /// Value 0 = inside; >0 = escaped (higher = slower escape / nearer to boundary).
-        /// </summary>
-        private static MatrixData<float> GenerateJuliaData()
-        {
-            const int w = 1024, h = 1024, maxIter = 1024;
-            const double r = 1.65; // view half-extent
-
-            // Carefully chosen c values covering spirals, dendrites, rabbits, discs, flowers
-            (double cRe, double cIm, string name)[] specs =
-            [
-                (-0.7269,   0.1889,  "Simonini spirals"),    // 0: fine spiral arms
-                (-0.70176, -0.3842,  "Snowflake dendrite"),  // 1: spiky crystalline
-                ( 0.285,    0.010,   "Disk packing"),        // 2: nested discs
-                (-0.4,      0.600,   "Classic spirals"),     // 3: large open spirals
-                (-0.835,   -0.232,   "Crystal dendrite"),    // 4: dendritic branches
-                (-0.7,      0.27,    "Douady rabbit"),       // 5: three-lobe rabbit
-                ( 0.000,    0.640,   "Siegel disc"),         // 6: smooth rotation disc
-                (-0.1,      0.651,   "Flower / petals"),     // 7: petal-like lobes
-            ];
-
-            var md = new MatrixData<float>(w, h, specs.Length);
-            md.SetXYScale(-r, r, -r, r);
-            md.Axes[0].Step = 0.1;
-
-            // Gamma-compressed smooth escape: val = (smoothed / maxIter)^gamma
-            // gamma=0.5 is a good middle ground — brighter than log, more contrast than linear
-            const double gamma = 0.5;
-
-            Parallel.For(0, specs.Length, frame =>
-            {
-                var (cRe, cIm, _) = specs[frame];
-                var arr = md.GetArray(frame);
-                for (int py = 0; py < h; py++)
-                {
-                    double zy0 = -r + py * (2.0 * r) / (h - 1.0);
-                    for (int px = 0; px < w; px++)
-                    {
-                        double zx = -r + px * (2.0 * r) / (w - 1.0);
-                        double zy = zy0;
-                        int iter = 0;
-                        while (zx * zx + zy * zy <= 4.0 && iter < maxIter)
-                        {
-                            double tmp = zx * zx - zy * zy + cRe;
-                            zy = 2.0 * zx * zy + cIm;
-                            zx = tmp;
-                            iter++;
-                        }
-                        if (iter >= maxIter)
-                        {
-                            arr[py * w + px] = 0f;
-                        }
-                        else
-                        {
-                            double mod = Math.Sqrt(zx * zx + zy * zy);
-                            if (mod < 1.0 + 1e-15) mod = 1.0 + 1e-15;
-                            double smooth = iter + 1.0 - Math.Log(Math.Log(mod)) / Math.Log(2.0);
-                            smooth = Math.Clamp(smooth, 0.0, maxIter - 1.0);
-                            arr[py * w + px] = (float)Math.Pow(smooth / (maxIter - 1.0), gamma);
-                        }
-                    }
-                }
-            });
-            return md;
-        }
-
-
-
-
-        private static MatrixData<ushort> Generate2DTestData()
-        {
-            const int xnum = 41;
-            const int ynum = 41;
-            var md = new MatrixData<ushort>(xnum, ynum);
-            md.SetXYScale(-10, 10, -10, 10);
-            md.Set((ix, iy, x, y) => (ushort)(iy * ix));
-            return md;
-        }
-
-        /// <summary>
-        /// Generates a 3ch × Z=81 × T=5 Mandelbulb hyperstack.
-        /// <list type="bullet">
-        ///   <item>C (channel) — Mandelbulb power n: 2, 4, 6</item>
-        ///   <item>Z — evenly-spaced cross-section slices through the bulb</item>
-        ///   <item>T — Y-axis rotation angle (0°–90°),</item>
-        /// </list>
-        /// Interior pixels = 0; escaped pixels = smooth escape value in (0, 1].
-        /// </summary>
-        private static MatrixData<float> GenerateHyperstackTestData(IProgress<double>? progress = null)
-        {
-            const int w = 192, h = 192, cNum = 3, zNum = 81, tNum = 5;
-            const int maxIter = 30;
-            const double extent = 1.5;
-            const double escapeR = 2.0;
-            const double gamma = 0.95;
-
-            int[] powers = [2, 3, 5];
-            int total = cNum * zNum * tNum;
-            int completed = 0;
-
-            var md = new MatrixData<float>(w, h, total);
-            md.SetXYScale(-extent, extent, -extent, extent);
-            md.XUnit = "";
-            md.YUnit = "";
-            md.DefineDimensions(
-                new ColorChannel(["n=2", "n=4", "n=6"]),
-                Axis.Z(zNum, -extent, extent, ""),
-                Axis.Time(tNum, 0.0, 330.0, "°"));
-
-            Parallel.For(0, total, frame =>
-            {
-                var (ic, iz, it) = md.Dimensions.GetAxisIndicesStruct(frame);
-                int n = powers[ic];
-                double logN = Math.Log(n);
-                double logEsc = Math.Log(escapeR);
-                double rotY = it * Math.PI * 0.5 / tNum;
-                double cosR = Math.Cos(rotY), sinR = Math.Sin(rotY);
-                // Z: evenly-spaced cross-section planes through the bulb
-                double zPlane = -extent + iz * (2.0 * extent) / (zNum - 1.0);
-                var arr = md.GetArray(frame);
-
-                for (int py = 0; py < h; py++)
-                {
-                    double sy = -extent + py * (2.0 * extent) / (h - 1.0);
-                    for (int px = 0; px < w; px++)
-                    {
-                        double sx = -extent + px * (2.0 * extent) / (w - 1.0);
-                        // Rotate (sx, zPlane) around Y-axis to get the 3-D seed point c
-                        double cx = sx * cosR - zPlane * sinR;
-                        double cy = sy;
-                        double cz = sx * sinR + zPlane * cosR;
-
-                        double x = cx, y = cy, z = cz;
-                        int iter = 0;
-                        double minOrbitR = double.MaxValue;
-
-                        while (iter < maxIter)
-                        {
-                            double r2 = x * x + y * y + z * z;
-                            double r = Math.Sqrt(r2);
-                            if (r < minOrbitR) minOrbitR = r;
-                            if (r2 > escapeR * escapeR) break;
-                            double theta = Math.Atan2(Math.Sqrt(x * x + y * y), z);
-                            double phi = Math.Atan2(y, x);
-                            double rn = Math.Pow(r, n);
-                            double nt = n * theta;
-                            double np = n * phi;
-                            double sinT = Math.Sin(nt);
-                            x = rn * sinT * Math.Cos(np) + cx;
-                            y = rn * sinT * Math.Sin(np) + cy;
-                            z = rn * Math.Cos(nt) + cz;
-                            iter++;
-                        }
-
-                        if (iter >= maxIter)
-                        {
-                            // Interior: orbit trap → concentric spherical shell banding
-                            double normTrap = minOrbitR / extent;
-                            double band = 0.5 + 0.5 * Math.Sin(normTrap * Math.PI * 1.5);
-                            arr[py * w + px] = (float)(0.08 + band * 0.20) * 0.1f;
-                        }
-                        else
-                        {
-                            // Exterior: smooth escape coloring with gamma compression
-                            double rFinal = Math.Sqrt(x * x + y * y + z * z);
-                            double logR = Math.Log(Math.Max(rFinal, 1.0 + 1e-15));
-                            double smooth = iter - Math.Log(logR / logEsc) / logN;
-                            smooth = Math.Clamp(smooth, 0.0, maxIter - 1.0);
-                            arr[py * w + px] = (float)Math.Pow(smooth / (maxIter - 1.0), gamma);
-                        }
-                    }
-                }
-
-                int done = Interlocked.Increment(ref completed);
-                if (done % 10 == 0 || done == total)
-                    progress?.Report(done * 100.0 / total);
-            });
-            return md;
-        }
-
-        // ── Plugin menu helpers ───────────────────────────────────────────────
-
-        /// <summary>Built-in item count inside the Tools submenu (before any plugin separator).</summary>
-        private const int ToolsBuiltInCount = 3; // "Sample Mandelbrot…", "Sample Julia Set…", "Sample Hyperstack…"
-
-        /// <summary>
-        /// Rebuilds the plugin portion of the Tools submenu.
-        /// Static built-in items (indices 0 … ToolsBuiltInCount-1) are preserved;
-        /// everything beyond is replaced with the current registry contents.
-        /// </summary>
-        private void RebuildPluginMenuItems(MenuItem toolsItem)
-        {
-            while (toolsItem.Items.Count > ToolsBuiltInCount)
-                toolsItem.Items.RemoveAt(toolsItem.Items.Count - 1);
-
-            var plugins = MxPlotAppPluginRegistry.Plugins;
-            if (plugins.Count == 0) return;
-
-            toolsItem.Items.Add(new Separator());
-            foreach (var plugin in plugins)
-            {
-                var captured = plugin;
-                var item = new MenuItem { Header = plugin.CommandName };
-                ToolTip.SetTip(item, plugin.Description);
-                item.Click += (_, _) =>
-                {
-                    try { captured.Run(CreateMxPlotContext()); }
-                    catch { /* silently absorb plugin errors */ }
-                };
-                toolsItem.Items.Add(item);
-            }
-        }
-
-        private IMxPlotContext CreateMxPlotContext() => new MxPlotContextImpl(this, ViewModel, _windowList);
-
-        // ── Clipboard ────────────────────────────────────────────────────────
-
-        // Platform image-format identifiers tried in order of preference
-        private static readonly string[] ClipboardImageFormats =
-            ["PNG", "image/png", "public.png", "public.tiff", "com.apple.tiff", "Bitmap"];
-
-        private async Task<bool> ClipboardHasImageAsync()
-        {
-            try
-            {
-                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-                if (clipboard == null) return false;
-                var formats = await clipboard.GetFormatsAsync();
-                return formats?.Any(f =>
-                    ClipboardImageFormats.Contains(f, StringComparer.OrdinalIgnoreCase)) == true;
-            }
-            catch { return false; }
-        }
-
-        private async Task<bool> ClipboardHasUsableDataAsync()
-        {
-            try
-            {
-                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-                if (clipboard == null) return false;
-                var formats = await clipboard.GetFormatsAsync();
-                if (formats == null) return false;
-                if (formats.Any(f => ClipboardImageFormats.Contains(f, StringComparer.OrdinalIgnoreCase)))
-                    return true;
-                // Also check for plain text (potential CSV)
-                return formats.Any(f =>
-                    f.Equals("Text", StringComparison.OrdinalIgnoreCase) ||
-                    f.Equals("text/plain", StringComparison.OrdinalIgnoreCase) ||
-                    f.Equals("public.utf8-plain-text", StringComparison.OrdinalIgnoreCase));
-            }
-            catch { return false; }
-        }
-
-        private async Task<Bitmap?> GetClipboardBitmapAsync()
-        {
-            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-            if (clipboard == null) return null;
-
-            var available = await clipboard.GetFormatsAsync() ?? [];
-            Console.WriteLine(
-                $"[Clipboard] available: {string.Join(", ", available)}");
-
-            // On macOS, Avalonia's GetDataAsync returns null for all native NSPasteboard
-            // image formats. As a workaround, MxView.CopyImageAsync caches the PNG bytes
-            // of the last in-process copy. If the clipboard still carries the avaloniaui
-            // in-process format (meaning no other app has overwritten it since), use the cache.
-            bool hasInProc = available.Any(f =>
-                f.Contains("avaloniaui", StringComparison.OrdinalIgnoreCase));
-            if (hasInProc && MxPlot.UI.Avalonia.Controls.MxView.LastCopiedPng is { Length: > 4 } cached)
-            {
-                Console.WriteLine("[Clipboard] using in-process PNG cache");
-                try
-                {
-                    using var cacheMem = new MemoryStream(cached);
-                    return new Bitmap(cacheMem);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[Clipboard] cache decode failed: {ex.Message}");
-                }
-            }
-
-            var predefined = ClipboardImageFormats
-                .Where(f => available.Any(a =>
-                    string.Equals(a, f, StringComparison.OrdinalIgnoreCase)));
-            var extra = available
-                .Where(f => !ClipboardImageFormats.Any(cf =>
-                    string.Equals(cf, f, StringComparison.OrdinalIgnoreCase))
-                    && (f.Contains("image", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("tiff", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("png", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("bmp", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("jpeg", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("pict", StringComparison.OrdinalIgnoreCase)
-                     || f.Contains("avaloniaui", StringComparison.OrdinalIgnoreCase)));
-
-            foreach (var fmt in predefined.Concat(extra))
-            {
-                try
-                {
-                    var data = await clipboard.GetDataAsync(fmt);
-                    Console.WriteLine(
-                        $"[Clipboard] fmt={fmt}  type={data?.GetType().Name ?? "null"}" +
-                        $"  len={(data is byte[] b0 ? b0.Length : -1)}");
-
-                    if (data is Bitmap inProcBmp)
-                        return inProcBmp;
-
-                    byte[]? bytes = data switch
-                    {
-                        byte[] b => b,
-                        MemoryStream ms => ms.ToArray(),
-                        Stream s => ReadStreamToBytes(s),
-                        _ => null,
-                    };
-                    if (bytes == null || bytes.Length < 4) continue;
-
-                    using var skBmp = SkiaSharp.SKBitmap.Decode(bytes);
-                    if (skBmp != null)
-                    {
-                        using var png = new MemoryStream();
-                        skBmp.Encode(png, SkiaSharp.SKEncodedImageFormat.Png, 100);
-                        png.Position = 0;
-                        return new Bitmap(png);
-                    }
-
-                    using var ms2 = new MemoryStream(bytes);
-                    return new Bitmap(ms2);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine(
-                        $"[Clipboard] fmt={fmt} exception: {ex.Message}");
-                }
-            }
-            return null;
-        }
-
-        private static byte[] ReadStreamToBytes(Stream s)
-        {
-            using var ms = new MemoryStream();
-            s.CopyTo(ms);
-            return ms.ToArray();
-        }
-
-        private async void HamburgerOpenFromClipboard_Click(object? sender, RoutedEventArgs e)
-        {
-            // Try image first
-            var bmp = await GetClipboardBitmapAsync();
-            if (bmp != null)
-            {
-                await OpenClipboardImageAsync(bmp);
+                base.OnClosing(e);
                 return;
             }
 
-            // Try plain text → CSV
-            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-            string? text = clipboard == null ? null : await clipboard.TryGetTextAsync();
-            if (!string.IsNullOrWhiteSpace(text))
-            {
-                await OpenClipboardCsvAsync(text);
-                return;
-            }
+            // Unsaved changes exist: cancel the OS-level close request to show the dialog
+            e.Cancel = true;
 
-            await ShowErrorAsync("No image or CSV text found in clipboard.");
-        }
+            // Prevent re-entrancy (e.g., if the user spams Cmd+Q or the close button)
+            if (_isCheckingExit) return;
 
-        private async Task OpenClipboardImageAsync(Bitmap bmp)
-        {
+            _isCheckingExit = true;
             try
             {
-                int w = bmp.PixelSize.Width, h = bmp.PixelSize.Height;
-
-                var mode = await ShowClipboardLoadModeAsync(w, h);
-                if (mode == null) return;
-
-                byte[] raw;
-                int stride;
-                using (var wb = new WriteableBitmap(bmp.PixelSize, bmp.Dpi,
-                           PixelFormat.Rgba8888, AlphaFormat.Unpremul))
-                using (var fb = wb.Lock())
+                // Lock all child plotter windows to prevent the user from editing or saving
+                // data in the background while the exit confirmation dialog is open.
+                foreach (var item in ViewModel.ManagedWindows)
                 {
-                    bmp.CopyPixels(new PixelRect(0, 0, w, h),
-                        fb.Address, fb.RowBytes * h, fb.RowBytes);
-                    stride = fb.RowBytes;
-                    raw = new byte[stride * h];
-                    Marshal.Copy(fb.Address, raw, 0, raw.Length);
+                    if (item.Window is MatrixPlotter p)
+                    {
+                        p.IsEnabled = false;
+                    }
                 }
 
-                bool grayscale = mode.Value;
-                var md = await Task.Run(() => ClipboardPixelsToMatrixData(raw, stride, w, h, grayscale));
+                var titles = unsaved.Select(vm => vm.FileName).ToList();
+                bool discard = await UnsavedChangesConfirmDialog.ShowAsync(this, titles);
 
-                var title = grayscale ? "Clipboard  (Grayscale)" : "Clipboard  (RGB)";
-                MatrixPlotter.Create(md, title: title).Show();
+                if (discard)
+                {
+                    // The user chose to discard changes. Suppress both the app-level guard 
+                    // and each individual plotter's dialog to allow a clean exit.
+                    _suppressExitConfirmation = true;
+                    foreach (var item in ViewModel.ManagedWindows.ToList())
+                    {
+                        if (item.Window is MatrixPlotter p)
+                        {
+                            p.SuppressCloseConfirmation = true;
+                        }
+                    }
+
+                    // Re-request the application shutdown. This triggers OnClosing again,
+                    // but this time _suppressExitConfirmation is true, so it will pass through.
+                    // This ensures macOS cleanly terminates the process instead of leaving it in the Dock.
+                    if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktopLifetime)
+                    {
+                        desktopLifetime.Shutdown();
+                    }
+                    else
+                    {
+                        Close(); // Fallback for environments without classic desktop lifetime
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Catch exceptions to prevent async void from crashing the entire process
+                Console.WriteLine($"[Warning] Exception during exit confirmation: {ex.Message}");
             }
             finally
             {
-                bmp.Dispose();
-            }
-        }
+                _isCheckingExit = false;
 
-        /// <summary>
-        /// Tries to parse clipboard text as CSV (comma or tab separated).
-        /// Returns the parsed MatrixData and the detected separator, or null if parsing fails.
-        /// </summary>
-        private static (MxPlot.Core.MatrixData<double> Data, string Sep)? TryParseClipboardCsv(string text)
-        {
-            var lines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
-            if (lines.Length == 0) return null;
-
-            foreach (var sep in new[] { "\t", "," })
-            {
-                try
+                // If the user cancelled the exit (discard == false), unlock the child windows
+                // so normal application operation can resume.
+                if (!_suppressExitConfirmation)
                 {
-                    var md = MxPlot.Core.IO.CsvHandler.CreateFrom<double>(lines, sep, flipY: true);
-                    // Require at least 2 columns or 2 rows to consider it a valid matrix
-                    if (md.XCount >= 1 && md.YCount >= 1 && (md.XCount >= 2 || md.YCount >= 2))
-                        return (md, sep);
+                    foreach (var item in ViewModel.ManagedWindows)
+                    {
+                        if (item.Window is MatrixPlotter p)
+                        {
+                            p.IsEnabled = true;
+                        }
+                    }
                 }
-                catch { }
             }
-            return null;
-        }
-
-        private async Task OpenClipboardCsvAsync(string text)
-        {
-            var result = await Task.Run(() => TryParseClipboardCsv(text));
-            if (result == null)
-            {
-                await ShowErrorAsync("Clipboard text could not be parsed as CSV (comma or tab separated).");
-                return;
-            }
-            var (md, sep) = result.Value;
-            var sepLabel = sep == "\t" ? "TSV" : "CSV";
-            var title = $"Clipboard  ({sepLabel}  {md.XCount}\u00d7{md.YCount})";
-            MatrixPlotter.Create(md, title: title).Show();
-        }
-
-        /// <summary>Shows a dialog asking whether to load the clipboard image as Grayscale or Color Channels.</summary>
-        /// <returns><c>true</c> = Grayscale, <c>false</c> = Color Channels, <c>null</c> = cancelled.</returns>
-        private async Task<bool?> ShowClipboardLoadModeAsync(int w, int h)
-        {
-            bool? result = null;
-
-            var grayBtn = new Button
-            {
-                Content = "Grayscale",
-                Width = 126,
-                HorizontalContentAlignment = HorizontalAlignment.Center
-            };
-            var colorBtn = new Button
-            {
-                Content = "Color Channels",
-                Width = 126,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0)
-            };
-            var cancelBtn = new Button
-            {
-                Content = "Cancel",
-                Width = 72,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Margin = new Thickness(0, 14, 0, 0)
-            };
-
-            var dlg = new Window
-            {
-                Title = "Open from Clipboard",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                FontSize = 11,
-            };
-
-            var stack = new StackPanel { Margin = new Thickness(20) };
-            stack.Children.Add(new TextBlock
-            {
-                Text = $"Image: {w} \u00d7 {h}",
-                Opacity = 0.6,
-                Margin = new Thickness(0, 0, 0, 6),
-            });
-            stack.Children.Add(new TextBlock
-            {
-                Text = "Load as:",
-                FontWeight = FontWeight.SemiBold,
-                Margin = new Thickness(0, 0, 0, 10),
-            });
-            var btnRow = new StackPanel { Orientation = Orientation.Horizontal };
-            btnRow.Children.Add(grayBtn);
-            btnRow.Children.Add(colorBtn);
-            stack.Children.Add(btnRow);
-            stack.Children.Add(cancelBtn);
-            dlg.Content = stack;
-
-            grayBtn.Click += (_, _) => { result = true; dlg.Close(); };
-            colorBtn.Click += (_, _) => { result = false; dlg.Close(); };
-            cancelBtn.Click += (_, _) => dlg.Close();
-
-            await WithTopmostSuspended(() => dlg.ShowDialog<object?>(this));
-            return result;
-        }
-
-        private static MatrixData<byte> ClipboardPixelsToMatrixData(
-            byte[] raw, int stride, int w, int h, bool grayscale)
-        {
-            if (grayscale)
-            {
-                var gray = new byte[w * h];
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++)
-                    {
-                        int i = y * stride + x * 4;
-                        gray[(h - 1 - y) * w + x] = (byte)(0.2126 * raw[i] + 0.7152 * raw[i + 1] + 0.0722 * raw[i + 2]);
-                    }
-                return new MatrixData<byte>(w, h, new List<byte[]> { gray });
-            }
-            else
-            {
-                var r = new byte[w * h];
-                var g = new byte[w * h];
-                var b = new byte[w * h];
-                for (int y = 0; y < h; y++)
-                    for (int x = 0; x < w; x++)
-                    {
-                        int i = y * stride + x * 4;
-                        int idx = (h - 1 - y) * w + x;
-                        r[idx] = raw[i];
-                        g[idx] = raw[i + 1];
-                        b[idx] = raw[i + 2];
-                    }
-                var cc = new ColorChannel(["R", "G", "B"]);
-                // Pure primaries are required: additive composite R*(1,0,0) + G*(0,1,0) + B*(0,0,1) = (R,G,B).
-                // Any desaturation introduces cross-channel bleeding and breaks composite reconstruction.
-                cc.AssignColors([
-                    unchecked((int)0xFFFF0000),   // R → pure red
-                    unchecked((int)0xFF00FF00),   // G → pure green
-                    unchecked((int)0xFF0000FF),   // B → pure blue
-                ]);
-                var md = new MatrixData<byte>(w, h, new List<byte[]> { r, g, b });
-                md.DefineDimensions(cc);
-                return md;
-            }
-        }
-
-        private sealed class MxPlotContextImpl : IMxPlotContext
-        {
-            private readonly MxPlotAppWindow _window;
-            private readonly MxPlotAppViewModel _vm;
-            private readonly ListBox _list;
-
-            internal MxPlotContextImpl(MxPlotAppWindow window, MxPlotAppViewModel vm, ListBox list)
-            { _window = window; _vm = vm; _list = list; }
-
-            public IReadOnlyList<IMatrixData> OpenDatasets
-                => _vm.ManagedWindows
-                       .OfType<MatrixPlotterListItemViewModel>()
-                       .Select(w => w.MatrixData)
-                       .OfType<IMatrixData>()
-                       .ToList();
-
-            public IReadOnlyList<IMatrixData> SelectedDatasets
-                => (_list.SelectedItems?
-                         .OfType<MatrixPlotterListItemViewModel>()
-                         .Select(w => w.MatrixData)
-                         .OfType<IMatrixData>()
-                         .ToList()
-                   ) ?? (IReadOnlyList<IMatrixData>)[];
-
-            public IMatrixData? PrimarySelection
-                => (_list.SelectedItem as MatrixPlotterListItemViewModel)?.MatrixData;
-
-            public TopLevel? Owner => _window;
-
-            public IPlotWindowService WindowService => MxPlotAppPluginRegistry.WindowService;
-
-            public Task OpenFileAsync(string path)
-                => _vm.LoadAndOpenFileAsync(path, _window);
         }
 
         // ── Export as PNG ────────────────────────────────────────────────
@@ -1364,69 +593,6 @@ namespace MxPlot.App.Views
             }
         }
 
-        private async System.Threading.Tasks.Task<bool> ShowExportOverwriteConfirmAsync(IList<string> fileNames)
-        {
-            const int MaxListed = 8;
-            var list = new StackPanel { Spacing = 2, Margin = new Thickness(0, 6, 0, 0) };
-            int shown = Math.Min(fileNames.Count, MaxListed);
-            for (int i = 0; i < shown; i++)
-                list.Children.Add(new TextBlock { Text = fileNames[i], FontSize = 11, Opacity = 0.85 });
-            if (fileNames.Count > MaxListed)
-                list.Children.Add(new TextBlock
-                {
-                    Text = $"\u2026 and {fileNames.Count - MaxListed} more",
-                    FontSize = 11,
-                    Opacity = 0.55,
-                    Margin = new Thickness(0, 2, 0, 0),
-                });
-
-            bool result = false;
-            var cancel = new Button
-            {
-                Content = "Cancel",
-                Width = 70,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-            };
-            var ok = new Button
-            {
-                Content = "OK",
-                Width = 70,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-            };
-            var btnRow = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Spacing = 8,
-                Margin = new Thickness(0, 14, 0, 0),
-            };
-            btnRow.Children.Add(cancel);
-            btnRow.Children.Add(ok);
-
-            var intro = fileNames.Count == 1
-                ? "The following file will be overwritten:"
-                : "The following files will be overwritten:";
-            var stack = new StackPanel { Margin = new Thickness(20) };
-            stack.Children.Add(new TextBlock { Text = intro, FontSize = 11 });
-            stack.Children.Add(list);
-            stack.Children.Add(btnRow);
-
-            var dlg = new Window
-            {
-                Title = "Confirm Overwrite",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                Content = stack,
-                FontSize = 11,
-                MinWidth = 260,
-            };
-            cancel.Click += (_, _) => dlg.Close();
-            ok.Click += (_, _) => { result = true; dlg.Close(); };
-            await WithTopmostSuspended(() => dlg.ShowDialog<object?>(this));
-            return result;
-        }
-
         private static string GetExportPngPath(string title, string dir, ISet<string> usedPaths)
         {
             var invalid = Path.GetInvalidFileNameChars();
@@ -1445,355 +611,6 @@ namespace MxPlot.App.Views
                 candidate = Path.Combine(dir, $"{baseName}_{i}.png");
                 if (usedPaths.Add(candidate)) return candidate;
             }
-        }
-
-        private async System.Threading.Tasks.Task ShowToastAsync(string message)
-        {
-            _toastCts?.Cancel();
-            _toastCts = new CancellationTokenSource();
-            var token = _toastCts.Token;
-
-            _toastText.Text = message;
-
-            // Fade in (180 ms)
-            for (int i = 1; i <= 12; i++)
-            {
-                if (token.IsCancellationRequested) return;
-                _toastPanel.Opacity = i / 12.0;
-                await Task.Delay(15, CancellationToken.None);
-            }
-
-            // Hold (2.8 s)
-            try { await Task.Delay(2800, token); }
-            catch (OperationCanceledException) { return; }
-
-            // Fade out (480 ms)
-            for (int i = 16; i >= 0; i--)
-            {
-                if (token.IsCancellationRequested) return;
-                _toastPanel.Opacity = i / 16.0;
-                await Task.Delay(30, CancellationToken.None);
-            }
-        }
-
-        // ── Window focus / sync helpers ───────────────────────────────────
-
-        private void OnManagedWindowFocused(Window window)
-        {
-            if (_isSyncActive) return;
-            var item = ViewModel.ManagedWindows.FirstOrDefault(m => m.Window == window);
-            if (item == null) return;
-
-            // If the focused window is already part of a multi-selection, keep the
-            // selection as-is (e.g. after Tile repositions and activates windows).
-            if (_windowList.SelectedItems?.Count > 1 &&
-                _windowList.SelectedItems.Contains(item))
-                return;
-
-            _windowList.SelectedItem = item;
-        }
-
-        private void SetSyncActive(bool active)
-        {
-            _isSyncActive = active;
-            if (active)
-            {
-                _syncBtn.Content = "Unsync";
-                _syncBtn.Classes.Add("sync-active");
-                _syncBtn.ClearValue(Button.BackgroundProperty);
-                _syncBtn.ClearValue(Button.ForegroundProperty);
-                Resources["WindowListSelectedBorder"] = new SolidColorBrush(Color.Parse("#E57373"));
-
-                // Deselect hidden items and non-MatrixPlotter items before building the sync snapshot.
-                DeselectHiddenItems();
-
-                // Save selection so it can be restored on click during Sync.
-                // Only visible MatrixPlotter windows participate in sync.
-                _syncSelectionSnapshot = _windowList.SelectedItems?
-                    .OfType<WindowListItemViewModel>()
-                    .Where(m => m.Window is MatrixPlotter && m.IsWindowVisible)
-                    .ToList();
-
-                // Deselect any remaining non-MatrixPlotter items.
-                var toDeselect = _windowList.SelectedItems?
-                    .OfType<WindowListItemViewModel>()
-                    .Where(m => m.Window is not MatrixPlotter)
-                    .ToList();
-                if (toDeselect is { Count: > 0 })
-                {
-                    _processingSelectionChange = true;
-                    try { foreach (var vm in toDeselect) _windowList.SelectedItems!.Remove(vm); }
-                    finally { _processingSelectionChange = false; }
-                }
-
-                var plotters = _syncSelectionSnapshot?
-                    .Select(m => m.Window as MatrixPlotter)
-                    .Where(p => p != null)
-                    .Cast<MatrixPlotter>()
-                    .ToList() ?? [];
-                _syncGroup = plotters.Count >= 2 ? new MatrixPlotterSyncGroup(plotters) : null;
-                if (_syncGroup != null)
-                    _syncGroup.DirtyChanged += OnSyncDirtyChanged;
-
-                // Highlight each sync-group plotter window with a colored border.
-                var syncBorderBrush = new SolidColorBrush(Color.Parse("#E57373"));
-                foreach (var plotter in plotters)
-                {
-                    plotter.SetSyncBorder(syncBorderBrush);
-                    _syncBorderedPlotters.Add(plotter);
-                }
-            }
-            else
-            {
-                _syncBtn.Content = "Sync";
-                _syncBtn.Classes.Remove("sync-active");
-                _syncBtn.ClearValue(Button.BackgroundProperty);
-                _syncBtn.ClearValue(Button.ForegroundProperty);
-                Resources.Remove("WindowListSelectedBorder");
-                if (_syncGroup != null)
-                    _syncGroup.DirtyChanged -= OnSyncDirtyChanged;
-                _syncGroup?.Dispose();
-                _syncGroup = null;
-                _syncSelectionSnapshot = null;
-
-                // Remove the colored border highlight from each sync-group plotter.
-                foreach (var plotter in _syncBorderedPlotters)
-                    plotter.SetSyncBorder(null);
-                _syncBorderedPlotters.Clear();
-
-                HideRevertButton();
-            }
-        }
-
-        // ── Window list context menu ──────────────────────────────────────
-
-        private void OnWindowListContextRequested(object? sender, ContextRequestedEventArgs e)
-        {
-            // Sync 中はメニューを表示しない
-            if (_isSyncActive) return;
-
-            // 右クリックされた ListBoxItem を特定し、未選択なら選択状態にする
-            var target = (e.Source as Control)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
-            if (target?.DataContext is not WindowListItemViewModel clicked) return;
-
-            if (!clicked.IsSelected)
-            {
-                _windowList.SelectedItem = clicked;
-            }
-
-            var selected = _windowList.SelectedItems?
-                .OfType<WindowListItemViewModel>()
-                .ToList() ?? [];
-            if (selected.Count == 0) return;
-
-            bool multi = selected.Count > 1;
-            bool anyVisible = selected.Any(m => m.IsWindowVisible);
-            bool anyHidden = selected.Any(m => !m.IsWindowVisible);
-
-            var menu = new ContextMenu();
-
-            // ── Rename (単一選択のみ) ─────────────────────────────────────
-            if (!multi)
-            {
-                var renameItem = new MenuItem { Header = "Rename" };
-                renameItem.Click += (_, _) => clicked.RenameCommand.Execute(null);
-                menu.Items.Add(renameItem);
-            }
-
-            // ── Hide / Show ───────────────────────────────────────────────
-            if (!multi)
-            {
-                // 単一選択: 現在の状態に応じてトグル
-                var toggleItem = new MenuItem { Header = clicked.IsWindowVisible ? "Hide" : "Show" };
-                toggleItem.Click += (_, _) => clicked.ToggleVisibility();
-                menu.Items.Add(toggleItem);
-            }
-            else if (anyVisible && !anyHidden)
-            {
-                // 全部 Show → Hide Selected
-                var hideItem = new MenuItem { Header = "Hide Selected" };
-                hideItem.Click += (_, _) =>
-                {
-                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
-                        vm.ToggleVisibility();
-                };
-                menu.Items.Add(hideItem);
-            }
-            else if (!anyVisible && anyHidden)
-            {
-                // 全部 Hide → Show Selected
-                var showItem = new MenuItem { Header = "Show Selected" };
-                showItem.Click += (_, _) =>
-                {
-                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
-                        vm.ToggleVisibility();
-                };
-                menu.Items.Add(showItem);
-            }
-            else
-            {
-                // 混在 → Hide Selected と Show Selected を両方
-                var hideItem = new MenuItem { Header = "Hide Selected" };
-                hideItem.Click += (_, _) =>
-                {
-                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
-                        vm.ToggleVisibility();
-                };
-                var showItem = new MenuItem { Header = "Show Selected" };
-                showItem.Click += (_, _) =>
-                {
-                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
-                        vm.ToggleVisibility();
-                };
-                menu.Items.Add(hideItem);
-                menu.Items.Add(showItem);
-            }
-
-            // ── Close ─────────────────────────────────────────────────────
-            menu.Items.Add(new Separator());
-            var closeItem = new MenuItem { Header = multi ? "Close Selected" : "Close" };
-            closeItem.Click += (_, _) =>
-            {
-                foreach (var vm in selected.ToList())
-                    vm.Window.Close();
-            };
-            menu.Items.Add(closeItem);
-
-            menu.Open(_windowList);
-            e.Handled = true;
-        }
-
-        /// <summary>
-        /// Removes hidden (non-visible) items from the ListBox selection and
-        /// refreshes <see cref="MxPlotAppViewModel.RefreshSelectionState"/>.
-        /// Should be called before Tile or Sync so that only visible windows participate.
-        /// </summary>
-        private void DeselectHiddenItems()
-        {
-            var toDeselect = _windowList.SelectedItems?
-                .OfType<WindowListItemViewModel>()
-                .Where(vm => !vm.IsWindowVisible)
-                .ToList();
-            if (toDeselect is not { Count: > 0 }) return;
-            _processingSelectionChange = true;
-            try
-            {
-                foreach (var vm in toDeselect)
-                {
-                    _windowList.SelectedItems!.Remove(vm);
-                    vm.IsSelected = false;
-                }
-                ViewModel.RefreshSelectionState();
-            }
-            finally { _processingSelectionChange = false; }
-        }
-
-        /// <summary>Restores the ListBox selection to the sync-group snapshot.</summary>
-        private void RestoreSyncSelection()
-        {
-            if (_syncSelectionSnapshot == null) return;
-            _processingSelectionChange = true;
-            try
-            {
-                _windowList.SelectedItems!.Clear();
-                foreach (var item in _syncSelectionSnapshot)
-                    _windowList.SelectedItems!.Add(item);
-            }
-            finally { _processingSelectionChange = false; }
-        }
-
-        // ── Revert button ─────────────────────────────────────────────────
-
-        private void OnSyncDirtyChanged(object? sender, bool isDirty)
-        {
-            if (isDirty) ShowRevertButton();
-            else HideRevertButton();
-        }
-
-        private void ShowRevertButton()
-        {
-            if (_revertBtn != null) return;
-
-            _revertBtn = new Button
-            {
-                Content = "\u21a9 Revert",
-                HorizontalAlignment = HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Background = new SolidColorBrush(Color.Parse("#E57373")),
-                Foreground = Brushes.White,
-                FontSize = _syncBtn.FontSize - 1,
-                Padding = new Thickness(4, 2),
-            };
-            _revertBtn.Click += (_, _) => _syncGroup?.Revert();
-
-            // Place via OverlayLayer so it floats above normal content,
-            // positioned just above the Sync button with a slide-down entrance.
-            var overlay = OverlayLayer.GetOverlayLayer(_syncBtn);
-            if (overlay == null) return;
-
-            overlay.Children.Add(_revertBtn);
-            PositionRevertButton(overlay);
-
-            // Re-position when layout changes (window resize, etc.)
-            EventHandler? layoutHandler = null;
-            layoutHandler = (_, _) =>
-            {
-                if (_revertBtn == null) { _syncBtn.LayoutUpdated -= layoutHandler; return; }
-                PositionRevertButton(overlay);
-            };
-            _syncBtn.LayoutUpdated += layoutHandler;
-            _revertBtn.Tag = layoutHandler; // stash for cleanup
-
-            // Slide-in animation: start offset above, animate to final position
-            _revertBtn.Opacity = 0;
-            _revertBtn.RenderTransform = new TranslateTransform(0, 10);
-            Dispatcher.UIThread.Post(async () =>
-            {
-                if (_revertBtn == null) return;
-                const int steps = 8;
-                for (int i = 1; i <= steps; i++)
-                {
-                    if (_revertBtn == null) return;
-                    double t = i / (double)steps;
-                    _revertBtn.Opacity = t;
-                    _revertBtn.RenderTransform = new TranslateTransform(0, 10 * (1 - t));
-                    await Task.Delay(20);
-                }
-                if (_revertBtn != null)
-                {
-                    _revertBtn.Opacity = 1;
-                    _revertBtn.RenderTransform = null;
-                }
-            }, DispatcherPriority.Background);
-        }
-
-        private void PositionRevertButton(OverlayLayer overlay)
-        {
-            if (_revertBtn == null) return;
-            var pt = _syncBtn.TranslatePoint(new Point(0, 0), overlay);
-            if (!pt.HasValue) return;
-            // Slightly narrower than the Sync button, centered horizontally
-            double btnW = _syncBtn.Bounds.Width;
-            double revW = Math.Max(btnW * 0.8, 60);
-            _revertBtn.Width = revW;
-            Canvas.SetLeft(_revertBtn, pt.Value.X + (btnW - revW) / 2);
-            double revH = _revertBtn.DesiredSize.Height > 0 ? _revertBtn.DesiredSize.Height : _syncBtn.Bounds.Height;
-            Canvas.SetTop(_revertBtn, pt.Value.Y - revH - 6);
-        }
-
-        private void HideRevertButton()
-        {
-            if (_revertBtn == null) return;
-            var btn = _revertBtn;
-            _revertBtn = null;
-
-            // Detach layout handler
-            if (btn.Tag is EventHandler handler)
-                _syncBtn.LayoutUpdated -= handler;
-
-            // Remove from overlay
-            var overlay = OverlayLayer.GetOverlayLayer(_syncBtn);
-            overlay?.Children.Remove(btn);
         }
 
         private void OnAnyAppWindowActivated(object? sender, EventArgs e)
@@ -1901,8 +718,16 @@ namespace MxPlot.App.Views
 
         private async void OnAnyAppWindowDeactivated(object? sender, EventArgs e)
         {
+            if (_topmostEnabled)
+                return;
+
+            if (!OperatingSystem.IsWindows())
+            {
+                Topmost = false;
+                return;
+            }
+
             await Task.Delay(80);
-            if (_topmostEnabled) return;
             if (!IsCurrentForegroundOurProcess())
                 Topmost = false;
         }

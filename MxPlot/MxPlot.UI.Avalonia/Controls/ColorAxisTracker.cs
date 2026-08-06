@@ -31,6 +31,7 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Dimensions (match AxisTracker) ────────────────────────────────────
         private const double LabelWidth = 50;
         private const double ButtonSize = 22;
+        private const double IndicatorWidth = 32;
         private const double ComponentHeight = 20;
         private const double ChipFontSize = 10;
 
@@ -54,7 +55,10 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly TextBlock _nameLabel;
         private readonly ToggleButton _modeToggle;
         private readonly Button _configButton;
-        private readonly StackPanel _chipPanel;
+        private readonly UniformGrid _chipPanel;
+
+        // ── State ─────────────────────────────────────────────────────────────
+        private bool[] _tagEnabled = [];
 
         // ── Public API ────────────────────────────────────────────────────────
 
@@ -76,6 +80,15 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <c>false</c> = single-channel mode.
         /// </summary>
         public event EventHandler<bool>? ModeChanged;
+
+        /// <summary>
+        /// Raised when a channel tag chip is toggled on or off.
+        /// The tuple carries the tag index and the new enabled state.
+        /// </summary>
+        public event EventHandler<(int Index, bool Enabled)>? TagToggled;
+
+        /// <summary>Returns the current enabled state of each tag chip (index-aligned with <see cref="ColorChannel.Tags"/>).</summary>
+        public IReadOnlyList<bool> TagEnabled => _tagEnabled;
 
         // ── Constructor ───────────────────────────────────────────────────────
 
@@ -134,10 +147,9 @@ namespace MxPlot.UI.Avalonia.Controls
             _configButton.Click += (_, _) => ConfigRequested?.Invoke(this, EventArgs.Empty);
 
             // ── Channel indicator (chip strip) ────────────────────────────────
-            _chipPanel = new StackPanel
+            _chipPanel = new UniformGrid
             {
-                Orientation = Orientation.Horizontal,
-                Spacing = 2,
+                Rows = 1,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(4, 0),
             };
@@ -149,10 +161,12 @@ namespace MxPlot.UI.Avalonia.Controls
 
             // ── Layout ────────────────────────────────────────────────────────
             var grid = new Grid { Margin = new Thickness(5, 0, 5, 0) };
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Name
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Mode toggle (FuncSlot)
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Config 🎨
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));   // Chip strip
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                    // Name
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                    // Mode toggle (FuncSlot)
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                    // Config 🎨
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));                    // Chip strip
+            grid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(IndicatorWidth)));     // spacer ≈ Indicator
+            grid.ColumnDefinitions.Add(new ColumnDefinition(new GridLength(ButtonSize)));         // spacer ≈ FreezeButton
 
             Grid.SetColumn(_nameLabel, 0);
             Grid.SetColumn(_modeToggle, 1);
@@ -173,6 +187,7 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>
         /// Rebuilds the tag chip strip from <see cref="ColorChannel.Tags"/>
         /// and <see cref="ColorChannel.AssignedColors"/>.
+        /// Existing toggle states are preserved across rebuilds where possible.
         /// </summary>
         private void RebuildChips()
         {
@@ -181,20 +196,34 @@ namespace MxPlot.UI.Avalonia.Controls
             IReadOnlyList<string> tags = _channel.Tags;
             bool hasColors = _channel.HasAssignedColors;
 
+            // Preserve existing toggle states; new tags default to enabled.
+            var prevEnabled = _tagEnabled;
+            _tagEnabled = new bool[tags.Count];
+            for (int i = 0; i < _tagEnabled.Length; i++)
+                _tagEnabled[i] = i < prevEnabled.Length ? prevEnabled[i] : true;
+
+            _chipPanel.Columns = tags.Count;
+
             for (int i = 0; i < tags.Count; i++)
             {
                 Color bg = hasColors
                     ? ArgbToColor(_channel.GetColor(i))
                     : DefaultPalette[i % DefaultPalette.Length];
 
-                var chip = new Border
+                bool enabled = _tagEnabled[i];
+                int capturedIndex = i;
+
+                var chip = new Button
                 {
-                    Background = new SolidColorBrush(bg),
-                    CornerRadius = new CornerRadius(3),
-                    Padding = new Thickness(6, 1),
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    HorizontalContentAlignment = HorizontalAlignment.Center,
+                    VerticalContentAlignment = VerticalAlignment.Center,
                     MinHeight = ComponentHeight,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Child = new TextBlock
+                    Padding = new Thickness(4, 1),
+                    Background = new SolidColorBrush(bg),
+                    BorderThickness = new Thickness(0),
+                    Opacity = enabled ? 1.0 : 0.35,
+                    Content = new TextBlock
                     {
                         Text = tags[i],
                         FontSize = ChipFontSize,
@@ -204,6 +233,13 @@ namespace MxPlot.UI.Avalonia.Controls
                     },
                 };
                 ToolTip.SetTip(chip, $"#{i}: {tags[i]}  (R={bg.R} G={bg.G} B={bg.B})");
+                chip.Click += (_, _) =>
+                {
+                    bool on = !_tagEnabled[capturedIndex];
+                    _tagEnabled[capturedIndex] = on;
+                    chip.Opacity = on ? 1.0 : 0.35;
+                    TagToggled?.Invoke(this, (capturedIndex, on));
+                };
                 _chipPanel.Children.Add(chip);
             }
         }

@@ -54,7 +54,7 @@ namespace MxPlot.Core.IO
             if (header.NAxis.Length < 2)
                 throw new NotSupportedException(
                     $"FITS file has {header.NAxis.Length} dimension(s); at least 2 (X, Y) are required.");
-            
+
             return header.BitPix switch
             {
                 8 => LoadCore<byte>(fs, header, progress, ct),
@@ -1094,5 +1094,5 @@ namespace MxPlot.Core.IO
             return sb.ToString();
         }
 
-            }
-        }
+    }
+}

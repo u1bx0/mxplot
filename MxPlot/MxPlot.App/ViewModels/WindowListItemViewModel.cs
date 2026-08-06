@@ -150,6 +150,14 @@ namespace MxPlot.App.ViewModels
                         window.WindowState = WindowState.Normal;
                         window.Hide();
                         IsWindowVisible = false;
+                        /*
+                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                        {
+                            window.WindowState = WindowState.Normal;
+                            window.Hide();
+                            IsWindowVisible = false;
+                        }, Avalonia.Threading.DispatcherPriority.Background);
+                        */
                     }
                 };
             window.PropertyChanged += onWindowStateChanged;

@@ -7,21 +7,21 @@ using System.Text.Json.Serialization;
 namespace MxPlot.Core
 {
     /// <summary>
-    /// 各タイルのワールド座標を表すための構造体
+    /// Structure representing the world coordinates of each tile.
     /// </summary>
-    /// <param name="X"></param>
-    /// <param name="Y"></param>
-    /// <param name="Z"></param>
+    /// <param name="X">X coordinate in world space.</param>
+    /// <param name="Y">Y coordinate in world space.</param>
+    /// <param name="Z">Z coordinate in world space.</param>
     public readonly record struct GlobalPoint(double X, double Y, double Z);
 
     /// <summary>
-    /// タイルの重なり検証結果
+    /// Result of tile overlap validation.
     /// </summary>
-    /// <param name="TileIndex">1次元インデックス</param>
-    /// <param name="TileX">グリッド列番号</param>
-    /// <param name="TileY">グリッド行番号</param>
-    /// <param name="OverlapX">右隣(X+1)との重なり画素数（右端の場合は null）</param>
-    /// <param name="OverlapY">下隣(Y+1)との重なり画素数（下端の場合は null）</param>
+    /// <param name="TileIndex">One-dimensional tile index.</param>
+    /// <param name="TileX">Grid column number (X coordinate).</param>
+    /// <param name="TileY">Grid row number (Y coordinate).</param>
+    /// <param name="OverlapX">Pixel overlap with the right neighbor (X+1); null if at the right edge.</param>
+    /// <param name="OverlapY">Pixel overlap with the bottom neighbor (Y+1); null if at the bottom edge.</param>
     public record TileOverlapResult(
         int TileIndex,
         int TileX,
@@ -31,7 +31,8 @@ namespace MxPlot.Core
     );
 
     /// <summary>
-    /// FOVの軸、各FOVでの原点座標（ワールド座標=ステージ位置など）を保持するAxisの継承クラス。Indexに対してGlobalPointをマッピングする
+    /// FOV axis class that inherits from <see cref="Axis"/> and maintains the origin coordinates 
+    /// (world coordinates such as stage position) for each FOV. Maps <see cref="Axis.Index"/> to <see cref="GlobalPoint"/>.
     /// </summary>
     /// <remarks>
     /// <b>⚠️ 3D Tiling Limitation:</b><br/>
@@ -44,30 +45,29 @@ namespace MxPlot.Core
     /// </remarks>
     public class FovAxis : Axis
     {
-        // Jsonシリアライズなどでデータが消えないようにプロパティ化推奨
-        // (private fieldのままだと保存されない場合があるため)
-        [System.Text.Json.Serialization.JsonInclude] // 必要に応じて属性をつける
+        // Recommended to use as property to prevent data loss during JSON serialization.
+        // (Private fields may not be serialized in some cases)
+        [System.Text.Json.Serialization.JsonInclude]
         private GlobalPoint[] _origins;
 
 
         private int _zIndex = 0;
 
         /// <summary>
-        /// 読み取り専用として配列全体へのアクセスを提供（シリアライザ対策兼任）
-        /// これを使わなくても、FovAxis[ix, iy, iz]でアクセスできる
+        /// Provides read-only access to the entire origins array (also serves for serialization compatibility).
+        /// Individual elements can also be accessed via indexers: <c>FovAxis[ix, iy, iz]</c>.
         /// </summary>
         public GlobalPoint[] Origins => _origins;
 
         /// <summary> 
-        /// FOVを格子状に配置したときのタイルのレイアウト情報 (X方向の数, Y方向の数, Z方向の数)
-        /// ただし、実際の表示位置はOriginプロパティで決定される
+        /// Tile layout information when FOVs are arranged in a grid (X count, Y count, Z count).
+        /// Note: The actual display position is determined by the <see cref="Origins"/> property.
         /// </summary>
         public (int X, int Y, int Z) TileLayout { get; }
 
         
         /// <summary>
-        /// z軸方向にもタイルが存在する場合に、アクティブなZインデックスを指定する
-        /// 
+        /// Specifies the active Z index when tiles exist in the Z-axis direction.
         /// </summary>
         public int ZIndex
         {
@@ -84,10 +84,10 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// Orignに直接アクセスするインデクサ
+        /// Indexer for direct access to Origins.
         /// </summary>
-        /// <param name="index"></param>
-        /// <returns></returns>
+        /// <param name="index">One-dimensional tile index.</param>
+        /// <returns>The <see cref="GlobalPoint"/> at the specified index.</returns>
         public GlobalPoint this[int index]
         {
             get => _origins[index];
@@ -96,20 +96,18 @@ namespace MxPlot.Core
                 if (_origins[index] == value)
                     return;
 
-                // 1. 値を更新
+                // 1. Update the value
                 _origins[index] = value;
 
                 OriginChanged?.Invoke(this, index);
             }
         }
         /// <summary>
-        /// 2次元インデクサ: zはZIndexに固定
+        /// Two-dimensional indexer: Z coordinate is fixed to <see cref="ZIndex"/>.
         /// </summary>
-        /// <param name="x"></param>
-        /// <param name="y"></param>
-        /// <returns></returns>
-        /// <exception cref="InvalidOperationException"></exception>
-        // 
+        /// <param name="x">X tile coordinate.</param>
+        /// <param name="y">Y tile coordinate.</param>
+        /// <returns>The <see cref="GlobalPoint"/> at the specified (x, y, ZIndex) position.</returns>
         public GlobalPoint this[int x, int y]
         {
             get
@@ -118,42 +116,52 @@ namespace MxPlot.Core
             }
             set
             {
-                this[GetIndex(x, y, ZIndex)] = value; // 1次元インデクサへ委譲
+                this[GetIndex(x, y, ZIndex)] = value; // Delegate to one-dimensional indexer
             }
         }
 
-        // 3次元インデクサ
+        /// <summary>
+        /// Three-dimensional indexer for explicit Z coordinate access.
+        /// </summary>
+        /// <param name="x">X tile coordinate.</param>
+        /// <param name="y">Y tile coordinate.</param>
+        /// <param name="z">Z tile coordinate.</param>
+        /// <returns>The <see cref="GlobalPoint"/> at the specified (x, y, z) position.</returns>
         public GlobalPoint this[int x, int y, int z]
         {
             get => _origins[GetIndex(x, y, z)];
-            set => this[GetIndex(x, y, z)] = value; // 1次元インデクサへ委譲
+            set => this[GetIndex(x, y, z)] = value; // Delegate to one-dimensional indexer
         }
 
         /// <summary>
-        /// 各タイルのGlobal座標（Origin）が変化したときに発生するイベント
+        /// Event raised when the global coordinate (Origin) of any tile changes.
+        /// The event argument contains the one-dimensional tile index that changed.
         /// </summary>
         public event EventHandler<int>? OriginChanged;
 
         /// <summary>
-        /// 3次元格子で、XYタイル表示をしている場合のZインデックスが変化したときに発生するイベント
+        /// Event raised when the Z index changes for XY tile display in a 3D grid.
+        /// The event argument contains the new Z index value.
         /// </summary>
         public event EventHandler<int>? ZIndexChanged;
 
         /// <summary>
-        /// gXNum * gYNumのタイルの左下座標を設定する
-        /// 1枚のタイルのスケールサイズをw * hとしたとき、pixelOverlapが1の場合にタイル全体のサイズはgw = w * gXNum, gh = h * gYNumとなる
-        /// (Gemini3 Proで生成、修正)
+        /// Creates the bottom-left (origin) coordinates for a grid of gXNum × gYNum tiles,
+        /// extended from a base tile.
+        /// When a single tile has scale size w × h and pixelOverlap=1, the entire grid size becomes
+        /// gw = w × gXNum, gh = h × gYNum.
+        /// (Generated and modified with Gemini 3 Pro)
         /// </summary>
-        /// <param name="tileScale">要素タイルの相対座標</param>
-        /// <param name="XNum"></param>
-        /// <param name="yNum"></param>
-        /// <param name="pixelOverlap"> = 1とすると、エッジが重なる</param>
-        /// <param name="baseTileIndex">基準とするタイルのindex　このindexからタイル空間（座標）を広げる</param>
-        /// <returns></returns>
+        /// <param name="tileScale">The relative coordinate scale of each individual tile.</param>
+        /// <param name="gXNum">Number of tiles in the X direction.</param>
+        /// <param name="gYNum">Number of tiles in the Y direction.</param>
+        /// <param name="pixelOverlap">Number of overlapping pixels between tiles (1 = edges overlap).</param>
+        /// <param name="baseTileIndex">Index of the reference tile from which the tile space (coordinates) extends.</param>
+        /// <returns>A tuple containing the origins array, tile width, and tile height.</returns>
         public static (GlobalPoint[] origins, double tileWidth, double tileHeight)
             Create2DTileOriginsExtendedFrom(Scale2D tileScale, int gXNum, int gYNum, int pixelOverlap = 1, int baseTileIndex = 0) 
         {
-            // 1枚のタイルの情報
+            // Information for a single tile
             int xnum = tileScale.XCount;
             int ynum = tileScale.YCount;
             double xmin = tileScale.XMin;
@@ -161,19 +169,19 @@ namespace MxPlot.Core
             double ymin = tileScale.YMin;
             double ymax = tileScale.YMax;
 
-            // 1. 画素ピッチ（Pixel Pitch）の計算
-            // 「XNum - 1」をベースにするため、両端の画素中心間の距離を (個数 - 1) で割る
-            // ※ xnum > 1 である前提ですが、念のため1の場合は0にするガードを入れています
+            // 1. Calculate pixel pitch
+            // Based on "XNum - 1", dividing the distance between edge pixel centers by (count - 1)
+            // Guard: if xnum = 1, set to 0
             double pixelPitchX = (xnum > 1) ? (xmax - xmin) / (xnum - 1) : 0;
             double pixelPitchY = (ynum > 1) ? (ymax - ymin) / (ynum - 1) : 0;
 
-            // 2. タイル間の移動量（Stride）の計算
-            // (総画素数 - 重なり画素数) × ピクセルピッチ
-            // 例: 3画素で1画素重なるなら、実質2画素分移動する
+            // 2. Calculate stride (movement between tiles)
+            // (total pixels - overlap pixels) × pixel pitch
+            // Example: 3 pixels with 1 pixel overlap = effectively 2 pixels of movement
             double strideX = pixelPitchX * (xnum - pixelOverlap);
             double strideY = pixelPitchY * (ynum - pixelOverlap);
 
-            // 3. 基準タイルのグリッド位置を特定
+            // 3. Identify the grid position of the base tile
             int baseGx = baseTileIndex % gXNum;
             int baseGy = baseTileIndex / gXNum;
             
@@ -183,16 +191,16 @@ namespace MxPlot.Core
             {
                 for (int igx = 0; igx < gXNum; igx++)
                 {
-                    // 現在の配列インデックス
+                    // Current array index
                     int index = igy * gXNum + igx;
 
-                    // 基準タイルからの相対グリッド距離
+                    // Relative grid distance from the base tile
                     int diffX = igx - baseGx;
                     int diffY = igy - baseGy;
 
-                    // 座標計算
-                    // 基準座標(xmin, ymin) を起点に、ストライド分だけ移動させる
-                    // diffがマイナス（基準より左/下）の場合も正しく計算されます
+                    // Calculate coordinates
+                    // Starting from base coordinates (xmin, ymin), move by stride amount
+                    // Works correctly even when diff is negative (left/below the base)
                     double currentOriginX = xmin + (diffX * strideX);
                     double currentOriginY = ymin + (diffY * strideY);
 
@@ -203,49 +211,52 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// 定義された全体領域(totalScale)を指定した枚数で分割した際の、各タイルの原点(Origin)リストを生成する
-        /// totalScale.XNum .YNumを一つのタイルのピクセル数として、totalScale.Width .Heightを全体サイズとする⇒ピッチが変わる
-        /// (Gemini3 Proで生成、修正)
+        /// Generates the origin list for each tile when subdividing a defined total region (totalScale) 
+        /// into a specified number of tiles.
+        /// Interprets totalScale.XNum/YNum as the pixel count per individual tile, and totalScale.Width/Height 
+        /// as the total size → pixel pitch is adjusted accordingly.
+        /// (Generated and modified with Gemini 3 Pro)
         /// </summary>
         /// <remarks>
-        /// <paramref name="totalScale"/> の解釈について：
-        /// - Min/Max : 全体の物理的な開始・終了座標
-        /// - Num     : 【重要】1タイルあたりの画素数 (全体画素数ではありません)
+        /// Interpretation of <paramref name="totalScale"/>:
+        /// - Min/Max: Physical start and end coordinates of the entire region
+        /// - Num: <b>[IMPORTANT]</b> Pixel count per individual tile (NOT the total pixel count)
         /// 
-        /// 上記定義に基づき、全体幅にぴったり収まるように画素ピッチ(Pitch)が自動調整されます。
+        /// Based on this definition, the pixel pitch is automatically adjusted to fit exactly within the total width.
         /// </remarks>
-        /// <param name="totalScale">分割対象となる全体領域のスケール定義（ただしXNum, YNumは各タイルのピクセル数であることに注意</param>
-        /// <param name="gXNum">X方向の分割枚数</param>
-        /// <param name="gYNum">Y方向の分割枚数</param>
-        /// <param name="pixelOverlap">タイル間ののりしろ画素数</param>
-        /// <returns>各タイルの左下座標(GlobalPoint)の配列</returns>
+        /// <param name="totalScale">Scale definition of the total region to subdivide. 
+        /// Note that XCount and YCount represent the pixel count per tile.</param>
+        /// <param name="gXNum">Number of subdivisions in the X direction.</param>
+        /// <param name="gYNum">Number of subdivisions in the Y direction.</param>
+        /// <param name="pixelOverlap">Number of overlapping pixels between tiles.</param>
+        /// <returns>A tuple containing the origins array (bottom-left coordinates as GlobalPoint), tile width, and tile height.</returns>
         public static (GlobalPoint[] origins, double tileWidth, double titleHeight) 
             Create2DTileOriginsSubdividedFrom(Scale2D totalScale, int gXNum, int gYNum, int pixelOverlap = 1)
         {
             // ---------------------------
-            // X軸の計算
+            // X-axis calculation
             // ---------------------------
-            // ★ ここで decimal にキャストして計算を開始します
+            // ★ Cast to decimal here to start the calculation
             decimal totalWidth = (decimal)totalScale.XRange;
             decimal xMin = (decimal)totalScale.XMin;
             int tileXNum = totalScale.XCount;
 
-            // 分母の計算 (int同士の計算なのでここはまだintでも平気ですが、念のためdecimalで統一)
+            // Calculate denominator (using decimal for consistency, though int would work here)
             decimal totalIntervalsX = (decimal)(gXNum - 1) * (tileXNum - pixelOverlap) + (tileXNum - 1);
 
-            // ガード処理
+            // Guard against division by zero
             if (totalIntervalsX <= 0)
-                totalIntervalsX = (tileXNum > 1) ? (tileXNum - 1) : 1; // 0除算回避の安全策（文脈に合わせて調整してください）
+                totalIntervalsX = (tileXNum > 1) ? (tileXNum - 1) : 1; // Safeguard (adjust to context as needed)
 
-            // ★ ここが最重要：Pitchを decimal で計算（有効桁数が28-29桁になり、誤差が激減します）
+            // ★ CRITICAL: Calculate pitch using decimal (28-29 significant digits, greatly reducing error)
             decimal pitchX = totalWidth / totalIntervalsX;
 
-            // StrideとTileWidthの計算
+            // Calculate stride and tile width
             decimal strideX = pitchX * (tileXNum - pixelOverlap);
             decimal tileWidthDec = pitchX * (tileXNum - 1);
 
             // ---------------------------
-            // Y軸の計算 (同様に decimal 化)
+            // Y-axis calculation (similarly using decimal)
             // ---------------------------
             decimal totalHeight = (decimal)(totalScale.YMax - totalScale.YMin);
             decimal yMin = (decimal)totalScale.YMin;
@@ -253,7 +264,7 @@ namespace MxPlot.Core
 
             decimal totalIntervalsY = (decimal)(gYNum - 1) * (tileYNum - pixelOverlap) + (tileYNum - 1);
 
-            // ガード処理
+            // Guard against division by zero
             if (totalIntervalsY <= 0)
                 totalIntervalsY = (tileYNum > 1) ? (tileYNum - 1) : 1;
 
@@ -262,7 +273,7 @@ namespace MxPlot.Core
             decimal tileHeightDec = pitchY * (tileYNum - 1);
 
             // ---------------------------
-            // Origin配列の生成
+            // Generate Origins array
             // ---------------------------
             var origins = new GlobalPoint[gXNum * gYNum];
 
@@ -272,32 +283,39 @@ namespace MxPlot.Core
                 {
                     int index = igy * gXNum + igx;
 
-                    // ★ decimal で座標を確定させてから double にキャストして格納
+                    // ★ Calculate coordinates in decimal, then cast to double for storage
                     decimal currentOriginX = xMin + (igx * strideX);
                     decimal currentOriginY = yMin + (igy * strideY);
 
-                    // GlobalPointのコンストラクタが double を受け取ると仮定
+                    // GlobalPoint constructor accepts double
                     origins[index] = new GlobalPoint((double)currentOriginX, (double)currentOriginY, 0);
                 }
             }
 
-            // 戻り値も double に戻す
+            // Return values are also cast back to double
             return (origins, (double)tileWidthDec, (double)tileHeightDec);
         }
 
         /// <summary>
-        /// tileScaleに対して、FovAxisの各タイルのOring座標からpixelOverlapがどうなっているかを検証する
-        /// つまり、tileScaleのピッチに基づいて、各タイルのエッジが正しく重なっているかを調べる
-        /// この場合、タイルの左下座標(origin)を基準に、右端と上端の座標を計算し、隣接タイルの左下座標と比較する
-        /// -- という仕様でGemeni 3 Proがロジックを生成
-        /// //1. 全て正常かチェック（誤差 0.001 未満ならOKとする）する例
-        /// bool isAllValid = overlaps.All(r =>
-        /// (r.OverlapX == null || Math.Abs(r.OverlapX.Value - Math.Round(r.OverlapX.Value)) < 0.001m) &&
-        ///(r.OverlapY == null || Math.Abs(r.OverlapY.Value - Math.Round(r.OverlapY.Value)) < 0.001m)
-        ///);
+        /// Validates the pixel overlap for each tile in FovAxis based on their Origin coordinates
+        /// relative to the given tileScale.
+        /// Checks whether tile edges properly overlap based on tileScale's pitch by calculating
+        /// the right and top edge coordinates from each tile's bottom-left origin and comparing
+        /// with adjacent tiles' bottom-left origins.
+        /// Logic generated by Gemini 3 Pro based on this specification.
         /// </summary>
-        /// <param name="fovAxis"></param>
-        /// <param name="tileScale"></param>
+        /// <remarks>
+        /// Example usage to check if all overlaps are valid (tolerance &lt; 0.001):
+        /// <code>
+        /// bool isAllValid = overlaps.All(r =>
+        ///     (r.OverlapX == null || Math.Abs(r.OverlapX.Value - Math.Round(r.OverlapX.Value)) &lt; 0.001m) &amp;&amp;
+        ///     (r.OverlapY == null || Math.Abs(r.OverlapY.Value - Math.Round(r.OverlapY.Value)) &lt; 0.001m)
+        /// );
+        /// </code>
+        /// </remarks>
+        /// <param name="fovAxis">The FOV axis to validate.</param>
+        /// <param name="tileScale">The scale definition for individual tiles.</param>
+        /// <returns>A list of <see cref="TileOverlapResult"/> containing overlap validation results for each tile.</returns>
         public static List<TileOverlapResult> ValidatePixelOverlapFor(FovAxis fovAxis, Scale2D tileScale)
         {
             int xnum = tileScale.XCount;
@@ -306,7 +324,7 @@ namespace MxPlot.Core
             int gxnum = fovAxis.TileLayout.X;
             int gynum = fovAxis.TileLayout.Y;
 
-            // 高精度計算用
+            // For high-precision calculation
             decimal xpitch = Convert.ToDecimal(tileScale.XStep);
             decimal ypitch = Convert.ToDecimal(tileScale.YStep);
 
@@ -326,7 +344,7 @@ namespace MxPlot.Core
                     decimal? overlapY = null;
 
                     // -------------------------------------------------
-                    // 1. X方向 (右隣) の検証
+                    // 1. Validation in X direction (right neighbor)
                     // -------------------------------------------------
                     if (ix < gxnum - 1)
                     {
@@ -341,7 +359,7 @@ namespace MxPlot.Core
                             decimal shiftPixels = dist / xpitch;
                             overlapX = xnum - shiftPixels;
 
-                            // 整数判定（誤差 0.001 未満ならOK）
+                            // Integer validation (tolerance < 0.001 is OK)
                             bool isInteger = Math.Abs(overlapX.Value - Math.Round(overlapX.Value)) < 0.001m;
                             string status = isInteger ? "OK" : "WARNING (Sub-pixel)";
 
@@ -350,7 +368,7 @@ namespace MxPlot.Core
                     }
 
                     // -------------------------------------------------
-                    // 2. Y方向 (下隣) の検証
+                    // 2. Validation in Y direction (bottom neighbor)
                     // -------------------------------------------------
                     if (iy < gynum - 1)
                     {
@@ -380,16 +398,16 @@ namespace MxPlot.Core
             return results;
 
             /**
-             *使い方の例）
+             * Example usage:
              *
-              var overlaps = ValidatePixelOverlapFor(myAxis, myScale);
-                // 1. 全て正常かチェック（誤差 0.001 未満ならOKとする）
+               var overlaps = ValidatePixelOverlapFor(myAxis, myScale);
+                // 1. Check if all are valid (tolerance < 0.001 is OK)
                 bool isAllValid = overlaps.All(r => 
                     (r.OverlapX == null || Math.Abs(r.OverlapX.Value - Math.Round(r.OverlapX.Value)) < 0.001m) &&
                     (r.OverlapY == null || Math.Abs(r.OverlapY.Value - Math.Round(r.OverlapY.Value)) < 0.001m)
                 );
 
-                // 2. 意図したOverlap数（例えば10px）と違う箇所を探す
+                // 2. Find tiles where overlap differs from the intended value (e.g., 10px)
                 var badTiles = overlaps.Where(r => r.OverlapX.HasValue && Math.Round(r.OverlapX.Value) != 10).ToList();
 
                 foreach(var bad in badTiles)
@@ -404,6 +422,8 @@ namespace MxPlot.Core
              /// JSON deserialization constructor. Only <c>origins</c> and <c>tileLayout</c> are required —
              /// <c>Count</c>, <c>Min</c>, <c>Max</c> are derived, and <c>Name</c>/<c>Unit</c> are restored via setters.
              /// </summary>
+             /// <param name="origins">Array of tile origin coordinates.</param>
+             /// <param name="tileLayout">Tile layout (X, Y, Z counts).</param>
              [JsonConstructor]
              private FovAxis(GlobalPoint[] origins, (int X, int Y, int Z) tileLayout)
                  : base(origins?.Length ?? 0, 0, (origins?.Length ?? 1) - 1, "FOV", "", isIndexBased: true)
@@ -413,15 +433,19 @@ namespace MxPlot.Core
              }
 
              /// <summary>
-             /// FOVの要素数で初期化、Originはすべて(0,0,0)⇒後で設定する必要がある
+             /// Initializes FovAxis with the specified tile counts. 
+             /// All origins are set to (0,0,0) and must be configured later.
              /// </summary>
-             /// <param name="num"></param>
-        public FovAxis(int xNum, int yNum, int zNum = 1)
+             /// <param name="xNum">Number of tiles in the X direction.</param>
+             /// <param name="yNum">Number of tiles in the Y direction.</param>
+             /// <param name="zNum">Number of tiles in the Z direction (default: 1).</param>
+             /// <exception cref="NotSupportedException">Thrown when zNum &gt; 1 (3D tiling not yet supported).</exception>
+             public FovAxis(int xNum, int yNum, int zNum = 1)
             : base(xNum * yNum * zNum, 0, xNum * yNum * zNum - 1, "FOV", "", true)
         {
             if (zNum > 1)
             {
-                // 3D tilingは将来の拡張機能として予約
+                // 3D tiling is reserved as a future enhancement
                 throw new NotSupportedException(
                     "3D tiling (zNum > 1) is not currently supported. " +
                     "Index and ZIndex synchronization is not implemented.");
@@ -431,18 +455,20 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// FOVの原点リスト（のコピー）で初期化
+        /// Initializes FovAxis with a copy of the provided origin list.
         /// </summary>
-        /// <param name="origins"></param>
-        /// <param name="xNum"></param>
-        /// <param name="yNum"></param>
-        /// <param name="zNum"></param>
+        /// <param name="origins">List of origin coordinates for each tile.</param>
+        /// <param name="xNum">Number of tiles in the X direction.</param>
+        /// <param name="yNum">Number of tiles in the Y direction.</param>
+        /// <param name="zNum">Number of tiles in the Z direction (default: 1).</param>
+        /// <exception cref="NotSupportedException">Thrown when zNum &gt; 1 (3D tiling not yet supported).</exception>
+        /// <exception cref="ArgumentException">Thrown when the tile layout size does not match the origins count.</exception>
         public FovAxis(List<GlobalPoint> origins, int xNum, int yNum, int zNum = 1)
             : base(origins.Count, 0, origins.Count - 1, "FOV", "", true)
         {
             if (zNum > 1)
             {
-                // 3D tilingは将来の拡張機能として予約
+                // 3D tiling is reserved as a future enhancement
                 throw new NotSupportedException(
                     "3D tiling (zNum > 1) is not currently supported. " +
                     "Index and ZIndex synchronization is not implemented.");
@@ -455,24 +481,35 @@ namespace MxPlot.Core
         }
 
 
-        // インデックス計算ロジック
+        /// <summary>
+        /// Converts 3D tile coordinates (x, y, z) to a one-dimensional array index.
+        /// </summary>
+        /// <param name="xIndex">X tile coordinate.</param>
+        /// <param name="yIndex">Y tile coordinate.</param>
+        /// <param name="zIndex">Z tile coordinate (default: 0).</param>
+        /// <returns>The one-dimensional array index.</returns>
+        /// <exception cref="ArgumentOutOfRangeException">Thrown when any index is out of range.</exception>
         public int GetIndex(int xIndex, int yIndex, int zIndex=0)
         {
-            // デバッグ時のために有効化を推奨
+            // Recommended to enable for debugging
             if (xIndex < 0 || xIndex >= TileLayout.X) throw new ArgumentOutOfRangeException(nameof(xIndex), $"X index {xIndex} is out of range (0-{TileLayout.X - 1})");
             if (yIndex < 0 || yIndex >= TileLayout.Y) throw new ArgumentOutOfRangeException(nameof(yIndex), $"Y index {yIndex} is out of range (0-{TileLayout.Y - 1})");
             if (zIndex < 0 || zIndex >= TileLayout.Z) throw new ArgumentOutOfRangeException(nameof(zIndex), $"Z index {zIndex} is out of range (0-{TileLayout.Z - 1})");
 
-            // 面（スライス）のサイズ = X方向の数 * Y方向の数
+            // Plane (slice) size = X count × Y count
             int planeSize = TileLayout.X * TileLayout.Y;
 
-            // 行のサイズ = X方向の数
+            // Row size = X count
             int rowSize = TileLayout.X;
 
-            // 計算式: (Zオフセット) + (Yオフセット) + X
+            // Formula: (Z offset) + (Y offset) + X
             return (zIndex * planeSize) + (yIndex * rowSize) + xIndex;
         }
 
+        /// <summary>
+        /// Creates a deep copy of this <see cref="FovAxis"/> instance.
+        /// </summary>
+        /// <returns>A new <see cref="FovAxis"/> instance with the same origin values and tile layout.</returns>
         public override FovAxis Clone()
         {
             var fov = new FovAxis(new List<GlobalPoint>(this._origins), this.TileLayout.X, this.TileLayout.Y, this.TileLayout.Z);

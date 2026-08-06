@@ -1,7 +1,7 @@
 ﻿# MatrixPlotter — Basic Usage Guide
 
 **Created**: 2026-04-22  
-**Updated**: 2026-05-29
+**Updated**: 2026-07-16
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 ---

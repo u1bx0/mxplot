@@ -9,6 +9,24 @@ using System.Threading.Tasks;
 namespace MxPlot.UI.Avalonia.Controls
 {
     /// <summary>
+    /// Controls how the depth axis (Z/Time/Channel/…) is scaled relative to the XY plane
+    /// in the orthogonal side views.
+    /// </summary>
+    public enum OrthoScaleMode
+    {
+        /// <summary>
+        /// Physical aspect: 1 physical unit on any axis occupies the same screen distance.
+        /// Side-view zoom is compensated by the step-size ratio (default).
+        /// </summary>
+        Physical,
+        /// <summary>
+        /// Custom: the depth-axis pixel size is specified explicitly via
+        /// <see cref="OrthogonalViewController.CustomDepthScale"/>.
+        /// </summary>
+        Custom,
+    }
+
+    /// <summary>
     /// Manages the orthogonal slice views inside an <see cref="OrthogonalPanel"/>.
     /// Call <see cref="Activate"/> to enable the crosshair and slice views for a given axis,
     /// and <see cref="Deactivate"/> to hide them.
@@ -21,6 +39,90 @@ namespace MxPlot.UI.Avalonia.Controls
     {
         private readonly OrthogonalPanel _panel;
 
+        /// <summary>
+        /// Controls how the depth axis is scaled in the side views relative to the XY plane.
+        /// Changing this triggers a re-sync from the main view.
+        /// </summary>
+        public OrthoScaleMode ScaleMode
+        {
+            get => _orthoScaleMode;
+            set
+            {
+                if (_orthoScaleMode == value) return;
+                _orthoScaleMode = value;
+                if (_data != null) SyncZoomFromMainView();
+            }
+        }
+        private OrthoScaleMode _orthoScaleMode = OrthoScaleMode.Physical;
+
+        /// <summary>
+        /// When <see cref="ScaleMode"/> is <see cref="OrthoScaleMode.Custom"/>, specifies the
+        /// physical size of one orthogonal-axis pixel (same unit as XStep/YStep).
+        /// Setting this triggers a re-sync when Custom mode is active.
+        /// </summary>
+        public double CustomAxisStep
+        {
+            get => _orthoCustomAxisStep;
+            set
+            {
+                if (_orthoCustomAxisStep == value) return;
+                _orthoCustomAxisStep = value;
+                if (_orthoScaleMode == OrthoScaleMode.Custom && _data != null) SyncZoomFromMainView();
+            }
+        }
+        private double _orthoCustomAxisStep = 1.0;
+
+        /// <summary>
+        /// Applies an orthogonal-view scale setting for the currently active axis, records it in the
+        /// per-axis dictionary, and triggers a view re-sync.
+        /// <paramref name="ratio"/> is the user-facing display ratio
+        /// (ZCount × d) / (XCount × XStep); ignored when <paramref name="mode"/> is not Custom.
+        /// </summary>
+        public void ApplyOrthoViewScale(OrthoScaleMode mode, double ratio)
+        {
+            if (!string.IsNullOrEmpty(_axisName))
+                _orthoViewScalePerAxis[_axisName] = (mode, ratio);
+            var data = _data;
+            if (mode == OrthoScaleMode.Custom && data != null)
+            {
+                int xCount = data.XCount;
+                double xStep = data.XStep;
+                int zCount = _panel.BottomView.MatrixData?.YCount ?? 1;
+                _orthoCustomAxisStep = (xCount > 0 && xStep > 0 && zCount > 0)
+                    ? ratio * xCount * xStep / zCount
+                    : ratio;
+                System.Diagnostics.Debug.WriteLine(
+                    $"[OrthoScale] Apply: axis={_axisName} mode=Custom ratio={ratio} customAxisStep={_orthoCustomAxisStep}");
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[OrthoScale] Apply: axis={_axisName} mode={mode}");
+            }
+            ScaleMode = mode; // triggers SyncZoomFromMainView via setter
+            // If mode was already Custom and only the ratio changed, the setter's equality
+            // check returns early without syncing. Force a sync here to cover that case.
+            if (mode == OrthoScaleMode.Custom && _data != null)
+                SyncZoomFromMainView();
+        }
+
+        /// <summary>
+        /// Pre-loads a saved orthogonal-view scale setting for <paramref name="axisName"/> from persisted metadata.
+        /// Call this before <see cref="Activate"/> so the value is available when the axis is activated.
+        /// </summary>
+        public void SetSavedOrthoViewScale(string axisName, OrthoScaleMode mode, double ratio)
+            => _orthoViewScalePerAxis[axisName] = (mode, ratio);
+
+        /// <summary>
+        /// Read-only view of the per-axis orthogonal-view scale settings (axisName → (mode, ratio)).
+        /// Used by <c>MatrixPlotter.Settings</c> for persistence.
+        /// </summary>
+        public System.Collections.Generic.IReadOnlyDictionary<string, (OrthoScaleMode Mode, double Ratio)> OrthoViewScalePerAxis
+            => _orthoViewScalePerAxis;
+
+        // Stores per-axis orthogonal-view scale settings: axisName → (mode, user-facing ratio)
+        private readonly System.Collections.Generic.Dictionary<string, (OrthoScaleMode Mode, double Ratio)> _orthoViewScalePerAxis = new();
+
         private IMatrixData? _data;
         private string       _axisName = string.Empty;
 
@@ -29,6 +131,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private int  _pendingIX;
         private int  _pendingIY;
         private bool _isSyncing;
+        private bool _isExporting;
         private int  _lastIX = -1;
         private int  _lastIY = -1;
 
@@ -63,6 +166,89 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Current crosshair Y index (main data row) used for XZ slice.</summary>
         public int CurrentIY => _lastIY;
 
+        /// <summary>Current XZ projection mode, or <c>null</c> when in slice mode.</summary>
+        internal ProjectionMode? XzProjectionMode => _xzProjectionMode;
+
+        /// <summary>Current YZ projection mode, or <c>null</c> when in slice mode.</summary>
+        internal ProjectionMode? YzProjectionMode => _yzProjectionMode;
+
+        /// <summary>
+        /// Rebuilds the side-view slices/projections for the given crosshair position and
+        /// returns a <see cref="Task"/> that completes on the UI thread once both views have
+        /// been updated. Safe to await from an export loop running on the UI thread.
+        /// </summary>
+        internal void BeginExport() => _isExporting = true;
+
+        internal void EndExport()
+        {
+            _isExporting = false;
+            // Invalidate caches that may have been left in an inconsistent state by the
+            // export (the restored ActiveIndex differs from the last exported frame).
+            // Then trigger a normal refresh so side views and caches are correct.
+            _xzProjectionCache = null;
+            _yzProjectionCache = null;
+            _xyProjectionCache = null;
+            if (_data != null && _lastIX >= 0 && _lastIY >= 0)
+            {
+                UpdateSlicesAsync(_lastIX, _lastIY);
+                if (_xyProjectionMode != null)
+                    ComputeXYProjectionAsync();
+            }
+        }
+
+        internal Task RebuildSlicesForExportAsync(int ix, int iy)
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var data = _data;
+            var axisName = _axisName;
+            if (data == null) { tcs.SetResult(true); return tcs.Task; }
+
+            var xzProjMode = _xzProjectionMode;
+            var yzProjMode = _yzProjectionMode;
+            // Never use cached projections during export: each frame may come from a different
+            // ActiveIndex (time/channel), so the projection must be recomputed every frame.
+            // We also avoid writing back to _xzProjectionCache/_yzProjectionCache so that
+            // the normal UI cache is not poisoned with export-time data.
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    IMatrixData? xz = null;
+                    IMatrixData? yz = null;
+
+                    if (xzProjMode.HasValue)
+                        xz = data.Apply(new ProjectionOperation(ViewFrom.Y, xzProjMode.Value, axisName));
+                    if (yzProjMode.HasValue)
+                        yz = data.Apply(new ProjectionOperation(ViewFrom.X, yzProjMode.Value, axisName));
+
+                    if (xz == null && yz == null)
+                    {
+                        var slices = data.Apply(new SliceOrthogonalOperation(ix, iy, axisName));
+                        xz = slices.XZ;
+                        yz = slices.YZ;
+                    }
+                    else if (xz == null)
+                        xz = data.Apply(new SliceOperation(ViewFrom.Y, iy, axisName));
+                    else if (yz == null)
+                        yz = data.Apply(new SliceOperation(ViewFrom.X, ix, axisName));
+
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _panel.BottomView.SetMatrixDataInternal(xz);
+                        _panel.RightView.SetMatrixDataInternal(yz);
+                        tcs.TrySetResult(true);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.UIThread.Post(() => tcs.TrySetException(ex));
+                }
+            });
+
+            return tcs.Task;
+        }
+
         public OrthogonalViewController(OrthogonalPanel panel)
         {
             _panel = panel;
@@ -73,6 +259,37 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _data     = data;
             _axisName = axisName;
+
+            // Restore per-axis orthogonal-view scale setting if one was previously saved.
+            if (_orthoViewScalePerAxis.TryGetValue(axisName, out var saved))
+            {
+                _orthoScaleMode = saved.Mode;
+                if (saved.Mode == OrthoScaleMode.Custom)
+                {
+                    int xCount = data.XCount;
+                    double xStep = data.XStep;
+                    // ZCount = depth pixel count; look up the exact axis being frozen, not Axes[0]
+                    var frozenAxis = data.Axes.FirstOrDefault(a => a.Name == axisName);
+                    int zCount = frozenAxis?.Count ?? 1;
+                    _orthoCustomAxisStep = (xCount > 0 && xStep > 0 && zCount > 0)
+                        ? saved.Ratio * xCount * xStep / zCount
+                        : saved.Ratio;
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[OrthoScale] Activate: axis={axisName} mode=Custom savedRatio={saved.Ratio} xCount={xCount} xStep={xStep} zCount={zCount} customAxisStep={_orthoCustomAxisStep}");
+                }
+                else
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[OrthoScale] Activate: axis={axisName} mode={saved.Mode} (no custom step)");
+                }
+            }
+            else
+            {
+                _orthoScaleMode = OrthoScaleMode.Physical;
+                _orthoCustomAxisStep = 1.0;
+                System.Diagnostics.Debug.WriteLine(
+                    $"[OrthoScale] Activate: axis={axisName} no saved scale → default Physical");
+            }
 
             // Ensure single subscription
             _panel.MainView.CrosshairMoved -= OnCrosshairMoved;
@@ -104,6 +321,22 @@ namespace MxPlot.UI.Avalonia.Controls
 
             SyncRenderSettings();
             _panel.ProjectionSelector.UpdateAxisName(axisName);
+            _panel.ProjectionSelector.UpdateHyperstackState(data.Dimensions.AxisCount > 1);
+
+            // Disable projection for Complex data (projection requires IMinMaxValue<T> constraint)
+            bool supportsProjection = data.ValueType != typeof(System.Numerics.Complex);
+            _panel.ProjectionSelector.IsEnabled = supportsProjection;
+            if (!supportsProjection)
+            {
+                global::Avalonia.Controls.ToolTip.SetTip(_panel.ProjectionSelector,
+                    "Projection is not available for Complex data.\n" +
+                    "Use slice mode (uncheck all projection options) to view orthogonal views.");
+            }
+            else
+            {
+                global::Avalonia.Controls.ToolTip.SetTip(_panel.ProjectionSelector, null);
+            }
+
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
             _panel.ProjectionSelector.SelectionChanged += OnProjectionSelectionChanged;
 
@@ -124,6 +357,9 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Deactivates orthogonal views and hides the crosshair.</summary>
         public void Deactivate()
         {
+            System.Diagnostics.Debug.WriteLine(
+                $"[OrthoScale] Deactivate: axis={_axisName} mode={_orthoScaleMode}" +
+                (_orthoScaleMode == OrthoScaleMode.Custom ? $" customAxisStep={_orthoCustomAxisStep}" : ""));
             _panel.MainView.CrosshairMoved     -= OnCrosshairMoved;
             _panel.MainView.ScrollStateChanged -= OnMainScrollStateChanged;
             _panel.BottomView.ScrollStateChanged -= OnBottomScrollStateChanged;
@@ -139,9 +375,10 @@ namespace MxPlot.UI.Avalonia.Controls
             _axisIndicatorDragEndedHandlerBottom = null;
             _axisIndicatorDragEndedHandlerRight  = null;
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
-            _panel.MainView.ShowCrosshair   = false;
-            _panel.MainView.ShowCrosshairH  = true;
-            _panel.MainView.ShowCrosshairV  = true;
+            _panel.ProjectionSelector.UpdateHyperstackState(false);
+            _panel.MainView.ShowCrosshair = false;
+            _panel.MainView.AxisIndicatorPx = null;
+            _panel.MainView.AxisIndicatorLabel = null;
             _panel.ShowRight  = false;
             _panel.ShowBottom = false;
             _panel.RightView.SetMatrixDataInternal(null);
@@ -173,17 +410,37 @@ namespace MxPlot.UI.Avalonia.Controls
             bot.LutDepth    = main.LutDepth;
             right.IsInvertedColor  = main.IsInvertedColor;
             bot.IsInvertedColor    = main.IsInvertedColor;
+            right.ComplexValueMode  = main.ComplexValueMode;
+            bot.ComplexValueMode    = main.ComplexValueMode;
 
             // Side views always use fixed range so they display the same value scale as MainView.
-            var (min, max) = main.IsFixedRange
-                ? (main.FixedMin, main.FixedMax)
-                : main.ScanCurrentFrameRange();
+            double min, max;
+            if (main.IsFixedRange)
+            {
+                min = main.FixedMin;
+                max = main.FixedMax;
+            }
+            else
+            {
+                // For Complex data: scan using the current display mode
+                int valueMode = main.MatrixData?.ValueType == typeof(System.Numerics.Complex)
+                    ? (int)main.ComplexValueMode : 0;
+                (min, max) = main.ScanCurrentFrameRange(valueMode);
+            }
             right.IsFixedRange = true;
             bot.IsFixedRange   = true;
             right.FixedMin  = min;
             bot.FixedMin    = min;
             right.FixedMax  = max;
             bot.FixedMax    = max;
+
+            // When MainView is Complex and ComplexValueMode changed, side views need explicit refresh.
+            // (Side views' MatrixData is usually float/ushort slice, so ComplexValueMode setter doesn't trigger rebuild.)
+            if (main.MatrixData?.ValueType == typeof(System.Numerics.Complex))
+            {
+                if (_panel.ShowBottom) bot.Refresh();
+                if (_panel.ShowRight) right.Refresh();
+            }
         }
 
         /// <inheritdoc cref="SyncRenderSettings"/>
@@ -231,6 +488,7 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public void RefreshSlices()
         {
+            if (_isExporting) return;
             if (_data == null || _lastIX < 0 || _lastIY < 0) return;
             // Projection caches depend on frame data; invalidate on any refresh
             _xzProjectionCache = null;
@@ -318,17 +576,40 @@ namespace MxPlot.UI.Avalonia.Controls
             double ty   = _panel.MainView.RawTransY;
             var (axMain, ayMain) = _panel.MainView.GetAspectScales();
 
+            if (_orthoScaleMode == OrthoScaleMode.Custom)
+            {
+                // Custom mode: override the orthogonal-axis step on the side views so that
+                // GetAspectScales() returns the desired ratio, then apply the same Physical
+                // zoom formula. This keeps the shared X/Y axis pixel size identical to
+                // MainView while only adjusting the orthogonal axis direction.
+                double d = _orthoCustomAxisStep > 0 ? _orthoCustomAxisStep : 1;
+                _panel.BottomView.OrthoAxisStepOverride = d;
+                _panel.RightView.OrthoAxisStepOverride  = d;
+
+                var (axBottom, _) = _panel.BottomView.GetAspectScales();
+                double zoomBottom = axBottom > 0 ? zoom * axMain / axBottom : zoom;
+                _panel.BottomView.ApplyZoomAndTrans(zoomBottom, tx, _panel.BottomView.RawTransY);
+
+                var (axRight, _) = _panel.RightView.GetAspectScales();
+                double zoomRight = axRight > 0 ? zoom * ayMain / axRight : zoom;
+                _panel.RightView.ApplyZoomAndTrans(zoomRight, _panel.RightView.RawTransX, ty);
+                return;
+            }
+
+            // Physical mode (default): compensate for step-size ratio so 1 physical unit
+            // occupies the same screen distance in all three views.
+            _panel.BottomView.OrthoAxisStepOverride = null;
+            _panel.RightView.OrthoAxisStepOverride  = null;
+
             // BottomView (XZ): X-axis shared with MainView.
-            // Compensate zoom so 1 physical unit in X occupies the same screen pixels.
-            var (axBottom, _) = _panel.BottomView.GetAspectScales();
-            double zoomBottom = axBottom > 0 ? zoom * axMain / axBottom : zoom;
-            _panel.BottomView.ApplyZoomAndTrans(zoomBottom, tx, _panel.BottomView.RawTransY);
+            var (axBottomP, _) = _panel.BottomView.GetAspectScales();
+            double zoomBottomP = axBottomP > 0 ? zoom * axMain / axBottomP : zoom;
+            _panel.BottomView.ApplyZoomAndTrans(zoomBottomP, tx, _panel.BottomView.RawTransY);
 
             // RightView (YZ, Rotate90CCW): screen-height direction = Y axis, shared with MainView.
-            // ax_right = YStep_main / min(YStep_main, ZStep) → compensate with ayMain.
-            var (axRight, _) = _panel.RightView.GetAspectScales();
-            double zoomRight = axRight > 0 ? zoom * ayMain / axRight : zoom;
-            _panel.RightView.ApplyZoomAndTrans(zoomRight, _panel.RightView.RawTransX, ty);
+            var (axRightP, _) = _panel.RightView.GetAspectScales();
+            double zoomRightP = axRightP > 0 ? zoom * ayMain / axRightP : zoom;
+            _panel.RightView.ApplyZoomAndTrans(zoomRightP, _panel.RightView.RawTransX, ty);
         }
 
         /// <summary>
@@ -364,8 +645,6 @@ namespace MxPlot.UI.Avalonia.Controls
                     var (axBottom, _) = bot.GetAspectScales();
 
                     // Issue 1: detect whether the scroll event is caused by a user zoom or a resize.
-                    // SyncSidesFromMain computes: zoomBottom = zoomMain * axMain / axBottom.
-                    // If bot.Zoom matches that formula → resize triggered this event; keep fit mode.
                     double expectedBotZoom = axBottom > 0 ? main.Zoom * axMain / axBottom : main.Zoom;
                     bool isUserZoom = Math.Abs(bot.Zoom - expectedBotZoom) > 1e-9;
                     if (main.IsFitToView && !isUserZoom)
@@ -389,9 +668,11 @@ namespace MxPlot.UI.Avalonia.Controls
                     main.ApplyZoomAndTrans(zoomMain, bot.RawTransX, targetTransY);
 
                     // MainView → RightView: propagate (Y axis shared).
-                    var (axRight, _) = _panel.RightView.GetAspectScales();
-                    double zoomRight = axRight > 0 ? zoomMain * ayMain / axRight : zoomMain;
-                    _panel.RightView.ApplyZoomAndTrans(zoomRight, _panel.RightView.RawTransX, main.RawTransY);
+                    {
+                        var (axRight, _) = _panel.RightView.GetAspectScales();
+                        double zoomRight = axRight > 0 ? zoomMain * ayMain / axRight : zoomMain;
+                        _panel.RightView.ApplyZoomAndTrans(zoomRight, _panel.RightView.RawTransX, main.RawTransY);
+                    }
                 }
                 else
                 {
@@ -399,7 +680,6 @@ namespace MxPlot.UI.Avalonia.Controls
                     var (axRight, _) = right.GetAspectScales();
 
                     // Issue 1: same resize-vs-user-zoom detection for RightView.
-                    // SyncSidesFromMain computes: zoomRight = zoomMain * ayMain / axRight.
                     double expectedRightZoom = axRight > 0 ? main.Zoom * ayMain / axRight : main.Zoom;
                     bool isUserZoom = Math.Abs(right.Zoom - expectedRightZoom) > 1e-9;
                     if (main.IsFitToView && !isUserZoom)
@@ -420,9 +700,11 @@ namespace MxPlot.UI.Avalonia.Controls
                     main.ApplyZoomAndTrans(zoomMain, targetTransX, right.RawTransY);
 
                     // MainView → BottomView: propagate (X axis shared).
-                    var (axBottom, _) = _panel.BottomView.GetAspectScales();
-                    double zoomBottom = axBottom > 0 ? zoomMain * axMain / axBottom : zoomMain;
-                    _panel.BottomView.ApplyZoomAndTrans(zoomBottom, main.RawTransX, _panel.BottomView.RawTransY);
+                    {
+                        var (axBottom, _) = _panel.BottomView.GetAspectScales();
+                        double zoomBottom = axBottom > 0 ? zoomMain * axMain / axBottom : zoomMain;
+                        _panel.BottomView.ApplyZoomAndTrans(zoomBottom, main.RawTransX, _panel.BottomView.RawTransY);
+                    }
                 }
             }
             finally { _isSyncing = false; }
@@ -693,6 +975,28 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _xyProjectionMode  = null;
             _xyProjectionCache = null;
+        }
+
+        /// <summary>
+        /// Computes the XY projection for the current source data frame (i.e. the frame
+        /// determined by <see cref="IMatrixData.ActiveIndex"/> at call time) and active
+        /// projection mode. Always performs a fresh computation — the interactive cache is
+        /// intentionally bypassed so that each export frame gets the correct projection.
+        /// Returns <c>null</c> when no XY projection mode is active or no data is loaded.
+        /// Intended for use by export hosts that drive frame iteration externally.
+        /// </summary>
+        public Task<MxPlot.Core.IMatrixData?> ComputeXYProjectionForExportAsync()
+        {
+            var data = _data;
+            var axisName = _axisName;
+            var mode = _xyProjectionMode;
+            if (data == null || mode == null)
+                return Task.FromResult<MxPlot.Core.IMatrixData?>(null);
+
+            // Always recompute: ActiveIndex has been changed by the export host for this frame,
+            // so the cached result (which was computed for a different frame) must not be reused.
+            return Task.Run<MxPlot.Core.IMatrixData?>(() =>
+                data.Apply(new ProjectionOperation(ViewFrom.Z, mode.Value, axisName)));
         }
     }
 }

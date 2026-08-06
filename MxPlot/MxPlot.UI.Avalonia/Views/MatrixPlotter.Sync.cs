@@ -9,6 +9,16 @@ using System.Linq;
 namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
+    /// Identifies which scale parameter (Min, Max, or Step) was changed.
+    /// </summary>
+    public enum ScaleParameter
+    {
+        Min,
+        Max,
+        Step
+    }
+
+    /// <summary>
     /// Captures the display settings of a <see cref="MatrixPlotter"/> at a point in time.
     /// Used by <see cref="MatrixPlotterSyncGroup"/> to support Revert-to-initial-state.
     /// Intentionally excludes <see cref="IMatrixData"/> itself — data-level revert
@@ -21,12 +31,13 @@ namespace MxPlot.UI.Avalonia.Views
         ValueRangeMode RangeMode,
         double FixedMin,
         double FixedMax,
-        Dictionary<string, int> AxisIndices);
+        Dictionary<string, int> AxisIndices,
+        Dictionary<string, (double Min, double Max, double Step)> ScaleCache);
 
     public partial class MatrixPlotter
     {
         // Guard: set during SyncApply* calls to suppress re-firing of sync events.
-        private bool _syncApplying;
+        //private bool _syncApplying; // -> Changed to ReentrancyGuard with GuardContext.SyncApply flag.
 
         // ── Internal sync events ─────────────────────────────────────────────
         // Each fires on the UI thread when the user changes the corresponding
@@ -43,6 +54,18 @@ namespace MxPlot.UI.Avalonia.Views
         /// that share an axis with the same name are updated.
         /// </summary>
         internal event EventHandler<(string AxisName, int Index)>? SyncAxisIndexChanged;
+
+        /// <summary>
+        /// Fired when a scale parameter (Min/Max/Step) changes for X, Y, or any Axis.
+        /// <para/>
+        /// TargetAxis: "X", "Y", or an Axis name (e.g., "Time", "Z").
+        /// Parameter: which parameter changed (Min, Max, or Step).
+        /// Value: the new value.
+        /// <para/>
+        /// Fired from MatrixPlotter.InfoTab.cs Wire() handlers when the user edits
+        /// scale values via the Info tab UI.
+        /// </summary>
+        internal event EventHandler<(string TargetAxis, ScaleParameter Parameter, double Value)>? SyncScaleChanged;
 
         /// <summary>Fired when this plotter (Primary role) starts an interactive crop.</summary>
         internal event EventHandler<CropRoiBounds>? SyncCropStarted;
@@ -63,11 +86,21 @@ namespace MxPlot.UI.Avalonia.Views
         internal PlotterSnapshot CaptureSnapshot()
         {
             var axisIndices = new Dictionary<string, int>();
+            var scaleCache = new Dictionary<string, (double, double, double)>();
+
             if (_currentData != null)
             {
                 foreach (var axis in _currentData.Axes)
+                {
                     axisIndices[axis.Name] = axis.Index;
+                    scaleCache[axis.Name] = (axis.Min, axis.Max, axis.Step);
+                }
+
+                var scale = _currentData.GetScale();
+                scaleCache["X"] = (scale.XMin, scale.XMax, scale.XStep);
+                scaleCache["Y"] = (scale.YMin, scale.YMax, scale.YStep);
             }
+
             return new PlotterSnapshot(
                 Lut: _view.Lut,
                 LutDepth: _view.LutDepth,
@@ -75,7 +108,8 @@ namespace MxPlot.UI.Avalonia.Views
                 RangeMode: _rangeBar.Mode,
                 FixedMin: _view.FixedMin,
                 FixedMax: _view.FixedMax,
-                AxisIndices: axisIndices);
+                AxisIndices: axisIndices,
+                ScaleCache: scaleCache);
         }
 
         /// <summary>
@@ -88,8 +122,15 @@ namespace MxPlot.UI.Avalonia.Views
             SyncApplyInverted(snap.IsInverted);
             SyncApplyRangeMode(snap.RangeMode);
             SyncApplyFixedRange(snap.FixedMin, snap.FixedMax);
+
             foreach (var (axisName, index) in snap.AxisIndices)
                 SyncApplyAxisIndex(axisName, index);
+
+            foreach (var (targetAxis, (min, max, step)) in snap.ScaleCache)
+            {
+                SyncApplyScale(targetAxis, ScaleParameter.Min, min);
+                SyncApplyScale(targetAxis, ScaleParameter.Max, max);
+            }
         }
 
         // ── Internal sync apply methods ──────────────────────────────────────
@@ -98,25 +139,22 @@ namespace MxPlot.UI.Avalonia.Views
 
         internal void SyncApplyLut(LookupTable lut)
         {
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             _lutSelector.SelectLut(lut);
-            _syncApplying = false;
         }
 
         internal void SyncApplyLutDepth(int depth)
         {
             if (_levelNud == null) return;
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             _levelNud.Value = (decimal)depth;
-            _syncApplying = false;
         }
 
         internal void SyncApplyInverted(bool inverted)
         {
             if (_invertLutChk == null) return;
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             _invertLutChk.IsChecked = inverted;
-            _syncApplying = false;
         }
 
         internal void SyncApplyRangeMode(ValueRangeMode mode)
@@ -127,19 +165,17 @@ namespace MxPlot.UI.Avalonia.Views
             if (!isMultiFrame && (mode == ValueRangeMode.All || mode == ValueRangeMode.Current))
                 mode = ValueRangeMode.Current;
 
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             _rangeBar.SetMode(mode);
-            _syncApplying = false;
         }
 
         internal void SyncApplyFixedRange(double min, double max)
         {
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             _rangeBar.SetRange(min, max);
             _view.FixedMin = min;
             _view.FixedMax = max;
             _orthoController.SyncRenderSettings();
-            _syncApplying = false;
         }
 
         /// <summary>
@@ -158,9 +194,119 @@ namespace MxPlot.UI.Avalonia.Views
             var axis = _currentData.Axes.FirstOrDefault(a => a.Name == axisName);
             if (axis == null) return;
             int clamped = Math.Clamp(index, 0, axis.Count - 1);
-            _syncApplying = true;
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
             axis.Index = clamped;
-            _syncApplying = false;
         }
+
+        /// <summary>
+        /// Applies a scale parameter change (Min/Max/Step) to either XY or a named Axis.
+        /// <para/>
+        /// <paramref name="targetAxis"/>: "X" or "Y" for XY plane scaling, or any Axis name (e.g., "Time", "Z").
+        /// <paramref name="parameter"/>: which parameter changed (Min, Max, or Step).
+        /// <paramref name="value"/>: the new value.
+        /// <para/>
+        /// For Axis targets: no-op if the axis doesn't exist, is index-based, or has Count≤1.
+        /// For XY targets: applies to the underlying MatrixData scale.
+        /// <para/>
+        /// When Step is applied, Max is recalculated as: newMax = Min + Step × (Count - 1).
+        /// This matches the existing behavior in MatrixPlotter.InfoTab.cs.
+        /// </summary>
+        /// <returns><c>true</c> if the scale was actually applied; <c>false</c> if skipped (e.g., axis not found).</returns>
+        internal bool SyncApplyScale(string targetAxis, ScaleParameter parameter, double value)
+        {
+            if (_currentData == null) return false;
+
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
+
+            bool applied;
+            if (targetAxis == "X" || targetAxis == "Y")
+            {
+                ApplyXYScale(targetAxis, parameter, value);
+                applied = true;
+            }
+            else
+            {
+                applied = ApplyAxisScale(targetAxis, parameter, value);
+            }
+
+            if (applied)
+            {
+                // Update display after applying scale changes
+                SetScaleDirty(true);
+                if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
+                _orthoController.RefreshCrosshairAndSlices();
+            }
+
+            return applied;
+        }
+
+        private void ApplyXYScale(string axis, ScaleParameter parameter, double value)
+        {
+            if (_currentData == null) return;
+
+            double xMin = _currentData.XMin;
+            double xMax = _currentData.XMax;
+            double yMin = _currentData.YMin;
+            double yMax = _currentData.YMax;
+
+            if (axis == "X")
+            {
+                switch (parameter)
+                {
+                    case ScaleParameter.Min:
+                        xMin = value;
+                        break;
+                    case ScaleParameter.Max:
+                        xMax = value;
+                        break;
+                    case ScaleParameter.Step:
+                        xMax = xMin + value * (_currentData.XCount - 1);
+                        break;
+                }
+            }
+            else if (axis == "Y")
+            {
+                switch (parameter)
+                {
+                    case ScaleParameter.Min:
+                        yMin = value;
+                        break;
+                    case ScaleParameter.Max:
+                        yMax = value;
+                        break;
+                    case ScaleParameter.Step:
+                        yMax = yMin + value * (_currentData.YCount - 1);
+                        break;
+                }
+            }
+
+            _currentData.SetXYScale(xMin, xMax, yMin, yMax);
+        }
+
+        private bool ApplyAxisScale(string axisName, ScaleParameter parameter, double value)
+        {
+            if (_currentData == null) return false;
+
+            var axis = _currentData.Axes.FirstOrDefault(a => a.Name == axisName);
+            if (axis == null || axis.IsIndexBased || axis.Count <= 1)
+                return false;
+
+            switch (parameter)
+            {
+                case ScaleParameter.Min:
+                    axis.Min = value;
+                    break;
+                case ScaleParameter.Max:
+                    axis.Max = value;
+                    break;
+                case ScaleParameter.Step:
+                    axis.Step = value;
+                    break;
+            }
+            TryUpdateTimeAxisAnimationInterval(axis, showNotice: true);
+            return true;
+        }
+
+
     }
 }

@@ -132,26 +132,29 @@ namespace MxPlot.UI.Avalonia.Rendering
 
             UpdateCachedColorMap = type switch
             {
-                Type t when t == typeof(byte)   => () => UpdateCachedColorMapProc(),
+                Type t when t == typeof(byte) => () => UpdateCachedColorMapProc(),
                 Type t when t == typeof(ushort) => () => UpdateCachedColorMapProc(),
-                Type t when t == typeof(short)  => () => UpdateCachedColorMapProc(),
-                _                               => () => { }
+                Type t when t == typeof(short) => () => UpdateCachedColorMapProc(),
+                _ => () => { }
             };
 
             unsafe
             {
                 RenderInternal = type switch
                 {
-                    Type t when t == typeof(byte)    => RenderByte,
-                    Type t when t == typeof(ushort)  => RenderUShort,
-                    Type t when t == typeof(short)   => RenderShort,
-                    Type t when t == typeof(int)     => RenderInt,
-                    Type t when t == typeof(float)   => RenderFloat,
-                    Type t when t == typeof(double)  => RenderDouble,
+                    Type t when t == typeof(byte) => RenderByte,
+                    Type t when t == typeof(ushort) => RenderUShort,
+                    Type t when t == typeof(short) => RenderShort,
+                    Type t when t == typeof(int) => RenderInt,
+                    Type t when t == typeof(float) => RenderFloat,
+                    Type t when t == typeof(double) => RenderDouble,
                     Type t when t == typeof(Complex) => RenderComplex,
-                    _                                => RenderFallback
+                    _ => RenderFallback
                 };
             }
+            // Set default Complex projection function (prevents crash when StructValueConverter is not set)
+            if (type == typeof(Complex))
+                StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);
         }
 
         #endregion
@@ -218,9 +221,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         public void SetProperties(LookupTable lut, double valueMin, double valueMax, bool isInvertedColor)
         {
             bool needsUpdate = false;
-            if (_lookupTable != lut)          { _lookupTable = lut ?? throw new ArgumentNullException(nameof(lut)); needsUpdate = true; }
-            if (_valueMax != valueMax)         { _valueMax = valueMax;               needsUpdate = true; }
-            if (_valueMin != valueMin)         { _valueMin = valueMin;               needsUpdate = true; }
+            if (_lookupTable != lut) { _lookupTable = lut ?? throw new ArgumentNullException(nameof(lut)); needsUpdate = true; }
+            if (_valueMax != valueMax) { _valueMax = valueMax; needsUpdate = true; }
+            if (_valueMin != valueMin) { _valueMin = valueMin; needsUpdate = true; }
             if (_isInvertedColor != isInvertedColor) { _isInvertedColor = isInvertedColor; needsUpdate = true; }
             if (needsUpdate) UpdateCachedColorMap();
         }
@@ -275,24 +278,24 @@ namespace MxPlot.UI.Avalonia.Rendering
                 double range = viewValueMax - viewValueMin;
                 if (range == 0) range = 1.0;
 
-                double valueScale  = (_lookupTable.Levels - 1) / range;
+                double valueScale = (_lookupTable.Levels - 1) / range;
                 double valueOffset = -viewValueMin * valueScale;
-                int lutMaxIndex    = _lookupTable.Levels - 1;
+                int lutMaxIndex = _lookupTable.Levels - 1;
 
-                int width       = source.XCount;
-                int height      = source.YCount;
-                int posStride   = fb.RowBytes / 4;
+                int width = source.XCount;
+                int height = source.YCount;
+                int posStride = fb.RowBytes / 4;
                 int* targetPtr;
                 int strideInts;
                 if (FlipY)
                 {
                     // Data row 0 (YMin) → bitmap bottom; row height-1 (YMax) → bitmap top.
-                    targetPtr  = (int*)fb.Address + (height - 1) * posStride;
+                    targetPtr = (int*)fb.Address + (height - 1) * posStride;
                     strideInts = -posStride;
                 }
                 else
                 {
-                    targetPtr  = (int*)fb.Address;
+                    targetPtr = (int*)fb.Address;
                     strideInts = posStride;
                 }
 
@@ -305,9 +308,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         private void UpdateCachedColorMapProc()
         {
             int size = 0, offset = 0;
-            if      (ValueType == typeof(byte))   { size = 256; }
-            else if (ValueType == typeof(ushort))  { size = 65536; }
-            else if (ValueType == typeof(short))   { size = 65536; offset = 32768; }
+            if (ValueType == typeof(byte)) { size = 256; }
+            else if (ValueType == typeof(ushort)) { size = 65536; }
+            else if (ValueType == typeof(short)) { size = 65536; offset = 32768; }
             if (size == 0) return;
 
             _cachedColorMap = new int[size];
@@ -315,10 +318,10 @@ namespace MxPlot.UI.Avalonia.Rendering
             double viewValueMax = _isInvertedColor ? _valueMin : _valueMax;
             double range = viewValueMax - viewValueMin;
             if (range == 0) range = 1.0;
-            double valueScale  = (_lookupTable.Levels - 1) / range;
+            double valueScale = (_lookupTable.Levels - 1) / range;
             double valueOffset = -viewValueMin * valueScale;
-            int lutMaxIndex    = _lookupTable.Levels - 1;
-            var lut            = _lookupTable.AsSpan();
+            int lutMaxIndex = _lookupTable.Levels - 1;
+            var lut = _lookupTable.AsSpan();
 
             for (int v = 0; v < size; v++)
             {

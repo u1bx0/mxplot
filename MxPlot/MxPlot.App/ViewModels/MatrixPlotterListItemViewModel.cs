@@ -1,4 +1,4 @@
-using Avalonia.Threading;
+﻿using Avalonia.Threading;
 using MxPlot.Core;
 using MxPlot.UI.Avalonia.Views;
 using System;
@@ -89,6 +89,7 @@ namespace MxPlot.App.ViewModels
             : base(plotter)
         {
             _matrixData = data;
+            _hasUnsavedChanges = plotter.IsModified;
             RefreshMetaData();
 
             EventHandler onViewUpdated = (_, _) => ScheduleThumbnailUpdate(plotter);

@@ -20,7 +20,7 @@ namespace MxPlot.App.Views
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
             MinWidth = 400;
 
-            double sizeMb = fileBytes / (1024.0 * 1024.0);
+            //double sizeMb = fileBytes / (1024.0 * 1024.0);
 
             var sizeLabel = new TextBlock
             {
@@ -33,7 +33,7 @@ namespace MxPlot.App.Views
 
             var infoLabel = new TextBlock
             {
-                Text = $"File size: {sizeMb:F0} MB \u2014 select a loading mode:",
+                Text = $"File size:{FormatFileSize(fileBytes)} \u2014 select a loading mode:",
                 FontSize = 11,
                 Opacity = 0.75,
                 Margin = new Thickness(0, 2, 0, 8)
@@ -44,7 +44,7 @@ namespace MxPlot.App.Views
                 Content = "Load in Memory",
                 Padding = new Thickness(12, 2),
                 FontSize = 11,
-                Height = 42,
+                Height = 28,
                 Width = 120,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
@@ -56,7 +56,7 @@ namespace MxPlot.App.Views
                 Content = "Virtual Mode",
                 FontSize = 11,
                 Padding = new Thickness(12, 2),
-                Height = 42,
+                Height = 28,
                 Width = 120,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center
@@ -68,7 +68,7 @@ namespace MxPlot.App.Views
                 Content = "Cancel",
                 FontSize = 11,
                 Padding = new Thickness(12, 2),
-                Height = 42,
+                Height = 28,
                 Width = 120,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center
@@ -97,6 +97,16 @@ namespace MxPlot.App.Views
                 }
             };
         }
+
+        private static string FormatFileSize(long fileBytes)
+        {
+            double gb = fileBytes / (1024.0 * 1024.0 * 1024.0);
+            if (gb >= 1.0)
+                return $"{gb:F2} GB";
+            double mb = fileBytes / (1024.0 * 1024.0);
+            return $"{mb:F0} MB";
+        }
+
 
         /// <summary>
         /// Shows the mode-selection dialog as a modal child of <paramref name="owner"/>.

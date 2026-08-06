@@ -12,11 +12,13 @@ using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
+using MxPlot.UI.Avalonia.Rendering;
 using MxPlot.UI.Avalonia.Views;
 using System.IO;
 using System;
 using System.Diagnostics;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -39,13 +41,61 @@ namespace MxPlot.UI.Avalonia.Controls
         public static readonly StyledProperty<bool> IsInvertedColorProperty =
             AvaloniaProperty.Register<MxView, bool>(nameof(IsInvertedColor));
         public static readonly StyledProperty<int> LutDepthProperty =
-            AvaloniaProperty.Register<MxView, int>(nameof(LutDepth));
+            AvaloniaProperty.Register<MxView, int>(nameof(LutDepth), defaultValue: 256);
+
+        public static readonly StyledProperty<RenderingMode> RenderingModeProperty =
+            AvaloniaProperty.Register<MxView, RenderingMode>(
+                nameof(RenderingMode), defaultValue: RenderingMode.Lut);
+
+        public static readonly StyledProperty<System.Collections.Generic.IReadOnlyList<BlendRecipe>?> CompositeRecipesProperty =
+            AvaloniaProperty.Register<MxView, System.Collections.Generic.IReadOnlyList<BlendRecipe>?>(
+                nameof(CompositeRecipes));
+
+        public static readonly StyledProperty<BlendMode> CompositeBlendModeProperty =
+            AvaloniaProperty.Register<MxView, BlendMode>(
+                nameof(CompositeBlendMode), defaultValue: BlendMode.Additive);
+
+        public static readonly StyledProperty<int[]?> CompositeFrameIndicesProperty =
+            AvaloniaProperty.Register<MxView, int[]?>(
+                nameof(CompositeFrameIndices));
 
         public bool IsFixedRange { get => GetValue(IsFixedRangeProperty); set => SetValue(IsFixedRangeProperty, value); }
         public double FixedMin { get => GetValue(FixedMinProperty); set => SetValue(FixedMinProperty, value); }
         public double FixedMax { get => GetValue(FixedMaxProperty); set => SetValue(FixedMaxProperty, value); }
         public bool IsInvertedColor { get => GetValue(IsInvertedColorProperty); set => SetValue(IsInvertedColorProperty, value); }
         public int LutDepth { get => GetValue(LutDepthProperty); set => SetValue(LutDepthProperty, value); }
+
+        public RenderingMode RenderingMode
+        {
+            get => GetValue(RenderingModeProperty);
+            set => SetValue(RenderingModeProperty, value);
+        }
+        public System.Collections.Generic.IReadOnlyList<BlendRecipe>? CompositeRecipes
+        {
+            get => GetValue(CompositeRecipesProperty);
+            set => SetValue(CompositeRecipesProperty, value);
+        }
+        public BlendMode CompositeBlendMode
+        {
+            get => GetValue(CompositeBlendModeProperty);
+            set => SetValue(CompositeBlendModeProperty, value);
+        }
+        public int[]? CompositeFrameIndices
+        {
+            get => GetValue(CompositeFrameIndicesProperty);
+            set => SetValue(CompositeFrameIndicesProperty, value);
+        }
+
+        /// <summary>
+        /// Gets or sets the display mode for Complex-valued matrix data.
+        /// Forwarded directly to the internal RenderSurface.
+        /// Has no effect on non-Complex data types.
+        /// </summary>
+        public ComplexValueMode ComplexValueMode
+        {
+            get => _surface.ComplexValueMode;
+            set => _surface.ComplexValueMode = value;
+        }
 
         /// <summary>Fired each time the auto value range is computed. Carries (Min, Max).</summary>
         public event EventHandler<(double Min, double Max)>? AutoRangeComputed;
@@ -70,11 +120,26 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Raised when the user chooses Extract Frame from the surface context menu.</summary>
         public event EventHandler? ExtractFrameRequested;
 
+        /// <summary>Raised when the user chooses Extract... from the surface context menu.</summary>
+        public event EventHandler? ExtractDimensionRequested;
+
+        /// <summary>
+        /// Raised when the user changes <see cref="ComplexValueMode"/> via the context menu.
+        /// <see cref="MatrixPlotter"/> subscribes to this to synchronize all views (Main/Bottom/Right).
+        /// </summary>
+        internal event EventHandler<ComplexValueMode>? SyncComplexValueModeRequested;
+
         /// <summary>
         /// Controls whether the Extract Frame menu item appears in the built-in context menu.
         /// Set to <c>true</c> by <see cref="Views.MatrixPlotter"/> when multi-frame data is loaded.
         /// </summary>
         public bool ExtractFrameAllowed { get; set; } = false;
+
+        /// <summary>
+        /// Controls whether the Extract... menu item appears in the built-in context menu.
+        /// Set to <c>true</c> by <see cref="Views.MatrixPlotter"/> when hyperstack data (Axes.Count &gt; 1) is loaded.
+        /// </summary>
+        public bool ExtractDimensionAllowed { get; set; } = false;
 
         /// <summary>
         /// Controls whether the built-in surface context menu (Copy Image, Crop, Overlay submenu)
@@ -84,8 +149,32 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public bool EnableBuiltInContextMenu { get; set; } = false;
 
+        /// <summary>
+        /// Called when the context menu is opening to obtain the list of available export formats
+        /// for this view. Returns an empty sequence when <c>null</c>.
+        /// Each element is a <c>(label, hint, requiresStack, action)</c> tuple where
+        /// <c>action</c> is an async delegate that runs the export.
+        /// </summary>
+        public Func<System.Collections.Generic.IEnumerable<(string Label, string Hint, bool RequiresStack, Func<System.Threading.Tasks.Task> Action)>>? ExportFormatsProvider { get; set; }
+
+        /// <summary>
+        /// Optional provider for extra <see cref="MenuItem"/> entries injected at the top of the
+        /// context menu, before the built-in items (or as the only items when
+        /// <see cref="EnableBuiltInContextMenu"/> is <c>false</c>).
+        /// Used by <see cref="Views.MatrixPlotter"/> to add view-specific items such as
+        /// <c>Axis Scale…</c> to the side-view context menu.
+        /// A <see cref="Separator"/> is automatically inserted after the injected items.
+        /// </summary>
+        public Func<System.Collections.Generic.IEnumerable<MenuItem>>? SideViewMenuItemsProvider { get; set; }
+
         /// <summary>Returns the computed value range for the current frame.</summary>
         public (double Min, double Max) ScanCurrentFrameRange() => _surface.ScanCurrentFrameRange();
+
+        /// <summary>
+        /// Returns the computed value range for the current frame using the specified value mode.
+        /// For Complex data, use the appropriate mode index; for primitives, valueMode is ignored.
+        /// </summary>
+        internal (double Min, double Max) ScanCurrentFrameRange(int valueMode) => _surface.ScanCurrentFrameRange(valueMode);
 
         /// <summary>
         /// Converts a screen position (relative to this <see cref="MxView"/>) to data coordinates.
@@ -148,6 +237,18 @@ namespace MxPlot.UI.Avalonia.Controls
         public double RawTransY => _surface.RawTransY;
         /// <summary>Aspect scale factors derived from the current MatrixData step sizes.</summary>
         internal (double ax, double ay) GetAspectScales() => _surface.GetAspectScales();
+
+        /// <summary>
+        /// When set, replaces <c>MatrixData.YStep</c> in the internal aspect-scale calculation.
+        /// Used by <see cref="OrthogonalViewController"/> in Custom scale mode to adjust the
+        /// orthogonal axis display size without mutating the underlying matrix data geometry.
+        /// Set to <c>null</c> to use the actual <c>YStep</c> (default).
+        /// </summary>
+        internal double? OrthoAxisStepOverride
+        {
+            get => _surface.OrthoAxisStepOverride;
+            set => _surface.OrthoAxisStepOverride = value;
+        }
 
         /// <summary>Returns the current overlay viewport for world-to-screen coordinate conversions.</summary>
         internal AvaloniaViewport GetOverlayViewport() => _surface.GetOverlayViewport();
@@ -284,6 +385,18 @@ namespace MxPlot.UI.Avalonia.Controls
                 _surface.OverlayInfoText = value;
                 _surface.InvalidateVisual();
             }
+        }
+
+        /// <summary>
+        /// Corner where <see cref="OverlayInfoText"/> is anchored when it is non-<c>null</c>.
+        /// Defaults to <see cref="OverlayInfoTextAnchor.BottomLeft"/> (same position as the normal
+        /// mouse coordinate overlay). Set to <see cref="OverlayInfoTextAnchor.TopRight"/> to display
+        /// the text in the top-right corner, e.g. while dragging an <see cref="Controls.AxisTracker"/>.
+        /// </summary>
+        public OverlayInfoTextAnchor OverlayInfoTextAnchor
+        {
+            get => _surface.OverlayInfoTextAnchor;
+            set => _surface.OverlayInfoTextAnchor = value;
         }
 
         /// <summary>Fired when the user drags the crosshair to a new data-space position.</summary>
@@ -492,6 +605,10 @@ namespace MxPlot.UI.Avalonia.Controls
             else if (change.Property == FixedMaxProperty) _surface.FixedMax = FixedMax;
             else if (change.Property == IsInvertedColorProperty) _surface.IsInvertedColor = IsInvertedColor;
             else if (change.Property == LutDepthProperty) _surface.LutLevel = LutDepth;
+            else if (change.Property == RenderingModeProperty) _surface.RenderingMode = RenderingMode;
+            else if (change.Property == CompositeRecipesProperty) _surface.CompositeRecipes = CompositeRecipes;
+            else if (change.Property == CompositeBlendModeProperty) _surface.CompositeBlendMode = CompositeBlendMode;
+            else if (change.Property == CompositeFrameIndicesProperty) _surface.CompositeFrameIndices = CompositeFrameIndices;
         }
 
         // ── Scrollbar synchronisation ─────────────────────────────────────────
@@ -746,19 +863,98 @@ namespace MxPlot.UI.Avalonia.Controls
                 return;
             }
 
-            if (!EnableBuiltInContextMenu) return;
+            // Extra items injected by the host (e.g. Axis Scale… for side views)
+            bool hasExtraItems = false;
+            if (SideViewMenuItemsProvider != null)
+            {
+                foreach (var extraItem in SideViewMenuItemsProvider())
+                {
+                    menu.Items.Add(extraItem);
+                    hasExtraItems = true;
+                }
+                if (hasExtraItems)
+                    menu.Items.Add(new Separator());
+            }
+
+            if (!EnableBuiltInContextMenu)
+            {
+                if (hasExtraItems)
+                {
+                    menu.Open(_surface);
+                    e.Handled = true;
+                }
+                return;
+            }
+
+            // ── Complex display mode submenu ─────────────────────────────────────
+            if (MatrixData?.ValueType == typeof(System.Numerics.Complex))
+            {
+                var complexMenu = new MenuItem { Header = "Complex Value", FontSize = 11 };
+                complexMenu.Icon = MakeIconSlot(MenuIcons.ComplexZ);
+
+                foreach (var mode in Enum.GetValues<ComplexValueMode>())
+                {
+                    var capture = mode;
+                    var item = new MenuItem
+                    {
+                        Header = capture switch
+                        {
+                            ComplexValueMode.Magnitude => "Magnitude",
+                            ComplexValueMode.Real      => "Real",
+                            ComplexValueMode.Imaginary => "Imaginary",
+                            ComplexValueMode.Phase     => "Phase",
+                            ComplexValueMode.Power     => "Power",
+                            _                          => capture.ToString(),
+                        },
+                        FontSize = 11,
+                        ToggleType = MenuItemToggleType.Radio,
+                        IsChecked  = _surface.ComplexValueMode == mode,
+                    };
+                    item.Click += (_, _) =>
+                    {
+                        _surface.ComplexValueMode = capture;
+                        // Trigger OrthogonalViewController sync across all views
+                        SyncComplexValueModeRequested?.Invoke(this, capture);
+                    };
+                    complexMenu.Items.Add(item);
+                }
+
+                menu.Items.Add(complexMenu);
+                menu.Items.Add(new Separator());
+            }
 
             // ② Copy image to clipboard
             var copyItem = new MenuItem { Header = "Copy Image\u2026", FontSize = 11 };
             copyItem.Icon = MakeIconSlot(MenuIcons.Image);
             copyItem.Click += async (_, _) => await ShowCopyDialogAsync();
             menu.Items.Add(copyItem);
+
+            // ② Export as submenu (provided by MatrixPlotter; filtering is done by the provider)
+            var exportFormats = ExportFormatsProvider?.Invoke().ToArray() ?? [];
+            if (exportFormats.Length > 0)
+            {
+                var exportMenu = new MenuItem { Header = "Export as", FontSize = 11 };
+                exportMenu.Icon = MakeIconSlot(MenuIcons.Save);
+                foreach (var fmt in exportFormats)
+                {
+                    var fmtCapture = fmt;
+                    var fmtItem = new MenuItem { Header = fmtCapture.Label, FontSize = 11 };
+                    if (!string.IsNullOrEmpty(fmtCapture.Hint))
+                        ToolTip.SetTip(fmtItem, fmtCapture.Hint);
+                    fmtItem.Click += async (_, _) => await fmtCapture.Action();
+                    exportMenu.Items.Add(fmtItem);
+                }
+                menu.Items.Add(exportMenu);
+            }
+
             menu.Items.Add(new Separator());
 
             // ③ Crop shortcut
             menu.Items.Add(MakeItem("Crop", () => CropRequested?.Invoke(this, EventArgs.Empty), MenuIcons.AutoFix));
             if (ExtractFrameAllowed)
                 menu.Items.Add(MakeItem("Extract Frame", () => ExtractFrameRequested?.Invoke(this, EventArgs.Empty), MenuIcons.Duplicate));
+            if (ExtractDimensionAllowed)
+                menu.Items.Add(MakeItem("Extract...", () => ExtractDimensionRequested?.Invoke(this, EventArgs.Empty), MenuIcons.Duplicate));
             menu.Items.Add(new Separator());
 
             // ④ Overlay creation submenu

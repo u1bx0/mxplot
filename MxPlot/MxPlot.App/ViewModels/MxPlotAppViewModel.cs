@@ -16,6 +16,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MxPlot.App.Views;
 
 namespace MxPlot.App.ViewModels
 {
@@ -457,12 +458,46 @@ namespace MxPlot.App.ViewModels
         }
 
         [RelayCommand]
-        private void CloseSelectedWindows()
+        private async Task CloseSelectedWindows()
         {
+            /*
             var selected = ManagedWindows.Where(m => m.IsSelected).ToList();
             foreach (var item in selected)
                 item.Window.Close();
+            */
             // OnManagedWindowClosed handles removal from the collection
+            var selected = ManagedWindows
+        .Where(m => m.IsSelected)
+        .ToList();
+
+            // 未保存チェック
+            var unsaved = selected
+                .OfType<MatrixPlotterListItemViewModel>()
+                .Where(vm => vm.HasUnsavedChanges)
+                .ToList();
+
+            if (unsaved.Count > 0)
+            {
+                var titles = unsaved
+                    .Select(vm => vm.FileName)
+                    .ToList();
+
+                // Use UnsavedChangesConfirmDialog
+                bool discard = await UnsavedChangesConfirmDialog.ShowAsync(
+                    DashboardWindow!,
+                    titles, "Close Anyway");
+
+                if (!discard)
+                    return; // Cancel → 何もしない
+
+                // Don't Save → 個別ダイアログを抑制してから Close
+                foreach (var item in selected)
+                    if (item.Window is MatrixPlotter p)
+                        p.SuppressCloseConfirmation = true;
+            }
+
+            foreach (var item in selected)
+                item.Window.Close();
         }
 
         /// <summary>

@@ -2,14 +2,13 @@
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
-using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
-using Avalonia.Controls.Shapes;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using MxPlot.Core;
 using MxPlot.Core.Imaging;
+using MxPlot.Core.Utils;
 using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
@@ -17,10 +16,10 @@ using MxPlot.UI.Avalonia.Plugins;
 using MxPlot.UI.Avalonia.ViewModels;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Diagnostics;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -30,51 +29,126 @@ namespace MxPlot.UI.Avalonia.Views
     /// </summary>
     public partial class MatrixPlotter : Window
     {
-        private readonly MxView _view;
-        private readonly LutSelector _lutSelector;
-        private readonly StackPanel _trackerPanel;
-        private readonly OrthogonalPanel _orthoPanel;
-        private readonly OrthogonalViewController _orthoController;
+        private MxView _view;
+        private LutSelector _lutSelector;
+        private StackPanel _trackerPanel;
+        private OrthogonalPanel _orthoPanel;
+        private OrthogonalViewController _orthoController;
 
         // For managing the ActiveIndexChanged subscription across MatrixData swaps
         private IMatrixData? _currentData;
         private EventHandler? _activeIndexHandler;
-        private bool _settingMatrixData; // re-entrancy guard for MainView.MatrixDataChanged → SetMatrixData
-        private readonly Dictionary<string, AxisTracker> _axisTrackers = [];
+
+        // ── LinkedSource: delegate UI features to a parent plotter ───────────
+
+        private MatrixPlotter? _linkedSource;
+
+        /// <summary>
+        /// When non-null, this plotter is a derived view (e.g. XY projection) of the source.
+        /// Export menus, overlay token resolution, and FrameCount checks delegate to the source
+        /// rather than to this plotter's own <see cref="_currentData"/>.
+        /// Set by the parent on window creation; cleared on parent or child close.
+        /// Subscribes to the parent's <see cref="Refreshed"/> event so that overlay analysis
+        /// (line profiles, region statistics, ROI value range) updates when the parent changes frame.
+        /// </summary>
+        public MatrixPlotter? LinkedSource
+        {
+            get => _linkedSource;
+            internal set
+            {
+                if (_linkedSource != null)
+                    _linkedSource.Refreshed -= OnLinkedSourceRefreshed;
+                _linkedSource = value;
+                if (_linkedSource != null)
+                    _linkedSource.Refreshed += OnLinkedSourceRefreshed;
+            }
+        }
+
+        private void OnLinkedSourceRefreshed(object? sender, EventArgs e)
+        {
+            // Skip: XYProjection windows receive their data update via UpdateProjectionData
+            // (called from OnXYProjectionChanged after the new projection is computed).
+            // Calling RefreshAllOverlayAnalysis here would run against the stale MatrixData
+            // instance that has already been replaced by the time this event fires.
+        }
+
+        /// <summary>
+        /// Updates the projection data displayed by this window without triggering a full
+        /// <see cref="SetMatrixData"/> re-initialization.  Intended for XY-projection child
+        /// windows whose <see cref="IMatrixData"/> instance changes on every parent frame
+        /// navigation but whose overlay state (line profiles, ROI, statistics) must survive.
+        /// Only updates <see cref="_view"/> and then refreshes all overlay analysis.
+        /// </summary>
+        internal void UpdateProjectionData(IMatrixData data)
+        {
+            _view.SetMatrixDataInternal(data);
+            RefreshAllOverlayAnalysis();
+        }
+
+        /// <summary>
+        /// Names of axes in <see cref="LinkedSource"/> that are "consumed" by this derived view
+        /// and therefore excluded from delegation (e.g. <c>"Z"</c> for XY projection).
+        /// Used by export hosts to name the excluded axis in <see cref="Plugins.IRenderHost.ExcludedAxisName"/>.
+        /// </summary>
+        public IReadOnlyList<string>? LinkedSourceExcludedAxes { get; internal set; }
+
+        /// <summary>
+        /// The effective data for UI decisions (Export menus, FrameCount, overlay tokens).
+        /// When <see cref="LinkedSource"/> is set, returns its current data instead of this plotter's own.
+        /// </summary>
+        private IMatrixData? EffectiveData => LinkedSource?._currentData ?? _currentData;
+        private Dictionary<string, AxisTracker> _axisTrackers = [];
+
+        /// <summary>
+        /// Closes the hamburger menu panel if it is currently open.
+        /// Used by sync groups to hide stale Scale tab displays when another window
+        /// changes scale settings.
+        /// </summary>
+        internal void CloseMenuPanelIfOpen()
+        {
+            if (_menuPanel?.IsVisible == true)
+                HideMenuPanel();
+        }
+
+        /// <summary>
+        /// <c>true</c> while the user is dragging an <see cref="AxisTracker"/> slider.
+        /// Used to update the drag overlay on index changes during the drag gesture.
+        /// </summary>
+        private bool _isDraggingAxisTracker;
+            
 
         // Status bar segments
-        private readonly TextBlock _dirtyBadge;   // "●" shown when view settings are modified
-        private readonly TextBlock _infoText;     // "[float]  11.9 GB"
-        private readonly TextBlock _virtualBadge; // "(Virtual)" → clickable, visible only when virtual
-        private readonly TextBlock _zoomText;     // "|  200% [Fit]"
-        private readonly TextBlock _noticeText;   // transient info (overlay dimensions, etc.)
-        private readonly TextBlock _progressSep;  // "|" separator before progress area
-        private readonly TextBlock _progressText; // "Saving… 3/100"
-        private readonly ProgressBar _progressBar;
+        private TextBlock _dirtyBadge;   // "●" shown when view settings are modified
+        private TextBlock _infoText;     // "[float]  11.9 GB"
+        private TextBlock _virtualBadge; // "(Virtual)" → clickable, visible only when virtual
+        private TextBlock _zoomText;     // "|  200% [Fit]"
+        private TextBlock _noticeText;   // transient info (overlay dimensions, etc.)
+        private TextBlock _progressSep;  // "|" separator before progress area
+        private TextBlock _progressText; // "Saving… 3/100"
+        private ProgressBar _progressBar;
         private Border? _inputBlocker;           // transparent hit-test blocker during blocking operations
         private Action? _inputBlockerCleanup;    // removes the OverlayLayer.PropertyChanged handler
         private CancellationTokenSource? _toastCts;
-        private readonly Border _contentBorder;  // wraps window content for sync border highlight
+        private Border _toastPanel;   // overlay toast container
+        private TextBlock _toastText; // overlay toast message
+        private Border _contentBorder;  // wraps window content for sync border highlight
 
         // One CacheMonitorWindow per MatrixPlotter
         private CacheMonitorWindow? _cacheMonitorWindow;
 
         // Value range bar + inline settings panel
-        private readonly ValueRangeBar _rangeBar;
-        private readonly Button _settingsBtn;
-        private readonly Border _settingsPanel;
+        private ValueRangeBar _rangeBar;
+        private Button _settingsBtn;
+        private Border _settingsPanel;
         private ToggleButton? _invertLutChk;
         private NumericUpDown? _levelNud;
-        private RadioButton? _autoRadio;
-        private RadioButton? _fixedRadio;
-        private RadioButton? _allRadio;           // multi-frame only
-        private RadioButton? _roiRadio;           // shown only when ROI overlay is designated
-        private PathIcon? _allWarningIcon;     // ⚠ shown when All range is imperfect
-        private bool _suppressModeSync;
+        private HistogramPlotControl? _histogramPlot;
+        private CancellationTokenSource? _histogramCts;  // Cancel pending histogram calculation
 
         // Hamburger menu panel (OverlayLayer — renders inside the window's Skia surface
         // so alpha transparency correctly shows the underlying view content)
         private Border? _menuPanel;
+        private Border? _zoomFlyout;
         private Button? _hamburgerBtn;
         private StackPanel? _scaleTabBody;  // info tab content, rebuilt on SetMatrixData()
         private ListBox? _metaKeyList;
@@ -85,27 +159,39 @@ namespace MxPlot.UI.Avalonia.Views
         private CancellationTokenSource? _metaLoadCts;
         private string? _metaRawValue;
         private string? _metaDisplayedValue; // text currently shown; used to detect edits
-        private bool _metaSwitchGuard;    // prevents re-entrant SelectionChanged during programmatic revert
         private string? _metaPreviousKey;    // last successfully loaded key; used for dirty-check on switch
+        //private bool _metaSwitchGuard;    // prevents re-entrant SelectionChanged during programmatic revert -> Changed to _reentrancy
 
         // Linked plotter support
-        private bool _isRefreshing;
         private readonly List<MatrixPlotter> _linkedChildren = [];
+
+        /// <summary>
+        /// Re-entrancy guard for <see cref="Refresh"/> and <see cref="RaiseRefreshed"/>.
+        /// Set to <c>true</c> for the duration of a refresh cycle to prevent overlapping
+        /// invocations from the UI thread (e.g. bidirectional link callbacks).
+        /// <para>
+        /// Declared <c>volatile</c> for cross-thread visibility. Background callers always
+        /// marshal via <see cref="Avalonia.Threading.Dispatcher.Post"/>, so no lock is needed.
+        /// In the unlikely event of a race, the worst outcome is a redundant redraw.
+        /// </para>
+        /// </summary>
+        private volatile bool _isRefreshing;
 
         // File session state
         [Flags]
         private enum DirtyFlags
         {
-            None    = 0,
-            Lut     = 1 << 0,
-            Vr      = 1 << 1,
-            Scale   = 1 << 2,
+            None = 0,
+            Lut = 1 << 0,
+            Vr = 1 << 1,
+            Scale = 1 << 2,
             Overlay = 1 << 3,
-            Data    = 1 << 4,
+            Data = 1 << 4,
         }
         private DirtyFlags _dirty;
-        private bool _suppressModified;  // true while RestoreViewSettings runs; prevents false dirty flags
-        private bool _initializingData;  // true during SetMatrixData; suppresses LUT/VR dirty signals
+        private bool _neverSaved;        // true when data has no SourcePath and has never been saved
+        private bool _isSecondaryWindow; // true for linked derivative views (MIP, projection, linked filter) — no independent save needed
+        //private bool _initializingData;  // true during SetMatrixData; suppresses LUT/VR dirty signals
 
         // SourcePath is owned by MatrixPlotterViewModel (MatrixData and SourcePath are a pair).
         // This property provides transparent read/write access without scattering null-checks.
@@ -142,6 +228,32 @@ namespace MxPlot.UI.Avalonia.Views
             double YMin, double YMax, string YUnit,
             AxisSnapshot[] Axes);
         private ScaleSnapshot? _scaleSnapshot;
+
+        // ── Scale precision (for Info tab display and edit comparison) ──────
+        private int _scaleValuePrecision = 5;
+        private int _scaleStepPrecision = 4;
+
+        /// <summary>
+        /// Precision (significant digits) for displaying and comparing Min/Max/Range values
+        /// in the Scale/Info tab. Default is 5 (equivalent to "G5").
+        /// Valid range is 1–15; out-of-range values are clamped automatically.
+        /// </summary>
+        public int ScaleValuePrecision
+        {
+            get => _scaleValuePrecision;
+            set => _scaleValuePrecision = Math.Clamp(value, 1, 15);
+        }
+
+        /// <summary>
+        /// Precision (significant digits) for displaying and comparing Step values
+        /// in the Scale/Info tab. Default is 4 (equivalent to "G4").
+        /// Valid range is 1–15; out-of-range values are clamped automatically.
+        /// </summary>
+        public int ScaleStepPrecision
+        {
+            get => _scaleStepPrecision;
+            set => _scaleStepPrecision = Math.Clamp(value, 1, 15);
+        }
 
         // Crop undo state (Replace mode only; single-level)
         private IMatrixData? _cropUndoData;
@@ -312,23 +424,20 @@ namespace MxPlot.UI.Avalonia.Views
         /// <param name="FilePattern">Save-dialog glob pattern, e.g. <c>"*.avi"</c>.</param>
         /// <param name="Exporter">
         /// Async delegate that writes the file.
-        /// Parameters: <c>(outputPath, frameRenderer, frameCount, width, height, fps)</c>.<br/>
-        /// <c>frameRenderer(frameIndex)</c> must be called on the UI thread and returns a
-        /// PNG-encoded <c>byte[]</c> for that frame (suitable for decoding with any standard
-        /// image library; width and height are passed separately for convenience).
+        /// Parameters: <c>(outputPath, parentWindow, renderHost, progress, cancellationToken)</c>.<br/>
+        /// The delegate is responsible for showing any settings dialog and iterating frames via
+        /// <see cref="Plugins.IRenderHost.RenderFrameAsync"/>.
         /// </param>
         /// <param name="RequiresStack">
         /// When <c>true</c> the menu item is shown only for stack data (<see cref="IMatrixData.FrameCount"/> &gt; 1).
         /// </param>
-        /// <param name="DefaultFps">Default frames-per-second passed to the exporter.</param>
         public sealed record ExportFormatDescriptor(
             string Label,
             string Hint,
             string FileTypeName,
             string FilePattern,
-            Func<string, Func<int, byte[]>, int, int, int, int, Task> Exporter,
-            bool RequiresStack = true,
-            int DefaultFps = 10);
+            Func<string, Window, Plugins.IRenderHost, IProgress<int>, CancellationToken, Task> Exporter,
+            bool RequiresStack = true);
 
         /// <summary>
         /// Additional export formats injected by the host application and shown under
@@ -339,9 +448,17 @@ namespace MxPlot.UI.Avalonia.Views
         public List<ExportFormatDescriptor> ExportFormats { get; } = [];
 
         /// <summary>
-        /// Whether the current state differs from what was last opened or saved.
+        /// Synchronizes render settings (LUT, depth, invert, value range, ComplexValueMode)
+        /// from the main view to orthogonal side views.
+        /// Called internally when a mode is changed via context menu on a side view.
         /// </summary>
-        public bool IsModified => _dirty != DirtyFlags.None;
+        internal void SyncOrthoRenderSettings() => _orthoController.SyncRenderSettings();
+
+        /// <summary>
+        /// Whether the current state differs from what was last opened or saved,
+        /// or the data has no associated file path yet (never saved).
+        /// </summary>
+        public bool IsModified => _dirty != DirtyFlags.None || (_neverSaved && !_isSecondaryWindow);
 
 
         /// <summary>
@@ -351,9 +468,24 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Whether closing this window should prompt a “Save changes?” dialog.
-        /// <c>true</c> when a source path is set and data has been modified since the last open/save.
+        /// <c>true</c> whenever <see cref="IsModified"/> is <c>true</c> (includes unsaved new data).
         /// </summary>
-        public bool ShouldConfirmClose => SourcePath != null && IsModified;
+        public bool IsSecondaryWindow
+        {
+            get => _isSecondaryWindow;
+            set
+            {
+                if (_isSecondaryWindow == value) return;
+                _isSecondaryWindow = value;
+                IsModifiedChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        /// <summary>
+        /// Whether closing this window should prompt a "Save changes?" dialog.
+        /// Always <c>false</c> for secondary windows (MIP projections, orthogonal views, linked filters).
+        /// </summary>
+        public bool ShouldConfirmClose => !_isSecondaryWindow && IsModified;
 
         /// <summary>
         /// When <c>true</c>, the close-confirmation dialog is skipped even if
@@ -386,7 +518,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void SetDirty(DirtyFlags flags, bool dirty)
         {
-            if (_suppressModified || _initializingData) return;
+            if (_reentrancy.IsActive(GuardContext.Initializing)) return;
             var before = _dirty;
             _dirty = dirty ? (_dirty | flags) : (_dirty & ~flags);
             if (_dirty != before)
@@ -399,22 +531,29 @@ namespace MxPlot.UI.Avalonia.Views
         private void ClearAllDirty()
         {
             var before = _dirty;
+            var neverSavedBefore = _neverSaved;
             _dirty = DirtyFlags.None;
-            if (_dirty != before)
+            _neverSaved = false;
+            if (_dirty != before || _neverSaved != neverSavedBefore)
                 IsModifiedChanged?.Invoke(this, EventArgs.Empty);
         }
 
         private void UpdateDirtyBadge()
         {
-            bool show = SourcePath != null && IsModified;
+            bool show = IsModified;
             _dirtyBadge.IsVisible = show;
             if (!show) return;
+            if (SourcePath == null)
+            {
+                ToolTip.SetTip(_dirtyBadge, "Unsaved: not yet saved to a file.");
+                return;
+            }
             var parts = new System.Text.StringBuilder("Unsaved changes:");
-            if (_dirty.HasFlag(DirtyFlags.Lut))     parts.Append("\n  \u2022 LUT / Color");
-            if (_dirty.HasFlag(DirtyFlags.Vr))      parts.Append("\n  \u2022 Value Range");
-            if (_dirty.HasFlag(DirtyFlags.Scale))   parts.Append("\n  \u2022 Scale / Axes");
+            if (_dirty.HasFlag(DirtyFlags.Lut)) parts.Append("\n  \u2022 LUT / Color");
+            if (_dirty.HasFlag(DirtyFlags.Vr)) parts.Append("\n  \u2022 Value Range");
+            if (_dirty.HasFlag(DirtyFlags.Scale)) parts.Append("\n  \u2022 Scale / Axes");
             if (_dirty.HasFlag(DirtyFlags.Overlay)) parts.Append("\n  \u2022 Overlays");
-            if (_dirty.HasFlag(DirtyFlags.Data))    parts.Append("\n  \u2022 Data / Metadata");
+            if (_dirty.HasFlag(DirtyFlags.Data)) parts.Append("\n  \u2022 Data / Metadata");
             ToolTip.SetTip(_dirtyBadge, parts.ToString());
         }
 
@@ -469,7 +608,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void UpdateLutVrRevertButton()
         {
-            if (_suppressModified || _initializingData) return;
+            if (_reentrancy.IsActive(GuardContext.Initializing)) return;
             if (_lutVrRevertBtn != null)
                 _lutVrRevertBtn.IsVisible = (_dirty & (DirtyFlags.Lut | DirtyFlags.Vr)) != 0 && _lutVrSnapshot != null;
         }
@@ -478,7 +617,7 @@ namespace MxPlot.UI.Avalonia.Views
         internal void SetScaleDirty(bool dirty)
         {
             SetDirty(DirtyFlags.Scale, dirty);
-            if (!_suppressModified && !_initializingData)
+            if (!_reentrancy.IsActive(GuardContext.Initializing))
                 UpdateScaleRevertButton();
         }
 
@@ -532,95 +671,83 @@ namespace MxPlot.UI.Avalonia.Views
             var snap = _lutVrSnapshot;
             if (snap == null || _currentData == null) return;
 
-            _suppressModified = true;
-            try
+            using var _ini  = _reentrancy.Begin(GuardContext.Initializing);
+            // LUT
+            if (!string.IsNullOrEmpty(snap.LutName))
             {
-                // LUT
-                if (!string.IsNullOrEmpty(snap.LutName))
+                try
                 {
-                    try
-                    {
-                        var lut = ColorThemes.Get(snap.LutName);
-                        _view.Lut = lut;
-                        _lutSelector.SelectLut(lut);
-                        Icon = _lutSelector.SelectedIcon;
-                        if (DataContext is ViewModels.MatrixPlotterViewModel vm) vm.Lut = lut;
-                    }
-                    catch { }
+                    var lut = ColorThemes.Get(snap.LutName);
+                    _view.Lut = lut;
+                    _lutSelector.SelectLut(lut);
+                    Icon = _lutSelector.SelectedIcon;
+                    if (DataContext is ViewModels.MatrixPlotterViewModel vm) vm.Lut = lut;
                 }
-                if (_view.LutDepth != snap.LutLevel)
-                {
-                    _view.LutDepth = snap.LutLevel;
-                    if (_levelNud != null) _levelNud.Value = snap.LutLevel;
-                }
-                if (_view.IsInvertedColor != snap.Inverted)
-                {
-                    _view.IsInvertedColor = snap.Inverted;
-                    if (_invertLutChk != null) _invertLutChk.IsChecked = snap.Inverted;
-                }
+                catch { }
+            }
+            if (_view.LutDepth != snap.LutLevel)
+            {
+                _view.LutDepth = snap.LutLevel;
+                if (_levelNud != null) _levelNud.Value = snap.LutLevel;
+            }
+            if (_view.IsInvertedColor != snap.Inverted)
+            {
+                _view.IsInvertedColor = snap.Inverted;
+                if (_invertLutChk != null) _invertLutChk.IsChecked = snap.Inverted;
+            }
 
-                // VR
-                if (snap.VrMode == ValueRangeMode.Fixed && !double.IsNaN(snap.VrMin))
-                {
-                    _view.IsFixedRange = true;
-                    _rangeBar.SetMode(true);
-                    _rangeBar.SetRange(snap.VrMin, snap.VrMax);
-                    // Re-assign after SetMode/SetRange to override any ModeChanged side-effects.
-                    _view.FixedMin = snap.VrMin;
-                    _view.FixedMax = snap.VrMax;
-                    _suppressModeSync = true;
-                    if (_autoRadio != null) _autoRadio.IsChecked = false;
-                    if (_fixedRadio != null) _fixedRadio.IsChecked = true;
-                    _suppressModeSync = false;
-                }
-                else
-                {
-                    _rangeBar.SetMode(snap.VrMode);
-                }
-                        _orthoController.SyncRenderSettings();
-                        SaveViewSettings();
-                    }
-                    finally { _suppressModified = false; }
+            // VR
+            if (snap.VrMode == ValueRangeMode.Fixed && !double.IsNaN(snap.VrMin))
+            {
+                _view.IsFixedRange = true;
+                _rangeBar.SetMode(true);
+                _rangeBar.SetRange(snap.VrMin, snap.VrMax);
+                // Re-assign after SetMode/SetRange to override any ModeChanged side-effects.
+                _view.FixedMin = snap.VrMin;
+                _view.FixedMax = snap.VrMax;
+            }
+            else
+            {
+                _rangeBar.SetMode(snap.VrMode);
+            }
+            _orthoController.SyncRenderSettings();
+            SaveViewSettings();
 
-                    SetDirty(DirtyFlags.Lut, false);
-                    SetDirty(DirtyFlags.Vr, false);
-                    if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
-                }
+            SetDirty(DirtyFlags.Lut, false);
+            SetDirty(DirtyFlags.Vr, false);
+            if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
+        }
 
         private void RevertScale()
         {
             var snap = _scaleSnapshot;
             if (snap == null || _currentData == null) return;
 
-            _suppressModified = true;
-            try
+            using var _ = _reentrancy.Begin(GuardContext.Initializing);
+            _currentData.XMin = snap.XMin;
+            _currentData.XMax = snap.XMax;
+            _currentData.XUnit = snap.XUnit;
+            _currentData.YMin = snap.YMin;
+            _currentData.YMax = snap.YMax;
+            _currentData.YUnit = snap.YUnit;
+
+            var axes = _currentData.Axes;
+            for (int i = 0; i < snap.Axes.Length && i < axes.Count; i++)
             {
-                _currentData.XMin = snap.XMin;
-                _currentData.XMax = snap.XMax;
-                _currentData.XUnit = snap.XUnit;
-                _currentData.YMin = snap.YMin;
-                _currentData.YMax = snap.YMax;
-                _currentData.YUnit = snap.YUnit;
+                axes[i].Min = snap.Axes[i].Min;
+                axes[i].Max = snap.Axes[i].Max;
+                axes[i].Unit = snap.Axes[i].Unit;
+                axes[i].Name = snap.Axes[i].Name;
+            }
 
-                var axes = _currentData.Axes;
-                for (int i = 0; i < snap.Axes.Length && i < axes.Count; i++)
-                {
-                    axes[i].Min = snap.Axes[i].Min;
-                    axes[i].Max = snap.Axes[i].Max;
-                    axes[i].Unit = snap.Axes[i].Unit;
-                    axes[i].Name = snap.Axes[i].Name;
-                }
+            if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
+            _orthoController.RefreshCrosshairAndSlices();
+            SaveViewSettings();
+            RefreshInfoTab(); // rebuilds grid with restored values
 
-                if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
-                _orthoController.RefreshCrosshairAndSlices();
-                        SaveViewSettings();
-                        RefreshInfoTab(); // rebuilds grid with restored values
-                    }
-                    finally { _suppressModified = false; }
-
-                    SetDirty(DirtyFlags.Scale, false);
-                    UpdateScaleRevertButton();
-                }
+            SetDirty(DirtyFlags.Scale, false);
+            UpdateScaleRevertButton();
+        }
 
         /// <summary>
         /// Creates a thumbnail-sized snapshot of the currently rendered view.
@@ -659,41 +786,67 @@ namespace MxPlot.UI.Avalonia.Views
         /// and redraws all views. Safe to call from any thread.
         /// Fires <see cref="Refreshed"/> after completion (with re-entrancy guard to prevent
         /// infinite loops in bidirectional link scenarios).
+        /// <para>
+        /// When <paramref name="rebuildOrthogonalData"/> is <c>true</c>, forces orthogonal
+        /// views to rebuild their slice/projection data from the current MainView data
+        /// before refreshing bitmaps. Use this after directly modifying frame pixel values
+        /// (e.g., via <c>GetArray()</c>) to ensure side views reflect the updated data.
+        /// </para>
+        /// <para>
+        /// <b>Note:</b> <see cref="RefreshSlices"/> already updates side view bitmaps
+        /// internally via <see cref="MxView.SetMatrixDataInternal"/>, so we only need
+        /// to call <see cref="MxView.InvalidateSurface"/> (redraw) instead of
+        /// <see cref="MxView.Refresh"/> (rebuild + redraw) to avoid redundant work.
+        /// </para>
         /// </summary>
-        public void Refresh()
+        /// <param name="rebuildOrthogonalData">
+        /// Whether to rebuild orthogonal slice/projection data before refreshing bitmaps.
+        /// Default is <c>false</c> (only redraws existing bitmaps using current LUT/VR).
+        /// </param>
+        public void Refresh(bool rebuildOrthogonalData = false)
         {
             if (_isRefreshing) return;
 
-            if (Dispatcher.UIThread.CheckAccess())
+            void DoRefresh()
             {
+                if (_isRefreshing) return;
                 _isRefreshing = true;
                 try
                 {
                     _view.Refresh();
-                    _orthoPanel.RightView.Refresh();
-                    _orthoPanel.BottomView.Refresh();
+
+                    if (rebuildOrthogonalData && (_orthoPanel.ShowBottom || _orthoPanel.ShowRight))
+                    {
+                        // RefreshSlices internally calls SetMatrixDataInternal which triggers
+                        // bitmap rebuild. Subsequent InvalidateSurface() only redraws.
+                        _orthoController.RefreshSlices();
+                    }
+
+                    if (_orthoPanel.ShowBottom)
+                    {
+                        if (rebuildOrthogonalData)
+                            _orthoPanel.BottomView.InvalidateSurface();
+                        else
+                            _orthoPanel.BottomView.Refresh();
+                    }
+                    if (_orthoPanel.ShowRight)
+                    {
+                        if (rebuildOrthogonalData)
+                            _orthoPanel.RightView.InvalidateSurface();
+                        else
+                            _orthoPanel.RightView.Refresh();
+                    }
+
                     RefreshAllOverlayAnalysis();
                     Refreshed?.Invoke(this, EventArgs.Empty);
                 }
                 finally { _isRefreshing = false; }
             }
+
+            if (Dispatcher.UIThread.CheckAccess())
+                DoRefresh();
             else
-            {
-                Dispatcher.UIThread.Post(() =>
-                {
-                    if (_isRefreshing) return;
-                    _isRefreshing = true;
-                    try
-                    {
-                        _view.Refresh();
-                        _orthoPanel.RightView.Refresh();
-                        _orthoPanel.BottomView.Refresh();
-                        RefreshAllOverlayAnalysis();
-                        Refreshed?.Invoke(this, EventArgs.Empty);
-                    }
-                    finally { _isRefreshing = false; }
-                });
-            }
+                Dispatcher.UIThread.Post(DoRefresh);
         }
 
         /// <summary>
@@ -733,17 +886,25 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Creates a <see cref="MatrixPlotter"/> for <paramref name="data"/> and links it to this
-        /// plotter via <see cref="LinkRefresh"/>. The caller is responsible for calling
-        /// <see cref="Window.Show"/>.
+        /// Creates a secondary <see cref="MatrixPlotter"/> for <paramref name="data"/>, registers it
+        /// as a dashboard child of this plotter, and marks it as secondary (no save confirmation on close).
+        /// When <paramref name="linkRefresh"/> is <c>true</c> (default), establishes a bidirectional
+        /// <see cref="Refresh"/> link so that refreshing either window propagates to the other —
+        /// use this when both windows share the same underlying <c>T[]</c> frame data.
+        /// Set <paramref name="linkRefresh"/> to <c>false</c> when the child manages its own update
+        /// logic (e.g. filter sync windows that recompute on demand).
+        /// The caller is responsible for calling <see cref="Window.Show"/>.
         /// </summary>
         public MatrixPlotter CreateLinked(
             IMatrixData data,
             LookupTable? lut = null,
-            string? title = null)
+            string? title = null,
+            bool linkRefresh = true)
         {
             var child = Create(data, lut ?? _view.Lut, title);
-            LinkRefresh(child);
+            child.IsSecondaryWindow = true;
+            PlotWindowNotifier.SetParentLink(child, this);
+            if (linkRefresh) LinkRefresh(child);
             return child;
         }
 
@@ -756,734 +917,6 @@ namespace MxPlot.UI.Avalonia.Views
                 UnlinkRefresh(child);
         }
 
-        // ── Constructor ───────────────────────────────────────────────────────
-
-        /// <summary>
-        /// Initializes a <see cref="MatrixPlotter"/> with no data loaded.
-        /// <para>
-        /// This constructor is the MVVM-friendly entry point: set <see cref="Window.DataContext"/>
-        /// to a <see cref="MatrixPlotterViewModel"/> instance to load data and configure the view.
-        /// </para>
-        /// <para>
-        /// For most use cases, prefer the static <see cref="Create"/> factory method, which
-        /// constructs the ViewModel and registers the window with <see cref="PlotWindowNotifier"/>
-        /// in one call. Use this constructor directly when:
-        /// <list type="bullet">
-        ///   <item>You manage the <see cref="MatrixPlotterViewModel"/> lifecycle externally
-        ///         (e.g. DI container, XAML binding).</item>
-        ///   <item>You are embedding <see cref="MatrixPlotter"/> in a custom application shell
-        ///         that handles window registration independently.</item>
-        ///   <item>You want to show the window before data is available and set
-        ///         <see cref="Window.DataContext"/> later.</item>
-        /// </list>
-        /// </para>
-        /// </summary>
-        /// <example>
-        /// <code>
-        /// // MVVM / DI pattern
-        /// var plotter = new MatrixPlotter { DataContext = myViewModel };
-        /// plotter.Show();
-        /// </code>
-        /// </example>
-        public MatrixPlotter()
-        {
-            Width = 420;
-            Height = 480;
-
-            _orthoPanel = new OrthogonalPanel();
-            _view = _orthoPanel.MainView;
-            _view.EnableBuiltInContextMenu = true;
-            _view.MatrixDataChanged += (_, data) =>
-            {
-                if (_settingMatrixData) return; // already inside SetMatrixData — skip
-                SetMatrixData(data);
-            };
-            _view.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
-            _view.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
-            _view.OverlayManager.GhostUpdated += (_, g) => _view.OverlayInfoText = g.GetInfo(_view.MatrixData);
-            _view.OverlayManager.GhostCancelled += (_, _) => _view.OverlayInfoText = null;
-            _orthoPanel.BottomView.EnableBuiltInContextMenu = true;
-            _orthoPanel.BottomView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
-            _orthoPanel.BottomView.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
-            _orthoPanel.BottomView.OverlayManager.GhostUpdated += (_, g) => _orthoPanel.BottomView.OverlayInfoText = g.GetInfo(_orthoPanel.BottomView.MatrixData);
-            _orthoPanel.BottomView.OverlayManager.GhostCancelled += (_, _) => _orthoPanel.BottomView.OverlayInfoText = null;
-            _orthoPanel.RightView.EnableBuiltInContextMenu = true;
-            _orthoPanel.RightView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
-            _orthoPanel.RightView.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
-            _orthoPanel.RightView.OverlayManager.GhostUpdated += (_, g) => _orthoPanel.RightView.OverlayInfoText = g.GetInfo(_orthoPanel.RightView.MatrixData);
-            _orthoPanel.RightView.OverlayManager.GhostCancelled += (_, _) => _orthoPanel.RightView.OverlayInfoText = null;
-            _view.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _view.CropRequested += (_, _) => InvokeCropAction();
-            _view.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_view);
-            _orthoPanel.BottomView.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _orthoPanel.BottomView.CropRequested += (_, _) => InvokeCropAction();
-            _orthoPanel.BottomView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.BottomView);
-            _orthoPanel.RightView.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _orthoPanel.RightView.CropRequested += (_, _) => InvokeCropAction();
-            _orthoPanel.RightView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.RightView);
-            _orthoController = new OrthogonalViewController(_orthoPanel);
-            _orthoController.XYProjectionChanged += OnXYProjectionChanged;
-            _lutSelector = new LutSelector
-            {
-                CompactMode = true,
-                ComboWidth = 97,
-            };
-
-            _trackerPanel = new StackPanel
-            {
-                Orientation = Orientation.Vertical,
-                IsVisible = false,
-                Margin = new Thickness(0, 1, 0, 1)
-            };
-
-            _lutSelector.SelectedLutChanged += (_, lut) =>
-            {
-                if (lut == null) return;
-                _view.Lut = lut;
-                _orthoController.SyncRenderSettings();
-                if (DataContext is MatrixPlotterViewModel vm)
-                    vm.Lut = lut;
-                // Update window icon to match selected LUT gradient
-                Icon = _lutSelector.SelectedIcon;
-                SaveViewSettings();
-                // If the selected LUT matches the snapshot, the state is clean — not dirty.
-                // This also suppresses Avalonia's deferred SelectionChanged re-fire on
-                // TemplateApplied (when the window is first shown), which would otherwise
-                // produce a false-positive revert button for non-default LUTs like BSMod.
-                // LUT name changed: check full LUT consistency (name + level + invert) against snapshot.
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && string.Equals(lut.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted;
-                SetLutDirty(!lutMatchesSnapshot);
-                if (!_syncApplying) SyncLutChanged?.Invoke(this, lut);
-            };
-
-            _dirtyBadge = new TextBlock
-            {
-                Text = "*",
-                FontSize = 14,
-                FontWeight = FontWeight.Bold,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = new SolidColorBrush(Color.FromRgb(180, 160, 60)),
-                Margin = new Thickness(4, 0, 0, 0),
-                IsVisible = false,
-            };
-
-            _infoText = new TextBlock
-            {
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(6, 0, 2, 0),
-            };
-            _virtualBadge = new TextBlock
-            {
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Brushes.DodgerBlue,
-                Cursor = new Cursor(StandardCursorType.Hand),
-                Margin = new Thickness(2, 0),
-                IsVisible = false,
-            };
-            _virtualBadge.PointerPressed += (_, _) => OpenOrActivateCacheMonitor();
-            _zoomText = new TextBlock
-            {
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(2, 0, 6, 0),
-                Cursor = new Cursor(StandardCursorType.Hand),
-            };
-            _zoomText.PointerPressed += async (_, e) =>
-            {
-                e.Handled = true;
-                var dlg = new ZoomDialog(_view.Zoom);
-                await dlg.ShowDialog(this);
-                if (dlg.Result.HasValue)
-                    _view.SetZoom(dlg.Result.Value);
-            };
-            _progressSep = new TextBlock
-            {
-                Text = "|",
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Brushes.Gray,
-                Margin = new Thickness(2, 0),
-                IsVisible = false,
-            };
-            _noticeText = new TextBlock
-            {
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(4, 0, 2, 0),
-                Opacity = 0.7,
-                IsVisible = false,
-            };
-            _progressText = new TextBlock
-            {
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(4, 0, 4, 0),
-                IsVisible = false,
-            };
-            _progressBar = new ProgressBar
-            {
-                Width = 100,
-                Height = 4,
-                MinHeight = 0,
-                Minimum = 0,
-                Maximum = 100,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 6, 0),
-                IsVisible = false,
-            };
-
-            var statusPanel = new StackPanel { Orientation = Orientation.Horizontal };
-            statusPanel.Children.Add(_dirtyBadge);
-            statusPanel.Children.Add(_infoText);
-            statusPanel.Children.Add(_virtualBadge);
-            statusPanel.Children.Add(_zoomText);
-            statusPanel.Children.Add(_noticeText);
-            statusPanel.Children.Add(_progressSep);
-            statusPanel.Children.Add(_progressBar);
-            statusPanel.Children.Add(_progressText);
-
-            var statusBar = new Border
-            {
-                Child = statusPanel,
-                BorderBrush = Brushes.Gray,
-                BorderThickness = new Thickness(0, 1, 0, 0),
-                Padding = new Thickness(0, 2),
-            };
-
-            _view.ScrollStateChanged += (_, _) => UpdateStatusBar();
-
-            // ── Value range bar ────────────────────────────────────────────
-            _rangeBar = new ValueRangeBar();
-            _settingsBtn = new Button
-            {
-                Content = "▾",
-                Width = 22,
-                Height = 20,
-                MinHeight = 20,
-                FontSize = 18,
-                Padding = new Thickness(0),
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                VerticalContentAlignment = VerticalAlignment.Center,
-                Background = Brushes.Transparent,
-                Margin = new Thickness(4, 0),
-            };
-
-            // ── Inline settings panel (toggled by ? button) ──────────────────────
-            _levelNud = new NumericUpDown
-            {
-                Minimum = 2,
-                Maximum = 4096,
-                Value = 256,
-                Increment = 1,
-                Width = 60,
-                Height = 20,
-                MinHeight = 0,
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                VerticalContentAlignment = VerticalAlignment.Center,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Padding = new Thickness(4, 0),
-            };
-            _levelNud.Classes.Add("compact");
-            _invertLutChk = new ToggleButton
-            {
-                // ◑ half-filled circle: circle outline (Stroke) + right semicircle (Fill).
-                // PathIcon supports only Fill, so two overlaid Path elements are used.
-                Content = new PathIcon
-                {
-                    Data = Geometry.Parse(
-                        "F1 " + // FillRule = NonZero
-                        "M 8,1 A 7,7 0 0,1 8,15 A 7,7 0 0,1 8,1 Z " + // 外側の完全な円 (時計回り)
-                        "M 8,2 A 6,6 0 0,0 8,14 L 8,2 Z"),            // 内側の左半円をくり抜く (反時計回り)
-                    Width = 14,
-                    Height = 14,
-                },
-                VerticalAlignment = VerticalAlignment.Center,
-                VerticalContentAlignment = VerticalAlignment.Center,
-                MinHeight = 0,
-                Height = 20,
-                Margin = new Thickness(2, 0, 0, 0),
-                Padding = new Thickness(5, 0),
-            };
-            ToolTip.SetTip(_invertLutChk, "Invert LUT");
-
-            _fixedRadio = new RadioButton
-            {
-                Content = "Fixed",
-                GroupName = "VRMode",
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                MinHeight = 0,
-                Height = 20,
-            };
-            _fixedRadio.Classes.Add("compact");
-            ToolTip.SetTip(_fixedRadio, "Fixed: user-specified numeric min/max");
-            _autoRadio = new RadioButton
-            {
-                Content = "Auto",
-                GroupName = "VRMode",
-                IsChecked = true,
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-                MinHeight = 0,
-                Height = 20,
-            };
-            _autoRadio.Classes.Add("compact");
-            ToolTip.SetTip(_autoRadio, "Current frame min/max (automatic)");
-
-            // ⚠ warning icon: filled triangle (CW) with ! cutouts (CCW) — NonZero winding cancels fill inside !
-            _allWarningIcon = new PathIcon
-            {
-                Data = Geometry.Parse(
-                    "M 7,0 L 14,12 L 0,12 Z " +
-                    "M 6.3,3.5 L 6.3,8 L 7.7,8 L 7.7,3.5 Z " +
-                    "M 6.3,9.5 L 6.3,11 L 7.7,11 L 7.7,9.5 Z"),
-                Foreground = new SolidColorBrush(Color.FromRgb(255, 190, 0)),
-                Width = 10,
-                Height = 10,
-                IsVisible = false,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(2, 0, 0, 0),
-            };
-            var allLabel = new StackPanel { Orientation = Orientation.Horizontal };
-            allLabel.Children.Add(new TextBlock
-            {
-                Text = "All",
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-            });
-            allLabel.Children.Add(_allWarningIcon);
-            _allRadio = new RadioButton
-            {
-                Content = allLabel,
-                GroupName = "VRMode",
-                VerticalAlignment = VerticalAlignment.Center,
-                MinHeight = 0,
-                Height = 20,
-                IsVisible = false, // shown only in multi-frame mode
-            };
-            _allRadio.Classes.Add("compact");
-            ToolTip.SetTip(_allRadio, "Global min/max across all frames");
-
-            _roiRadio = new RadioButton
-            {
-                Content = "ROI",
-                GroupName = "VRMode",
-                VerticalAlignment = VerticalAlignment.Center,
-                MinHeight = 0,
-                Height = 20,
-                IsVisible = false, // shown only when an ROI overlay is designated
-            };
-            _roiRadio.Classes.Add("compact");
-            ToolTip.SetTip(_roiRadio, "Value range from designated ROI overlay");
-
-
-            var settingsRow = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 4,
-                Margin = new Thickness(30, 2, 10, 2),
-            };
-
-            settingsRow.Children.Add(new TextBlock { Text = "Level:", FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
-            settingsRow.Children.Add(_levelNud);
-            //settingsRow.Children.Add(new Border { Width = 1, Background = Brushes.Gray, Margin = new Thickness(5, 3) });
-            settingsRow.Children.Add(_invertLutChk);
-            settingsRow.Children.Add(new Border { Width = 1, Background = Brushes.Gray, Margin = new Thickness(5, 3) });
-            settingsRow.Children.Add(new TextBlock { Text = "Value range:", FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
-            settingsRow.Children.Add(_fixedRadio);
-            settingsRow.Children.Add(_autoRadio);
-            settingsRow.Children.Add(_allRadio);
-            settingsRow.Children.Add(_roiRadio);
-
-            _settingsPanel = new Border
-            {
-                Child = settingsRow,
-                BorderBrush = Brushes.Gray,
-                BorderThickness = new Thickness(0, 0, 0, 1),
-                IsVisible = false,
-            };
-
-            // ── Wire settings events ──────────────────────────────────────────────
-            _settingsBtn.Click += (_, _) =>
-            {
-                bool opening = !_settingsPanel.IsVisible;
-                double panelH = _settingsPanel.Bounds.Height; // capture before toggle (valid only while visible)
-
-                _settingsPanel.IsVisible = opening;
-                _settingsBtn.Content = opening ? "▴" : "▾";
-                _settingsBtn.Background = opening ? Brushes.LightGray : Brushes.Transparent;
-
-                if (WindowState == WindowState.Maximized) return;
-
-                if (!opening && panelH > 0)
-                {
-                    // Closing: shrink immediately ? Bounds is still valid before hide
-                    Height -= panelH;
-                }
-                else if (opening)
-                {
-                    // Opening: defer until after layout so Bounds is populated
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                        double h = _settingsPanel.Bounds.Height;
-                        if (h > 0) Height += h;
-                    }, DispatcherPriority.Background);
-                }
-            };
-
-            _levelNud.ValueChanged += (_, _) =>
-            {
-                _view.LutDepth = (int)(_levelNud.Value ?? 256);
-                _orthoController.SyncRenderSettings();
-                SaveViewSettings();
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel
-                    && string.Equals(_view.Lut?.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted;
-                SetLutDirty(!lutMatchesSnapshot);
-                if (!_syncApplying) SyncLutDepthChanged?.Invoke(this, _view.LutDepth);
-            };
-
-            _invertLutChk.IsCheckedChanged += (_, _) =>
-            {
-                _view.IsInvertedColor = _invertLutChk.IsChecked == true;
-                _orthoController.SyncRenderSettings();
-                SaveViewSettings();
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted
-                    && string.Equals(_view.Lut?.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel;
-                SetLutDirty(!lutMatchesSnapshot);
-                if (!_syncApplying) SyncInvertedChanged?.Invoke(this, _view.IsInvertedColor);
-            };
-
-            _autoRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_suppressModeSync || _autoRadio.IsChecked != true) return;
-                _suppressModeSync = true;
-                _rangeBar.SetMode(ValueRangeMode.Current);
-                _suppressModeSync = false;
-            };
-            _fixedRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_suppressModeSync || _fixedRadio.IsChecked != true) return;
-                _suppressModeSync = true;
-                _rangeBar.SetMode(ValueRangeMode.Fixed);
-                _suppressModeSync = false;
-            };
-            _allRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_suppressModeSync || _allRadio.IsChecked != true) return;
-                _suppressModeSync = true;
-                _rangeBar.SetMode(ValueRangeMode.All);
-                _suppressModeSync = false;
-            };
-            _roiRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_suppressModeSync || _roiRadio.IsChecked != true) return;
-                _suppressModeSync = true;
-                _rangeBar.SetMode(ValueRangeMode.Roi);
-                _suppressModeSync = false;
-            };
-
-            // ── Wire range bar ⇔ view events ────────────────────────────────────
-            _view.AutoRangeComputed += (_, args) =>
-            {
-                if (_rangeBar.Mode == ValueRangeMode.Current)
-                    _rangeBar.SetRange(args.Min, args.Max);
-            };
-
-            _rangeBar.ModeChanged += (_, mode) =>
-            {
-                _view.IsFixedRange = mode != ValueRangeMode.Current;
-                if (mode == ValueRangeMode.Fixed)
-                {
-                    // Use whatever the bar currently shows — works for both Current→Fixed and All→Fixed.
-                    // Falls back to a live scan only if the bar has never received a range yet.
-                    if (!double.IsNaN(_rangeBar.DisplayedMinValue))
-                    {
-                        _view.FixedMin = _rangeBar.DisplayedMinValue;
-                        _view.FixedMax = _rangeBar.DisplayedMaxValue;
-                    }
-                    else
-                    {
-                        var (min, max) = _view.ScanCurrentFrameRange();
-                        _rangeBar.SetRange(min, max);
-                        _view.FixedMin = min;
-                        _view.FixedMax = max;
-                    }
-                }
-                else if (mode == ValueRangeMode.All)
-                {
-                    ApplyAllModeRange();
-                }
-                else if (mode == ValueRangeMode.Roi)
-                {
-                    // Range is applied by RefreshRoiValueRange(); just sync view state here.
-                    _view.IsFixedRange = true;
-                    RefreshRoiValueRange();
-                }
-                else // Current
-                {
-                    var (min, max) = _view.ScanCurrentFrameRange();
-                    _rangeBar.SetRange(min, max);
-                }
-                if (!_suppressModeSync)
-                {
-                    _suppressModeSync = true;
-                    if (_autoRadio != null) _autoRadio.IsChecked = mode == ValueRangeMode.Current;
-                    if (_fixedRadio != null) _fixedRadio.IsChecked = mode == ValueRangeMode.Fixed;
-                    if (_allRadio != null) _allRadio.IsChecked = mode == ValueRangeMode.All;
-                    if (_roiRadio != null) _roiRadio.IsChecked = mode == ValueRangeMode.Roi;
-                    _suppressModeSync = false;
-                }
-                _orthoController.SyncRenderSettings();
-                SaveViewSettings();
-                bool vrMatchesSnapshot = _lutVrSnapshot != null
-                    && mode == _lutVrSnapshot.VrMode
-                    && (mode != ValueRangeMode.Fixed
-                        || (_view.FixedMin == _lutVrSnapshot.VrMin && _view.FixedMax == _lutVrSnapshot.VrMax));
-                SetVrDirty(!vrMatchesSnapshot);
-                if (!_syncApplying) SyncRangeModeChanged?.Invoke(this, mode);
-                // When switching to Fixed the min/max are resolved inside the Fixed branch
-                // above but RangeChanged is never fired (SetRange suppresses it via _updating).
-                // Explicitly propagate the resolved values so sync targets receive them.
-                if (!_syncApplying && mode == ValueRangeMode.Fixed)
-                    SyncFixedRangeChanged?.Invoke(this, (_view.FixedMin, _view.FixedMax));
-            };
-
-            _rangeBar.RangeChanged += (_, args) =>
-            {
-                _view.FixedMin = args.Min;
-                _view.FixedMax = args.Max;
-                _orthoController.SyncRenderSettings();
-                SaveViewSettings();
-                bool vrMatchesSnapshot = _lutVrSnapshot != null
-                    && _lutVrSnapshot.VrMode == ValueRangeMode.Fixed
-                    && _view.FixedMin == _lutVrSnapshot.VrMin
-                    && _view.FixedMax == _lutVrSnapshot.VrMax;
-                SetVrDirty(!vrMatchesSnapshot);
-                if (!_syncApplying) SyncFixedRangeChanged?.Invoke(this, (args.Min, args.Max));
-            };
-
-            _rangeBar.SearchMinRequested += (_, _) =>
-            {
-                var (min, _) = _view.ScanCurrentFrameRange();
-                _view.FixedMin = min;
-                _rangeBar.SetRange(min, _view.FixedMax);
-                _orthoController.SyncRenderSettings();
-            };
-
-            _rangeBar.SearchMaxRequested += (_, _) =>
-            {
-                var (_, max) = _view.ScanCurrentFrameRange();
-                _view.FixedMax = max;
-                _rangeBar.SetRange(_view.FixedMin, max);
-                _orthoController.SyncRenderSettings();
-            };
-
-            // Layout: [☰][LutSelector][ValueRangeBar ・・・・・・・・・・・][▾] on one compact top row
-            _hamburgerBtn = new Button
-            {
-                Content = "☰",
-                Width = 26,
-                Height = 20,
-                FontSize = 14,
-                Padding = new Thickness(0),
-                Background = Brushes.Transparent,
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(2, 0, 0, 0),
-            };
-            // Wire window-level light-dismiss once: closes the menu when the user clicks
-            // anywhere inside MatrixPlotter that is outside the overlay panel.
-            AddHandler(InputElement.PointerPressedEvent,
-                       OnMenuLightDismiss, RoutingStrategies.Bubble, handledEventsToo: true);
-
-            _hamburgerBtn.Click += (_, _) =>
-            {
-                if (_menuPanel == null)
-                    _menuPanel = BuildMenuPanel();
-                if (_menuPanel.IsVisible) HideMenuPanel();
-                else ShowMenuPanel();
-            };
-
-            _lutVrRevertBtn = new Button
-            {
-                Content = new PathIcon
-                {
-                    Data = MenuIcons.Undo,
-                    Width = 12,
-                    Height = 12,
-                    Foreground = MenuIcons.DefaultBrush(MenuIcons.Undo),
-                },
-                Width = 20,
-                Height = 20,
-                Padding = new Thickness(0),
-                Background = Brushes.Transparent,
-                VerticalAlignment = VerticalAlignment.Center,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(1, 0),
-                IsVisible = false,
-            };
-            ToolTip.SetTip(_lutVrRevertBtn, "Revert LUT / Value Range to initial settings");
-            _lutVrRevertBtn.Click += (_, _) => RevertLutVr();
-
-            var topRow = new DockPanel { LastChildFill = true };
-            DockPanel.SetDock(_settingsBtn, Dock.Right);
-            DockPanel.SetDock(_lutVrRevertBtn, Dock.Right);
-            DockPanel.SetDock(_hamburgerBtn, Dock.Left);
-            DockPanel.SetDock(_lutSelector, Dock.Left);
-            topRow.Children.Add(_settingsBtn);
-            topRow.Children.Add(_lutVrRevertBtn);
-            topRow.Children.Add(_hamburgerBtn);
-            topRow.Children.Add(_lutSelector);
-            topRow.Children.Add(_rangeBar);
-
-            // Shrink LUT ComboBox first; only after it reaches 0 does ValueRangeBar compress.
-            // fixedW  = hamburger(26) + settings(22) + small buffer
-            // labelW  = "LUT:" label + spacing + panel margins ≈ 42 px
-            // rangeMin = ValueRangeBar minimum (min/max boxes both at MinBoxWidth=36)
-            topRow.SizeChanged += (_, e) =>
-            {
-                const double fixedW = 26 + 22 + 22 + 4; // hamburger + settingsBtn + lutVrRevertBtn
-                const double labelW = 42;
-                const double rangeMin = 240;
-                double comboW = Math.Clamp(e.NewSize.Width - fixedW - labelW - rangeMin, 0, 97);
-                _lutSelector.ComboWidth = comboW;
-            };
-
-            // Layout: TopRow → SettingsPanel → OrthoPanel (fill, trackers embedded in col 0) → StatusBar
-            var dock = new DockPanel();
-            DockPanel.SetDock(topRow, Dock.Top);
-            DockPanel.SetDock(_settingsPanel, Dock.Top);
-            DockPanel.SetDock(statusBar, Dock.Bottom);
-            dock.Children.Add(topRow);
-            dock.Children.Add(_settingsPanel);
-            dock.Children.Add(statusBar);
-            dock.Children.Add(_orthoPanel);
-
-            // Embed tracker panel inside OrthogonalPanel column 0 so its width always matches MainView
-            _orthoPanel.SetTopPanel(_trackerPanel);
-
-            _contentBorder = new Border { Child = dock };
-            Content = _contentBorder;
-
-            IsModifiedChanged += (_, _) => UpdateDirtyBadge();
-
-            // ── Splitter drag → window resize (WinForms MxViewForm parity) ──────
-            _orthoPanel.VerticalSplitterDragged += delta =>
-            {
-                if (WindowState == WindowState.Normal) Width += delta;
-            };
-            _orthoPanel.HorizontalSplitterDragged += delta =>
-            {
-                if (WindowState == WindowState.Normal) Height += delta;
-            };
-
-            // Auto-resize: grow window so side view fits all data at the current zoom
-            _orthoPanel.AutoResizeBottomRequested += () =>
-            {
-                if (WindowState != WindowState.Normal) return;
-                var (_, bmpH) = _orthoPanel.BottomView.GetEffectiveBmpDims();
-                int zCount = _orthoPanel.BottomView.MatrixData?.YCount ?? 1;
-                double onePixelDip = zCount > 0 ? bmpH / zCount : 50.0;
-                double margin = Math.Max(onePixelDip, 50.0);
-                double delta = bmpH + margin - _orthoPanel.BottomView.Bounds.Height;
-                if (delta <= 0.5) return;
-                double newH = Height + delta;
-                var screen = Screens?.ScreenFromWindow(this);
-                if (screen != null)
-                {
-                    double maxH = (screen.WorkingArea.Bottom - Position.Y) / screen.Scaling;
-                    newH = Math.Min(newH, maxH);
-                }
-                Height = newH;
-            };
-            _orthoPanel.AutoResizeRightRequested += () =>
-            {
-                if (WindowState != WindowState.Normal) return;
-                var (bmpW, _) = _orthoPanel.RightView.GetEffectiveBmpDims();
-                int zCount = _orthoPanel.RightView.MatrixData?.YCount ?? 1;
-                double onePixelDip = zCount > 0 ? bmpW / zCount : 50.0;
-                double margin = Math.Max(onePixelDip, 50.0);
-                double delta = bmpW + margin - _orthoPanel.RightView.Bounds.Width;
-                if (delta <= 0.5) return;
-                double newW = Width + delta;
-                var screen = Screens?.ScreenFromWindow(this);
-                if (screen != null)
-                {
-                    double maxW = (screen.WorkingArea.Right - Position.X) / screen.Scaling;
-                    newW = Math.Min(newW, maxW);
-                }
-                Width = newW;
-            };
-            _orthoPanel.AutoResizeMainRequested += () =>
-            {
-                if (WindowState != WindowState.Normal) return;
-                if (_orthoPanel.MainView.MatrixData == null) return;
-
-                var (bmpW, bmpH) = _orthoPanel.MainView.GetEffectiveBmpDims();
-                double pad = _orthoPanel.MainView.BitmapPadding * 2;
-                // Use a 1-DIP epsilon so the scrollbar condition (bmpW - vpW >= 1.0) is never met.
-                double targetMainW = Math.Ceiling(bmpW) + pad + 1.0;
-                double targetMainH = Math.Ceiling(bmpH) + pad + 1.0;
-
-                var screen = Screens?.ScreenFromWindow(this);
-                if (screen != null)
-                {
-                    double nonMainW = Width - _orthoPanel.MainView.Bounds.Width;
-                    double nonMainH = Height - _orthoPanel.MainView.Bounds.Height;
-                    double maxMainW = (screen.WorkingArea.Right - Position.X) / screen.Scaling - nonMainW;
-                    double maxMainH = (screen.WorkingArea.Bottom - Position.Y) / screen.Scaling - nonMainH;
-                    targetMainW = Math.Min(targetMainW, maxMainW);
-                    targetMainH = Math.Min(targetMainH, maxMainH);
-                }
-
-                bool isOrtho = _orthoPanel.ShowRight || _orthoPanel.ShowBottom;
-                if (isOrtho)
-                {
-                    // Ortho: move splitters to show the full bitmap at the current zoom,
-                    // then defer FitToView until the grid layout and window resize have settled.
-                    _orthoPanel.SetMainViewPixelSize(targetMainW, targetMainH);
-                    Dispatcher.UIThread.Post(
-                        () => _orthoPanel.MainView.FitToView(),
-                        DispatcherPriority.Background);
-                }
-                else
-                {
-                    // Normal: resize the window, then defer FitToView so the bitmap fills
-                    // the viewport exactly after the layout pass settles.
-                    double deltaW = targetMainW - _orthoPanel.MainView.Bounds.Width;
-                    double deltaH = targetMainH - _orthoPanel.MainView.Bounds.Height;
-                    if (Math.Abs(deltaW) > 0.5) Width += deltaW;
-                    if (Math.Abs(deltaH) > 0.5) Height += deltaH;
-                    Dispatcher.UIThread.Post(
-                        () => _orthoPanel.MainView.FitToView(),
-                        DispatcherPriority.Background);
-                }
-            };
-
-#if DEBUG
-            this.SizeChanged += (_, _) =>
-            {
-                string line = $"Window size: W:{this.Bounds.Width:F0} H:{this.Bounds.Height:F0}";
-                Debug.WriteLine(line);
-            };
-#endif
-
-            // ── Maximised mode: swap column layout so main view (not side) grows ──
-            // In maximised mode Column 0 = * and Column 2 = fixed so all extra
-            // screen space goes to the main view; side views keep their size.
-            // Reverts on restore so that normal-mode resize continues to grow side views.
-        }
 
         protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
         {
@@ -1535,6 +968,15 @@ namespace MxPlot.UI.Avalonia.Views
         {
             base.OnClosed(e);
             CloseXYProjectionWindow();
+            // Clear LinkedSource back-reference so children don't hold stale parent refs
+            foreach (var child in _linkedChildren.ToArray())
+            {
+                if (child.LinkedSource == this)
+                {
+                    child.LinkedSource = null;
+                    child.LinkedSourceExcludedAxes = null;
+                }
+            }
             CloseLinkedChildren();
             CloseAllLineProfiles();
             CloseCacheMonitor();
@@ -1571,6 +1013,10 @@ namespace MxPlot.UI.Avalonia.Views
                         case nameof(vm.Title):
                             Title = vm.Title;
                             break;
+                        case nameof(vm.SourcePath):
+                            if (vm.SourcePath != null) { _neverSaved = false; }
+                            IsModifiedChanged?.Invoke(this, EventArgs.Empty);
+                            break;
                     }
                 };
             }
@@ -1583,7 +1029,8 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private void SetMatrixData(IMatrixData? data)
         {
-            _initializingData = true;
+            using var _ = _reentrancy.Begin(GuardContext.Initializing);
+
             // Capture current state before replacing so we can decide whether to preserve view settings.
             // Fixed mode is sticky: data updates should not silently reset a deliberately chosen range.
             bool isFirstLoad = _currentData == null;
@@ -1636,24 +1083,21 @@ namespace MxPlot.UI.Avalonia.Views
             // result of a "This frame only" crop replacing a multi-frame hyperstack),
             // the view would immediately attempt to render with the stale out-of-range index
             // and throw in BitmapWriter.CheckValidity before the line below corrects it.
-            _settingMatrixData = true;
-            try
-            {
-                _view.FrameIndex = 0;
-                _view.MatrixData = data;
-                _view.FrameIndex = data?.ActiveIndex ?? 0;
-            }
-            finally { _settingMatrixData = false; }
+
+            _view.FrameIndex = 0;
+            _view.MatrixData = data;
+            _view.FrameIndex = data?.ActiveIndex ?? 0;
+
             MatrixDataChanged?.Invoke(this, data);
 
             // Sync multi-frame UI first so SetMode sees the correct _isMultiFrame state
             bool isMultiFrame = data is { FrameCount: > 1 };
             _rangeBar.SetMultiFrame(isMultiFrame);
-            if (_autoRadio != null) _autoRadio.Content = isMultiFrame ? "Current" : "Auto";
-            if (_allRadio != null) _allRadio.IsVisible = isMultiFrame;
             _view.ExtractFrameAllowed = isMultiFrame;
             _orthoPanel.BottomView.ExtractFrameAllowed = isMultiFrame;
             _orthoPanel.RightView.ExtractFrameAllowed = isMultiFrame;
+            bool isHyperstack = data is { Axes.Count: > 1 };
+            _view.ExtractDimensionAllowed = isHyperstack;
 
             // Value range mode across data updates:
             //   Fixed  → always sticky; keep mode and range values as-is.
@@ -1673,10 +1117,10 @@ namespace MxPlot.UI.Avalonia.Views
                 _trackerPanel.IsVisible = false;
                 CloseCacheMonitor();
                 if (data != null) RestoreViewSettings(data, restoreVR);
-                _initializingData = false;
                 CaptureLutVrSnapshot();
                 CaptureScaleSnapshot(data);
                 ClearAllDirty();
+                if (data != null && SourcePath == null) { _neverSaved = true; IsModifiedChanged?.Invoke(this, EventArgs.Empty); }
                 if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
                 UpdateScaleRevertButton();
                 RefreshInfoTab();
@@ -1704,6 +1148,17 @@ namespace MxPlot.UI.Avalonia.Views
                         data.GetValueRange(data.ActiveIndex); // caches this frame's range (MMF access, usually fast)
                     ApplyAllModeRange();
                 }
+                // Current mode: update range bar to reflect the new frame's range
+                else if (_rangeBar.Mode == ValueRangeMode.Current)
+                {
+                    var (min, max) = data.GetValueRange(data.ActiveIndex);
+                    using (_reentrancy.Begin(GuardContext.SyncApply))
+                        _rangeBar.SetRange(min, max);
+                }
+
+                // Update histogram when frame changes (if settings panel is open)
+                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+                    UpdateHistogram();
             };
             data.ActiveIndexChanged += _activeIndexHandler;
 
@@ -1717,13 +1172,41 @@ namespace MxPlot.UI.Avalonia.Views
                 else
                 {
                     var tracker = new AxisTracker(axis);
+                    if (axis.Name.Equals("Time", StringComparison.OrdinalIgnoreCase) && axis.Step > 0)
+                    {
+                        //Special case for time axis: convert step to milliseconds and set AnimationInterval
+                        string unit = axis.Unit.ToLowerInvariant();
+                        int ms = unit switch
+                        {
+                            "s" => (int)Math.Round(axis.Step * 1000.0),
+                            "ms" => (int)Math.Round(axis.Step),
+                            _ => 0
+                        };
+                        if (ms > 0)
+                            tracker.AnimationInterval = ms;
+                    }
+
+
                     _trackerPanel.Children.Add(tracker);
                     _axisTrackers[axis.Name] = tracker;
                     WireFreezeButton(tracker, axis);
+                    var capturedAxis = axis;
                     tracker.IndexChanged += (_, idx) =>
                     {
-                        if (!_syncApplying) SyncAxisIndexChanged?.Invoke(this, (axis.Name, idx));
+                        if (!_reentrancy.IsActive(GuardContext.SyncApply)) SyncAxisIndexChanged?.Invoke(this, (capturedAxis.Name, idx));
                     };
+                    tracker.SliderDragStarted += (_, _) => UpdateAxisDragOverlay(tracker);
+                    tracker.IndexChanged += (_, _) =>
+                    {
+                        if (_isDraggingAxisTracker) UpdateAxisDragOverlay(tracker);
+                    };
+                    tracker.SliderDragEnded += (_, _) =>
+                    {
+                        _isDraggingAxisTracker = false;
+                        _view.OverlayInfoText = null;
+                        _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.BottomLeft;
+                    };
+                    
                 }
             }
 
@@ -1765,10 +1248,10 @@ namespace MxPlot.UI.Avalonia.Views
                 }
             }
 
-            _initializingData = false;
             CaptureLutVrSnapshot();
             CaptureScaleSnapshot(data);
             ClearAllDirty();
+            if (SourcePath == null) { _neverSaved = true; IsModifiedChanged?.Invoke(this, EventArgs.Empty); }
             if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
             UpdateScaleRevertButton();
             UpdateStatusBar();
@@ -1807,10 +1290,52 @@ namespace MxPlot.UI.Avalonia.Views
                 var capturedAxis = axis;
                 tracker.IndexChanged += (_, idx) =>
                 {
-                    if (!_syncApplying) SyncAxisIndexChanged?.Invoke(this, (capturedAxis.Name, idx));
+                    if (!_reentrancy.IsActive(GuardContext.SyncApply)) SyncAxisIndexChanged?.Invoke(this, (capturedAxis.Name, idx));
                 };
             }
             _trackerPanel.IsVisible = data.Axes.Count > 0;
+        }
+
+
+        /// <summary>
+        /// Updates the animation interval for the Time axis based on its Step and Unit.
+        /// </summary>
+        /// <param name="axis">The axis to update. If null, the Time axis from the current data is used.</param>
+        /// <param name="showNotice">Whether to show a notice with the updated interval.</param>
+        /// <returns>True if the interval was updated; otherwise, false.</returns>
+        private bool TryUpdateTimeAxisAnimationInterval(Axis? axis = null, bool showNotice = false)
+        {
+            axis ??= _currentData?.Axes.FirstOrDefault(a =>
+                a.Name.Equals("Time", StringComparison.OrdinalIgnoreCase));
+
+            if (axis == null || axis.Step <= 0)
+                return false;
+
+            if (!axis.Name.Equals("Time", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            bool isSeconds = axis.Unit.Equals("s", StringComparison.OrdinalIgnoreCase);
+            bool isMilliseconds = axis.Unit.Equals("ms", StringComparison.OrdinalIgnoreCase);
+            if (!isSeconds && !isMilliseconds)
+                return false;
+
+            int intervalMs = isSeconds
+                ? (int)Math.Round(axis.Step * 1000.0)
+                : (int)Math.Round(axis.Step);
+
+            if (intervalMs <= 0)
+                return false;
+
+            if (!_axisTrackers.TryGetValue(axis.Name, out var tracker))
+                return false;
+
+            if (tracker.AnimationInterval == intervalMs)
+                return false;
+
+            tracker.AnimationInterval = intervalMs;
+            if (showNotice)
+                ShowToast($"Animation interval: {intervalMs} ms");
+            return true;
         }
 
         /// <summary>
@@ -1826,17 +1351,40 @@ namespace MxPlot.UI.Avalonia.Views
             double min, max;
             bool imperfect;
 
+            // For Complex data: use the current display mode; for primitives: always mode 0
+            int valueMode = data.ValueType == typeof(System.Numerics.Complex)
+                ? (int)_view.ComplexValueMode : 0;
+
             int invalidCount = 0;
             if (data.IsVirtual)
             {
-                (min, max) = data.GetGlobalValueRange(out var invalids, forceRefresh: false);
-                invalidCount = invalids.Count;
+                if (valueMode == 0)
+                {
+                    // Non-Complex or Magnitude mode: use interface method
+                    (min, max) = data.GetGlobalValueRange(out var invalids, false);
+                    invalidCount = invalids.Count;
+                }
+                else
+                {
+                    // Complex with non-Magnitude mode: use typed extension
+                    var complexData = (MatrixData<System.Numerics.Complex>)data;
+                    (min, max) = complexData.GetGlobalValueRange(valueMode, out var invalids, false);
+                    invalidCount = invalids.Count;
+                }
                 imperfect = invalidCount > 0;
             }
             else
             {
                 // InMemory: synchronous full scan; subsequent calls are fast due to caching
-                (min, max) = data.GetGlobalValueRange(out _, forceRefresh: true);
+                if (valueMode == 0)
+                {
+                    (min, max) = data.GetGlobalValueRange(out _, true);
+                }
+                else
+                {
+                    var complexData = (MatrixData<System.Numerics.Complex>)data;
+                    (min, max) = complexData.GetGlobalValueRange(valueMode, out _, true);
+                }
                 imperfect = false;
             }
 
@@ -1846,18 +1394,144 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.FixedMax = max;
                 _rangeBar.SetRange(min, max);
             }
-            _rangeBar.SetImperfect(imperfect);
+            _rangeBar.SetImperfect(imperfect, invalidCount);
+        }
 
-            string allTip = imperfect
-                ? $"Global min/max \u2014 {invalidCount} frame{(invalidCount == 1 ? "" : "s")} not yet scanned"
-                : "Global min/max across all frames";
-            if (_allWarningIcon != null)
+        /// <summary>
+        /// Updates the histogram control with the current frame's data and LUT.
+        /// Called when the settings panel is opened or when LUT/level changes while the panel is visible.
+        /// Runs histogram calculation on a background thread to avoid blocking the UI.
+        /// Mode-specific behavior:
+        /// - Fixed: preserves plot zoom, uses valueRange for badge base (1x = plotRange matches valueRange).
+        ///   Range bar changes only update viewRange (red lines), not plotRange.
+        /// - Roi: preserves plot zoom, uses valueRange for badge base. viewRange (red lines) follows ROI statistics.
+        ///   ROI movement only updates viewRange, not plotRange. Behaves like Fixed mode for histogram.
+        /// - Current/Auto: resets plot zoom to 1:1 with valueRange, uses valueRange for badge base.
+        /// - All: resets plot zoom to 1:1 with viewRange, uses viewRange for badge base (1x = plotRange matches viewRange from range bar).
+        /// </summary>
+        private async void UpdateHistogram()
+        {
+            if (_histogramPlot == null || _currentData == null) return;
+
+            // Cancel any pending histogram calculation
+            _histogramCts?.Cancel();
+            _histogramCts = new CancellationTokenSource();
+            var cts = _histogramCts;
+
+            var lut = _view.Lut;
+            int level = _view.LutDepth;
+            bool isInverted = _view.IsInvertedColor;
+
+            // Guard against invalid LUT depth
+            if (level <= 0)
             {
-                _allWarningIcon.IsVisible = imperfect;
-                ToolTip.SetTip(_allWarningIcon, allTip);
+                Debug.WriteLine($"[UpdateHistogram] Invalid LutDepth: {level}");
+                return;
             }
-            if (_allRadio != null)
-                ToolTip.SetTip(_allRadio, allTip);
+
+            // Resample LUT if necessary, then get ARGB array
+            var effectiveLut = (lut != null && lut.Levels != level) ? lut.Resample(level) : lut;
+            var aRgbs = effectiveLut?.AsSpan().ToArray() ?? new int[level];
+
+            // Apply inversion to the LUT array for histogram display
+            if (isInverted)
+                Array.Reverse(aRgbs);
+
+            try
+            {
+                // Determine the view range (red lines / LUT application range)
+                // Read from _rangeBar which is the authoritative source for all modes
+                double viewMin, viewMax;
+                if (_rangeBar.Mode == ValueRangeMode.Fixed)
+                {
+                    viewMin = _view.FixedMin;
+                    viewMax = _view.FixedMax;
+                }
+                else
+                {
+                    // For All/Current/Roi: _rangeBar has already been updated with the correct range
+                    // Avoid redundant ScanCurrentFrameRange() calls
+                    viewMin = _rangeBar.DisplayedMinValue;
+                    viewMax = _rangeBar.DisplayedMaxValue;
+                    Debug.WriteLine($"[UpdateHistogram] {_rangeBar.Mode} mode: viewMin={viewMin:F3}, viewMax={viewMax:F3} (from _rangeBar)");
+                }
+
+                int frameIndex = _currentData.ActiveIndex;
+                var data = _currentData;  // Capture for background thread
+                var complexValueMode = _view.ComplexValueMode;
+                int valueMode = (int)complexValueMode;
+
+                // Calculate bin count parameters on UI thread
+                double viewRange = Math.Max(1e-9, viewMax - viewMin);
+
+                // Run heavy computation on background thread
+                var (valueMin, valueMax, histogram) = await Task.Run(() =>
+                {
+                    if (cts.Token.IsCancellationRequested) 
+                        return (double.NaN, double.NaN, Array.Empty<int>());
+
+                    // Determine the histogram calculation range (actual data range)
+                    double vMin, vMax;
+                    if (data.ValueType == typeof(System.Numerics.Complex))
+                        (vMin, vMax) = data.GetValueRange(frameIndex, valueMode);
+                    else
+                        (vMin, vMax) = data.GetValueRange(frameIndex);
+
+                    if (cts.Token.IsCancellationRequested) 
+                        return (double.NaN, double.NaN, Array.Empty<int>());
+
+                    // Calculate bin count: scale bins proportionally to the range ratio.
+                    double dataRange = Math.Max(1e-9, vMax - vMin);
+                    int bins = (int)Math.Ceiling(level * (dataRange / viewRange));
+                    bins = Math.Clamp(bins, 3, 4096);
+
+                    // Create histogram
+                    int[] hist;
+                    if (data.ValueType == typeof(System.Numerics.Complex))
+                    {
+                        var complexData = (MatrixData<System.Numerics.Complex>)data;
+
+                        Func<System.Numerics.Complex, double> converter = complexValueMode switch
+                        {
+                            ComplexValueMode.Magnitude => c => c.Magnitude,
+                            ComplexValueMode.Real => c => c.Real,
+                            ComplexValueMode.Imaginary => c => c.Imaginary,
+                            ComplexValueMode.Phase => c => Math.Atan2(c.Imaginary, c.Real),
+                            ComplexValueMode.Power => c => c.Real * c.Real + c.Imaginary * c.Imaginary,
+                            _ => c => c.Magnitude
+                        };
+
+                        hist = complexData.CreateHistogram(frameIndex, bins, valueMode, converter, vMin, vMax);
+                    }
+                    else
+                    {
+                        hist = data.CreateHistogram(frameIndex, bins, vMin, vMax);
+                    }
+
+                    return (vMin, vMax, hist);
+                }, cts.Token);
+
+                // Check if cancelled
+                if (cts.Token.IsCancellationRequested || double.IsNaN(valueMin))
+                    return;
+
+                // Update UI on UI thread
+                // Fixed/Roi mode: preserves plot zoom (user/ROI-controlled window), viewRange follows LUT range
+                // Current/All: reset plot to 1:1 with valueRange/viewRange (data-driven window)
+                bool preservePlot = _rangeBar.Mode == ValueRangeMode.Fixed || _rangeBar.Mode == ValueRangeMode.Roi;
+                bool useViewRangeAsBase = _rangeBar.Mode == ValueRangeMode.All;
+                Debug.WriteLine($"[UpdateHistogram] Before SetHistogram: " +
+                    $"valueMin={valueMin:F3}, valueMax={valueMax:F3}, " +
+                    $"viewMin={viewMin:F3}, viewMax={viewMax:F3}, " +
+                    $"preservePlot={preservePlot}, useViewRangeAsBase={useViewRangeAsBase}");
+                _histogramPlot.SetHistogram(histogram, valueMin, valueMax, viewMin, viewMax, aRgbs, preservePlot, useViewRangeAsBase);
+
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[UpdateHistogram] Error: {ex.Message}");
+                Debug.WriteLine($"  LutDepth={level}, FrameIndex={_currentData.ActiveIndex}, DataType={_currentData.ValueType.Name}");
+            }
         }
 
         // ── Notice (transient status info) ───────────────────────────────────
@@ -1881,6 +1555,62 @@ namespace MxPlot.UI.Avalonia.Views
             _noticeText.IsVisible = !string.IsNullOrEmpty(text) && !_progressBar.IsVisible;
         }
 
+        /// <summary>
+        /// Displays a transient toast message in the status bar notice area.
+        /// </summary>
+        /// <param name="message"></param>
+        private async void ShowToast(string message)
+        {
+            if (!Dispatcher.UIThread.CheckAccess())
+            {
+                Dispatcher.UIThread.Post(() => ShowToast(message));
+                return;
+            }
+
+            _toastCts?.Cancel();
+            _toastCts = new CancellationTokenSource();
+            var token = _toastCts.Token;
+
+            if (_progressBar.IsVisible) return;
+
+            _toastText.Text = message;
+            _toastPanel.IsVisible = true;
+            _toastPanel.Opacity = 0;
+
+            var tt = _toastPanel.RenderTransform as TranslateTransform ?? new TranslateTransform(0, 12);
+            _toastPanel.RenderTransform = tt;
+            tt.Y = 12;
+
+            // slide-in + fade-in (180ms)
+            for (int i = 1; i <= 12; i++)
+            {
+                if (token.IsCancellationRequested) return;
+                double t = i / 12.0;
+                _toastPanel.Opacity = t;
+                tt.Y = (1.0 - t) * 12.0;
+                await Task.Delay(15, CancellationToken.None);
+            }
+
+            // hold
+            try { await Task.Delay(2800, token); }
+            catch (OperationCanceledException) { return; }
+
+            // slide-out + fade-out (240ms)
+            for (int i = 8; i >= 0; i--)
+            {
+                if (token.IsCancellationRequested) return;
+                double t = i / 8.0;
+                _toastPanel.Opacity = t;
+                tt.Y = (1.0 - t) * 8.0;
+                await Task.Delay(30, CancellationToken.None);
+            }
+
+            _toastPanel.IsVisible = false;
+            _toastPanel.Opacity = 0;
+            tt.Y = 12;
+        }
+
+        /*
         private async void ShowToast(string message)
         {
             _toastCts?.Cancel();
@@ -1905,7 +1635,11 @@ namespace MxPlot.UI.Avalonia.Views
             _noticeText.Classes.Remove("toast");
             _noticeText.Text = string.Empty;
             _noticeText.Opacity = 1.0;
+            
         }
+        */
+
+
 
         private void UpdateStatusBar()
         {
@@ -1932,10 +1666,27 @@ namespace MxPlot.UI.Avalonia.Views
                 _ => $"{totalBytes} B"
             };
 
-            _infoText.Text = $"[{data.ValueTypeName}]  {sizeStr}";
+            string typeLabel = data.ValueTypeName;
+            if (data.ValueType == typeof(System.Numerics.Complex))
+            {
+                string modeLabel = _view.ComplexValueMode switch
+                {
+                    ComplexValueMode.Magnitude => "Mag",
+                    ComplexValueMode.Real => "Real",
+                    ComplexValueMode.Imaginary => "Imag",
+                    ComplexValueMode.Phase => "Phase",
+                    ComplexValueMode.Power => "Power",
+                    _ => _view.ComplexValueMode.ToString(),
+                };
+                typeLabel = $"Complex ({modeLabel})";
+            }
+
+            _infoText.Text = $"[{typeLabel}]  {sizeStr}";
             string tooltip = $"{data.XCount}×{data.YCount}";
             if (data.FrameCount > 1) tooltip += $"  |  {data.FrameCount} frames";
             tooltip += $"  |  {data.ValueTypeName}";
+            if (data.ValueType == typeof(System.Numerics.Complex))
+                tooltip += $"  |  Mode: {_view.ComplexValueMode}";
             ToolTip.SetTip(_infoText, tooltip);
             _virtualBadge.IsVisible = data.IsVirtual;
             if (data.IsVirtual)
@@ -1950,9 +1701,10 @@ namespace MxPlot.UI.Avalonia.Views
                     + "\nClick to open back-end Cache Monitor");
             }
             _zoomText.Text = $"  {zoomStr}";
-            ToolTip.SetTip(_zoomText, _view.IsFitToView
-                ? "Zoom level: Fit to view"
-                : "Double-click the image to fit to view");
+            string zoomTip = _view.IsFitToView
+                ? "Fit to view (double-click image to toggle)"
+                : $"{_view.Zoom * 100:0.##}% (double-click image to fit)";
+            ToolTip.SetTip(_zoomText, zoomTip + "\nClick here to set zoom / view size");
         }
 
         // ── Status-bar progress reporter ──────────────────────────────────

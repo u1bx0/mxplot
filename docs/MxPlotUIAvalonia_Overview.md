@@ -143,6 +143,72 @@ MxPlot.UI.Avalonia
 
 ---
 
+## Custom Lookup Tables (LUTs)
+
+`MatrixPlotter` uses `LookupTable` instances to map data values to colors. Several built-in themes are available via `ColorThemes` (Grayscale, Hot, Jet, Turbo, Viridis, etc.), but users can add custom LUTs in two ways:
+
+### Method 1: External `.mlut` Files (Automatic Loading)
+
+Place custom `.mlut` files in a `LUTs/` subdirectory next to the application executable.  
+`LutSelector` automatically discovers and registers all `.mlut` files on first use.
+
+**File Format:**
+
+```
+<LUT Name>
+<Levels>[, <MissingColorHex>]
+<R>, <G>, <B>
+<R>, <G>, <B>
+...
+```
+
+- **Line 1**: LUT name (displayed in the selector)
+- **Line 2**: Number of color levels, optionally followed by a missing-value color in hexadecimal (e.g., `256, FF00FF`)
+- **Lines 3+**: RGB triplets (0-255) or hex color values (e.g., `FF8800`)
+- Empty lines and lines starting with `#` are ignored
+
+**Example (`CustomHot.mlut`):**
+
+```
+CustomHot
+256, 0000FF
+0, 0, 0
+128, 0, 0
+255, 128, 0
+255, 255, 128
+255, 255, 255
+```
+
+If fewer color lines are provided than the declared level count, the last color is repeated.  
+If more lines are provided, extra lines are ignored.
+
+### Method 2: Programmatic Registration
+
+Load and register a LUT at runtime:
+
+```csharp
+using MxPlot.Core.Imaging;
+
+// From file
+var lut = ColorThemes.LoadFromFile("path/to/custom.mlut");
+if (lut != null)
+    ColorThemes.Register(lut);
+
+// Or create manually
+int[] colors = new int[256];
+for (int i = 0; i < 256; i++)
+{
+    int r = i;
+    int g = i / 2;
+    int b = 255 - i;
+    colors[i] = r | (g << 8) | (b << 16);
+}
+var customLut = new LookupTable("MyCustomLUT", colors, missingColor: 0xFF00FF);
+ColorThemes.Register(customLut);
+```
+
+---
+
 ## Related Documents
 
 - [MatrixPlotter Basic Usage Guide](./MatrixPlotter_Usage_Guide.md)

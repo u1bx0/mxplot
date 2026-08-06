@@ -1,7 +1,6 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input.Platform;
-using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using MxPlot.Core;
@@ -24,7 +23,7 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Line Profile integration ───────────────────────────────────────────────
 
         // Line profile: LineObject → (live ProfilePlotter, source MxView)
-        private readonly Dictionary<LineObject, (ProfilePlotter Window, MxView SourceView)> _lineProfileWindows = [];
+        private readonly Dictionary<LineObject, (ProfilePlotter Window, MxView SourceView, string? GroupAxisName)> _lineProfileWindows = [];
 
         // Text edit: TextObject → open TextEditDialog
         private readonly Dictionary<TextObject, TextEditDialog> _textEditDialogs = [];
@@ -47,7 +46,10 @@ namespace MxPlot.UI.Avalonia.Views
             if (obj is TextObject text)
             {
                 text.Edit.Handler = () => OnTextEditRequested(text);
-                text.DataContext = ResolveSourceView(text).MatrixData;
+                // Use EffectiveData (= LinkedSource's data when set) so that {N:p}/{N:i} tokens
+                // resolve against the correct axis state on XZ/YZ slice views and XY projection
+                // windows, whose own MatrixData has no axes.
+                text.DataContext = EffectiveData ?? ResolveSourceView(text).MatrixData;
             }
             if (obj is RectObject rect)
                 rect.GeometryChanged += OnRectGeometryChanged;
@@ -64,7 +66,8 @@ namespace MxPlot.UI.Avalonia.Views
             }
             obj.SelectionChanged += OnOverlaySelectionChanged;
             obj.PenEdit.Handler = () => OnPenEditRequested(obj);
-            SetDirty(DirtyFlags.Overlay, true);
+            if (obj is not ISystemOverlay)
+                SetDirty(DirtyFlags.Overlay, true);
         }
 
         
@@ -243,7 +246,6 @@ namespace MxPlot.UI.Avalonia.Views
 
             _valueRangeOverlay = evaluable;
             evaluable.IsValueRangeRoi = true;
-            if (_roiRadio != null) _roiRadio.IsVisible = true;
             _rangeBar.SetRoiAvailable(true);
             _rangeBar.SetMode(ValueRangeMode.Roi);
             RefreshRoiValueRange();
@@ -263,7 +265,6 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.OverlayManager.InvalidateVisual();
             }
             _valueRangeOverlay = null;
-            if (_roiRadio != null) _roiRadio.IsVisible = false;
             _rangeBar.SetRoiAvailable(false);
             // SetRoiAvailable(false) while in Roi mode automatically calls SetMode(Current)
         }
@@ -277,7 +278,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (_valueRangeOverlay == null || _rangeBar.Mode != ValueRangeMode.Roi) return;
             if (_valueRangeOverlay is not BoundingBoxBase bbox)
             {
-                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: ROI overlay is not a BoundingBoxBase \u2014 skipping.");
+                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: ROI overlay is not a BoundingBoxBase — skipping.");
                 return;
             }
 
@@ -285,23 +286,29 @@ namespace MxPlot.UI.Avalonia.Views
             var md = sourceView.MatrixData;
             if (md == null)
             {
-                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: no MatrixData \u2014 skipping.");
+                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: no MatrixData — skipping.");
                 return;
             }
 
             var stats = ComputeRegionStatistics(_valueRangeOverlay, bbox, md, sourceView.FrameIndex);
             if (stats.NumPoints == 0)
             {
-                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: ROI region is empty \u2014 no update.");
+                System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: ROI region is empty — no update.");
                 return;
             }
 
-            System.Diagnostics.Debug.WriteLine($"[MatrixPlotter] RefreshRoiValueRange: min={stats.Min}, max={stats.Max}");
             _view.IsFixedRange = true;
             _view.FixedMin = stats.Min;
             _view.FixedMax = stats.Max;
             _rangeBar.SetRange(stats.Min, stats.Max);
             _orthoController.SyncRenderSettings();
+
+            // SetRange() does not fire RangeChanged event, so manually update histogram if settings panel is open
+            // Call UpdateHistogram() instead of SetViewValueRange() to ensure proper async cancellation
+            if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+            {
+                UpdateHistogram();
+            }
         }
 
         /// <summary>
@@ -374,15 +381,18 @@ namespace MxPlot.UI.Avalonia.Views
                 _lineProfileWindows.Remove(line);
             }
 
-            var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY);
-            if (profile.Count == 0) return;
+            string? groupAxisName = (sourceView.RenderingMode == RenderingMode.Composite 
+                && md.Dimensions.Contains("Channel")) ? "Channel" : null;
+            var series = BuildProfileSeries(line, md, sourceView, groupAxisName);
+            if (series.Count == 0) return;
 
             var win = new ProfilePlotter(
-                [new PlotSeries(profile, "Profile", PlotStyle.Line)],
+                //[new PlotSeries(profile, "Profile", PlotStyle.Line)],
+                series,
                 xAxisLabel: $"Distance ({md.XUnit})",
                 yAxisLabel: "Value",
                 title: "Line Profile (Bilinear)");
-            _lineProfileWindows[line] = (win, sourceView);
+            _lineProfileWindows[line] = (win, sourceView, groupAxisName);
             //Default behaviour: Y axis is fixed:
             if (_view.IsFixedRange)
             {
@@ -417,6 +427,59 @@ namespace MxPlot.UI.Avalonia.Views
             };
             PlotWindowNotifier.SetParentLink(win, this);
             win.Show();
+        }
+
+        /// <summary>
+        /// Builds a list of <see cref="PlotSeries"/> by extracting line profiles for all values
+        /// of the specified axis, while keeping all other axes fixed at their current positions.
+        /// </summary>
+        /// <remarks>
+        /// If the specified axis is a <see cref="TaggedAxis"/>, the tag string is used as the series label.
+        /// Otherwise, the label is formatted as "{AxisName}0", "{AxisName}1", etc.
+        /// If the axis does not exist in the dimension structure, a single profile at the current
+        /// frame index is returned with the label "Profile".
+        /// <code>
+        /// // Example: Channel axis with tags "R", "G", "B"
+        /// var series = BuildProfileSeries(line, md, sourceView, "Channel");
+        /// // → PlotSeries("R", ...), PlotSeries("G", ...), PlotSeries("B", ...)
+        ///
+        /// // Example: Z axis without tags
+        /// var series = BuildProfileSeries(line, md, sourceView, "Z");
+        /// // → PlotSeries("Z0", ...), PlotSeries("Z1", ...), ...
+        /// </code>
+        /// </remarks>
+        /// <param name="line">The line object defining the profile path.</param>
+        /// <param name="md">The matrix data source.</param>
+        /// <param name="sourceView">The source view providing FrameIndex and FlipY.</param>
+        /// <param name="groupAxisName">The axis name to iterate over. If null or not found, falls back to a single profile.</param>
+        private List<PlotSeries> BuildProfileSeries(LineObject line, IMatrixData md, MxView sourceView, string? groupAxisName = "Channel")
+        {
+            var result = new List<PlotSeries>();
+            var dims = md.Dimensions;
+
+            if (groupAxisName != null && dims.Contains(groupAxisName))
+            {
+                var axis = dims[groupAxisName]!;
+                var taggedAxis = axis as TaggedAxis;
+                int[] frameIndices = dims.GetFrameIndicesFor(groupAxisName);
+
+                for (int i = 0; i < frameIndices.Length; i++)
+                {
+                    var profile = ExtractLineProfile(line, md, frameIndices[i], sourceView.FlipY);
+                    if (profile.Count == 0) continue;
+
+                    string label = taggedAxis != null ? taggedAxis[i] : $"{axis.Name}{i}";
+                    result.Add(new PlotSeries(profile, label, PlotStyle.Line));
+                }
+            }
+            else
+            {
+                var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY);
+                if (profile.Count > 0)
+                    result.Add(new PlotSeries(profile, "Profile", PlotStyle.Line));
+            }
+
+            return result;
         }
 
         /// <summary>
@@ -534,9 +597,9 @@ namespace MxPlot.UI.Avalonia.Views
             var md = entry.SourceView.MatrixData;
             if (md == null) return;
 
-            var profile = ExtractLineProfile(line, md, entry.SourceView.FrameIndex, entry.SourceView.FlipY);
-            entry.Window.Plot.UpdatePointsAndFit(0, profile); //if profile.Count == 0, no plots are shown.
-            
+            var series = BuildProfileSeries(line, md, entry.SourceView, entry.GroupAxisName);
+            for (int i = 0; i < series.Count; i++)
+                entry.Window.Plot.UpdatePointsAndFit(i, series[i].Points);
         }
 
         private void UpdateAllLineProfiles()
@@ -612,7 +675,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void CloseAllLineProfiles()
         {
-            foreach (var (win, _) in _lineProfileWindows.Values.ToArray())
+            foreach (var (win, _, _) in _lineProfileWindows.Values.ToArray())
                 win.Close();
             _lineProfileWindows.Clear();
         }

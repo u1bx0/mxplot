@@ -1,8 +1,8 @@
 ﻿# Hosting MatrixPlotter in WinForms / WPF
 
 **Created**: 2026-04-24  
-**Updated**: 2026-05-29
-**Target version**: `MxPlot.UI.Avalonia` (Avalonia 11.3.14), .NET 10
+**Updated**: 2026-07-16
+**Target version**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 10
 
 ---
 
@@ -37,14 +37,14 @@ Add the following to your WinForms / WPF project `.csproj`.
 ```xml
 <ItemGroup>
   <!-- MxPlot NuGet package (includes MxPlot.UI.Avalonia and MxPlot.Core) -->
-  <PackageReference Include="MxPlot" Version="0.1.2" />
+  <PackageReference Include="MxPlot" Version="*" />
   <!-- Avalonia Windows backend (Win32 + Skia) -->
   <!-- ⚠️ Version must exactly match the Avalonia dependency of MxPlot.UI.Avalonia -->
-  <PackageReference Include="Avalonia.Win32" Version="11.3.14" />
-  <PackageReference Include="Avalonia.Skia" Version="11.3.14" />
+  <PackageReference Include="Avalonia.Win32" Version="11.3.18" />
+  <PackageReference Include="Avalonia.Skia" Version="11.3.18" />
   <!-- Required for WinForms keyboard event forwarding (WinFormsAvaloniaMessageFilter) -->
   <!-- Also required for direct MxView embedding (Section 9) -->
-  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.14" />
+  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.18" />
 </ItemGroup>
 ```
 
@@ -515,9 +515,9 @@ Add the following to your `.csproj`:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Avalonia.Win32" Version="11.3.14" />
-  <PackageReference Include="Avalonia.Skia" Version="11.3.14" />
-  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.14" />
+  <PackageReference Include="Avalonia.Win32" Version="11.3.18" />
+  <PackageReference Include="Avalonia.Skia" Version="11.3.18" />
+  <PackageReference Include="Avalonia.Win32.Interoperability" Version="11.3.18" />
 </ItemGroup>
 ```
 

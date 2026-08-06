@@ -1,7 +1,5 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Primitives;
-using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -10,8 +8,10 @@ using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MxPlot.Core;
 using MxPlot.Core.IO;
+using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Overlays;
+using MxPlot.UI.Avalonia.Plugins;
 using System;
 using System.IO;
 using System.Reflection;
@@ -28,6 +28,20 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Export framework ──────────────────────────────────────────────────
 
         /// <summary>
+        /// Converts an <see cref="IRenderExportPlugin"/> to an <see cref="ExportFormatDescriptor"/>
+        /// so plugin-supplied exporters can be invoked via the same path as built-in formats.
+        /// </summary>
+        private static ExportFormatDescriptor ToDescriptor(Plugins.IRenderExportPlugin ep)
+            => new(
+                Label: ep.Label,
+                Hint: ep.Hint,
+                FileTypeName: ep.FileTypeName,
+                FilePattern: ep.FilePattern,
+                Exporter: (path, parent, host, progress, ct)
+                    => ep.ExportAsync(path, parent, host, progress, ct),
+                RequiresStack: ep.RequiresStack);
+
+        /// <summary>
         /// Returns a <see cref="ExportFormatDescriptor"/> for the built-in single-frame PNG export.
         /// This is always present as the first item in the "Export as…" submenu.
         /// </summary>
@@ -38,24 +52,22 @@ namespace MxPlot.UI.Avalonia.Views
                 Hint: "Exports the current frame as a PNG image.",
                 FileTypeName: "PNG Image",
                 FilePattern: "*.png",
-                Exporter: async (path, _, _, _, _, _) =>
+                Exporter: async (path, _, _, _, _) =>
                 {
                     await Task.CompletedTask; // SaveAsPng is synchronous
-                    var (natW, natH) = _view.GetNaturalDims();
-                    int w = Math.Max(1, (int)Math.Round(natW));
-                    int h = Math.Max(1, (int)Math.Round(natH));
-                    _view.SaveAsPng(path, w, h);
+                    var (effW, effH) = _view.GetEffectiveBmpDims();
+                    int w = Math.Max(1, (int)Math.Round(effW));
+                    int h = Math.Max(1, (int)Math.Round(effH));
+                    _view.SaveAsPng(path, w, h, withOverlays: _view.OverlayManager.OverlaysVisible);
                 },
-                RequiresStack: false,
-                DefaultFps: 0);
+                RequiresStack: false);
         }
 
         /// <summary>
         /// Opens a Save File dialog for <paramref name="desc"/> and runs the exporter.
         /// <para>
-        /// For single-frame formats (<see cref="ExportFormatDescriptor.RequiresStack"/> is
-        /// <c>false</c>) the <c>frameRenderer</c> delegate renders only the current frame.
-        /// For stack formats it renders each frame in sequence at the natural view dimensions.
+        /// UI input is blocked for the duration of the export and the current frame index is
+        /// restored to its original value when the export completes or is cancelled.
         /// </para>
         /// </summary>
         private async Task InvokeExportAsync(ExportFormatDescriptor desc)
@@ -63,7 +75,6 @@ namespace MxPlot.UI.Avalonia.Views
             var md = _view.MatrixData;
             if (md == null) return;
 
-            int frameCount = desc.RequiresStack ? md.FrameCount : 1;
             int digits = md.FrameCount > 1 ? md.FrameCount.ToString().Length : 0;
 
             var baseName = Path.GetFileNameWithoutExtension(Title ?? "Image");
@@ -85,23 +96,24 @@ namespace MxPlot.UI.Avalonia.Views
             var path = file.TryGetLocalPath();
             if (string.IsNullOrEmpty(path)) return;
 
-            var (natW, natH) = _view.GetNaturalDims();
-            int w = Math.Max(1, (int)Math.Round(natW));
-            int h = Math.Max(1, (int)Math.Round(natH));
+            var (effW, effH) = _view.GetEffectiveBmpDims();
+            int w = Math.Max(1, (int)Math.Round(effW));
+            int h = Math.Max(1, (int)Math.Round(effH));
 
-            // frameRenderer: renders the given frame index to a BGRA32 byte array (via PNG round-trip).
-            // Must be called on the UI thread. Used by injected stack exporters.
-            byte[] FrameRenderer(int frameIndex)
+            var host = new RenderHostImpl(_view, new global::Avalonia.Size(w, h));
+
+            int savedFrameIndex = _view.FrameIndex;
+            using var cts = new CancellationTokenSource();
+            IProgress<int> progress = BeginProgress("Exporting\u2026", blockInput: true);
+            try
             {
-                _view.FrameIndex = frameIndex;
-                var rtb = _view.RenderToBitmap(w, h);
-                if (rtb == null) return [];
-                using var ms = new MemoryStream();
-                rtb.Save(ms);
-                return ms.ToArray();
+                await desc.Exporter(path, this, host, progress, cts.Token);
             }
-
-            await desc.Exporter(path, FrameRenderer, frameCount, w, h, desc.DefaultFps);
+            finally
+            {
+                _view.FrameIndex = savedFrameIndex;
+                EndProgress();
+            }
         }
 
         /// <summary>
@@ -282,7 +294,7 @@ namespace MxPlot.UI.Avalonia.Views
             // Virtual duplication writes all frames to a temp file and can take seconds for large
             // datasets, so show a blocking marquee progress overlay while it runs.
             IMatrixData copy;
-            if (_currentData.IsVirtual)
+            if (_currentData.IsVirtual && _currentData.FrameCount > 1)
             {
                 var progress = BeginProgress("Duplicating…", blockInput: true);
                 try
@@ -296,7 +308,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                copy = await Task.Run(() => _currentData.Duplicate());
+                copy = await Task.Run(() => _currentData.Duplicate(true));
             }
 
             AppendHistory(copy, "Duplicate", Title);
@@ -478,6 +490,14 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_currentData is null) return;
 
+            // Complex data: show Convert Complex dialog
+            if (_currentData.ValueType == typeof(System.Numerics.Complex))
+            {
+                ConvertComplexValueAsync();
+                return;
+            }
+
+            // Primitive types: show Convert Value Type dialog
             double lutMin = _rangeBar.DisplayedMinValue;
             double lutMax = _rangeBar.DisplayedMaxValue;
             if (double.IsNaN(lutMin) || double.IsNaN(lutMax))
@@ -517,6 +537,48 @@ namespace MxPlot.UI.Avalonia.Views
             action.Cancelled += (_, _) => { EndProgress(); _activeAction = null; };
 
             action.Invoke(CreateActionContext());
+        }
+
+        private async void ConvertComplexValueAsync()
+        {
+            if (_currentData is not MatrixData<System.Numerics.Complex> complexData) return;
+
+            var dialog = new ConvertComplexDialog(_currentData);
+            var result = await dialog.ShowCenteredOnAsync(this, this);
+            if (result == null) return;
+
+            var (mode, applyLog10, replaceData) = result.Value;
+
+            BeginProgress("Converting complex data…", blockInput: true);
+            try
+            {
+                await Task.Run(() =>
+                {
+                    var converted = complexData.ToDoubleAllFrames(mode, applyLog10);
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        EndProgress();
+                        string modeDesc = mode.ToString();
+                        string histDesc = $"Complex \u2192 double ({modeDesc})" + (applyLog10 ? " + log₁₀" : "");
+                        if (replaceData)
+                        {
+                            AppendHistory(converted, "Convert Complex", Title, histDesc);
+                            SetMatrixData(converted);
+                        }
+                        else
+                        {
+                            AppendHistory(converted, "Convert Complex", Title, histDesc);
+                            MatrixPlotter.Create(converted, _view.Lut, $"Convert of {Title}").Show();
+                        }
+                    });
+                });
+            }
+            catch (Exception ex)
+            {
+                EndProgress();
+                // Simple error display (future: ShowNotification)
+                System.Diagnostics.Debug.WriteLine($"Conversion failed: {ex.Message}");
+            }
         }
 
         /// <summary>Shows a minimal About dialog.</summary>
@@ -604,5 +666,416 @@ namespace MxPlot.UI.Avalonia.Views
             if (File.Exists(path + ".tiff")) return path + ".tiff";
             return path + ".tif";  // canonical
         }
+
+        // ── IRenderHost implementation ────────────────────────────────────────
+
+        /// <summary>
+        /// Returns export format entries for <paramref name="view"/>'s context menu.
+        /// For the main view this mirrors the hamburger-menu export formats.
+        /// For side views only formats relevant to the orthogonal slice sequence are included.
+        /// </summary>
+        private System.Collections.Generic.IEnumerable<(string Label, string Hint, bool RequiresStack, Func<Task> Action)>
+            GetExportFormatsForView(Controls.MxView view)
+        {
+            bool isMain = ReferenceEquals(view, _view);
+            if (isMain)
+            {
+                // Use EffectiveData so that a LinkedSource window with FrameCount=1 can still
+                // surface AVI export based on the parent's frame count.
+                // For XY-projection linked windows, also require that at least one axis remains
+                // after excluding the projection axis (LinkedSourceExcludedAxes). A single-axis
+                // parent (e.g. XYZ) has no animatable axis once Z is excluded → hide AVI.
+                bool mainIsStack = LinkedSource != null
+                    ? EffectiveData is { FrameCount: > 1 } ed &&
+                      ed.Axes.Count > (LinkedSourceExcludedAxes?.Count ?? 0)
+                    : EffectiveData is { FrameCount: > 1 };
+                yield return ("PNG\u2026", "Exports the current frame as a PNG image.", false,
+                    () => InvokeExportAsync(MakePngExportDescriptor()));
+                foreach (var desc in ExportFormats)
+                {
+                    var d = desc;
+                    if (d.RequiresStack && !mainIsStack) continue;
+                    yield return (d.Label, d.Hint, d.RequiresStack,
+                        LinkedSource != null
+                            ? () => InvokeExportForLinkedSourceAsync(d)
+                            : () => InvokeExportAsync(d));
+                }
+                foreach (var ep in MatrixPlotterPluginRegistry.ExportPlugins)
+                {
+                    if (ep.RequiresStack && !mainIsStack) continue;
+                    var d = ToDescriptor(ep);
+                    yield return (d.Label, d.Hint, d.RequiresStack,
+                        LinkedSource != null
+                            ? () => InvokeExportForLinkedSourceAsync(d)
+                            : () => InvokeExportAsync(d));
+                }
+            }
+            else
+            {
+                if (view.MatrixData == null) yield break;
+                // Side views: RequiresStack exporters require hyperstack (Axes.Count >= 2)
+                bool isHyperstack = _currentData is { } d2 && d2.Axes.Count >= 2;
+                var cv = view;
+                yield return ("PNG\u2026", "Exports the current side-view frame as a PNG image.", false,
+                    () => InvokeExportForViewAsync(
+                        new ExportFormatDescriptor(
+                            "PNG\u2026", "Exports the current side-view frame as a PNG image.",
+                            "PNG Image", "*.png",
+                            async (path, _, _, _, _) =>
+                            {
+                                await Task.CompletedTask;
+                                var (ew, eh) = cv.GetEffectiveBmpDims();
+                                cv.SaveAsPng(path, Math.Max(1, (int)Math.Round(ew)),
+                                    Math.Max(1, (int)Math.Round(eh)),
+                                    withOverlays: cv.OverlayManager.OverlaysVisible);
+                            },
+                            RequiresStack: false),
+                        cv));
+                if (isHyperstack)
+                {
+                    foreach (var desc in ExportFormats)
+                    {
+                        if (!desc.RequiresStack) continue;
+                        var d = desc;
+                        yield return (d.Label, d.Hint, d.RequiresStack,
+                            () => InvokeExportForViewAsync(d, cv));
+                    }
+                    foreach (var ep in MatrixPlotterPluginRegistry.ExportPlugins)
+                    {
+                        if (!ep.RequiresStack) continue;
+                        var d = ToDescriptor(ep);
+                        yield return (d.Label, d.Hint, d.RequiresStack,
+                            () => InvokeExportForViewAsync(d, cv));
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Opens a Save File dialog for <paramref name="desc"/> and exports the given
+        /// <paramref name="sideView"/> using a <see cref="SideViewRenderHostImpl"/> that
+        /// drives frame iteration through the main <see cref="_currentData"/> and waits for
+        /// each orthogonal slice rebuild before rendering the side view bitmap.
+        /// </summary>
+        private async Task InvokeExportForViewAsync(ExportFormatDescriptor desc, Controls.MxView sideView)
+        {
+            var md = _currentData;
+            if (md == null || sideView.MatrixData == null) return;
+
+            int digits = md.FrameCount > 1 ? md.FrameCount.ToString().Length : 0;
+            var baseName = Path.GetFileNameWithoutExtension(Title ?? "Image");
+            if (string.IsNullOrWhiteSpace(baseName)) baseName = "Image";
+
+            // Determine view label, excluded axis, and projection suffix for side views
+            bool isBottom = ReferenceEquals(sideView, _orthoPanel.BottomView);
+            bool isRight = ReferenceEquals(sideView, _orthoPanel.RightView);
+            string? viewLabel = isBottom ? "X-Z View" : isRight ? "Z-Y View" : null;
+            string? excludedAxisName = _orthoController.ActiveAxisName;
+
+            string viewTag = isBottom ? "X-Z" : isRight ? "Z-Y" : "";
+            ProjectionMode? projMode = isBottom ? _orthoController.XzProjectionMode
+                : isRight ? _orthoController.YzProjectionMode : null;
+            string projSuffix = projMode switch
+            {
+                MxPlot.Core.Processing.ProjectionMode.Maximum => " MIP",
+                MxPlot.Core.Processing.ProjectionMode.Minimum => " MinIP",
+                MxPlot.Core.Processing.ProjectionMode.Average => " AvIP",
+                _ => ""
+            };
+            string viewSuffix = viewTag.Length > 0 ? $" [{viewTag}{projSuffix}]" : "";
+
+            string suggestedName = desc.RequiresStack
+                ? baseName + viewSuffix
+                : baseName + viewSuffix + $"_frame{_view.FrameIndex.ToString($"D{Math.Max(digits, 1)}")}";
+
+            var sp = StorageProvider;
+            var file = await sp.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = viewLabel != null ? $"Export {viewLabel} as {desc.FileTypeName}" : $"Export as {desc.FileTypeName}",
+                SuggestedFileName = suggestedName,
+                FileTypeChoices = [new FilePickerFileType(desc.FileTypeName) { Patterns = [desc.FilePattern] }],
+            });
+            if (file == null) return;
+
+            var path = file.TryGetLocalPath();
+            if (string.IsNullOrEmpty(path)) return;
+
+            var (effW, effH) = sideView.GetEffectiveBmpDims();
+            int w = Math.Max(1, (int)Math.Round(effW));
+            int h = Math.Max(1, (int)Math.Round(effH));
+
+            using var host = new SideViewRenderHostImpl(sideView, md, new global::Avalonia.Size(w, h), viewLabel, excludedAxisName, _orthoController);
+
+            int savedActiveIndex = md.ActiveIndex;
+            using var cts = new CancellationTokenSource();
+            IProgress<int> progress = BeginProgress("Exporting\u2026", blockInput: true);
+            try
+            {
+                await desc.Exporter(path, this, host, progress, cts.Token);
+            }
+            finally
+            {
+                md.ActiveIndex = savedActiveIndex;
+                EndProgress();
+            }
+        }
+
+        /// <summary>
+        /// Concrete <see cref="Plugins.IRenderHost"/> that wraps the <see cref="Controls.MxView"/>
+        /// held by this <see cref="MatrixPlotter"/>. Created per export invocation.
+        /// </summary>
+        private sealed class RenderHostImpl : Plugins.IRenderHost
+        {
+            private readonly Controls.MxView _view;
+            private readonly global::Avalonia.Size _size;
+
+            internal RenderHostImpl(Controls.MxView view, global::Avalonia.Size size)
+            {
+                _view = view;
+                _size = size;
+            }
+
+            public MxPlot.Core.IMatrixData Data => _view.MatrixData!;
+
+            public global::Avalonia.Size CurrentRenderSize => _size;
+
+            public bool IsOverlayVisible => _view.OverlayManager.OverlaysVisible;
+
+            public Task<byte[]> RenderFrameAsync(int frameIndex, global::Avalonia.Size size, bool withOverlay)
+            {
+                return Dispatcher.UIThread.InvokeAsync<byte[]>(() =>
+                {
+                    _view.FrameIndex = frameIndex;
+                    // Sync Axis.Index so TextOverlay tokens like {1:p} reflect the current frame.
+
+                    /* The following is commented out because the index of each axis is automatically 
+                     * updated when FrameIndex is set. These lines are redundant and can be removed to avoid confusion.
+                    var dims = _view.MatrixData?.Dimensions;
+                    if (dims != null)
+                        dims.SetActiveIndices(dims.GetAxisIndices(frameIndex));
+                    */
+                    int w = Math.Max(1, (int)Math.Round(size.Width));
+                    int h = Math.Max(1, (int)Math.Round(size.Height));
+                    var rtb = _view.RenderToBitmap(w, h, withOverlay);
+                    if (rtb == null) return Array.Empty<byte>();
+                    using var wb = new WriteableBitmap(
+                        new PixelSize(w, h), new Vector(96, 96),
+                        PixelFormat.Bgra8888,
+                        AlphaFormat.Premul);
+                    using var lck = wb.Lock();
+                    rtb.CopyPixels(lck, AlphaFormat.Premul);
+                    var buf = new byte[lck.RowBytes * h];
+                    System.Runtime.InteropServices.Marshal.Copy(lck.Address, buf, 0, buf.Length);
+                    return buf;
+                }).GetTask();
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Plugins.IRenderHost"/> for side views (XZ/YZ orthogonal slices).
+        /// <para>
+        /// <see cref="RenderFrameAsync"/> internally calls
+        /// <see cref="Controls.OrthogonalViewController.RebuildSlicesForExportAsync"/> to
+        /// recompute the slice data for each frame, then captures the side view bitmap.
+        /// All UI-thread marshalling is handled internally; callers may call
+        /// <see cref="RenderFrameAsync"/> from any thread.
+        /// </para>
+        /// </summary>
+        private sealed class SideViewRenderHostImpl : Plugins.IRenderHost, IDisposable
+        {
+            private readonly Controls.MxView _sideView;
+            private readonly MxPlot.Core.IMatrixData _mainData;
+            private readonly global::Avalonia.Size _size;
+            private readonly Controls.OrthogonalViewController _orthoController;
+
+            internal SideViewRenderHostImpl(Controls.MxView sideView,
+                MxPlot.Core.IMatrixData mainData,
+                global::Avalonia.Size size,
+                string? viewLabel,
+                string? excludedAxisName,
+                Controls.OrthogonalViewController orthoController)
+            {
+                _sideView = sideView;
+                _mainData = mainData;
+                _size = size;
+                ViewLabel = viewLabel;
+                ExcludedAxisName = excludedAxisName;
+                _orthoController = orthoController;
+                _orthoController.BeginExport();
+            }
+
+            public void Dispose() => _orthoController.EndExport();
+
+            public MxPlot.Core.IMatrixData Data => _mainData;
+            public global::Avalonia.Size CurrentRenderSize => _size;
+            public bool IsOverlayVisible => _sideView.OverlayManager.OverlaysVisible;
+            public string? ViewLabel { get; }
+            public string? ExcludedAxisName { get; }
+
+            public async Task<byte[]> RenderFrameAsync(int frameIndex, global::Avalonia.Size size, bool withOverlay)
+            {
+                // Rebuild the slice/projection data first (background-safe).
+                int ix = _orthoController.CurrentIX;
+                int iy = _orthoController.CurrentIY;
+                await _orthoController.RebuildSlicesForExportAsync(ix, iy);
+
+                // All UI-touching work (Axis.Index sync fires AxisTracker events,
+                // RenderToBitmap requires the Compositor) must run on the UI thread.
+                return await Dispatcher.UIThread.InvokeAsync<byte[]>(() =>
+                {
+                    /*
+                    var dims = _mainData.Dimensions;
+                    dims.SetActiveIndices(dims.GetAxisIndices(frameIndex));
+                    */
+                    _mainData.ActiveIndex = frameIndex;
+
+                    int w = Math.Max(1, (int)Math.Round(size.Width));
+                    int h = Math.Max(1, (int)Math.Round(size.Height));
+                    var rtb = _sideView.RenderToBitmap(w, h, withOverlay);
+                    if (rtb == null) return [];
+                    using var wb = new WriteableBitmap(
+                        new PixelSize(w, h), new Vector(96, 96),
+                        PixelFormat.Bgra8888, AlphaFormat.Premul);
+                    using var lck = wb.Lock();
+                    rtb.CopyPixels(lck, AlphaFormat.Premul);
+                    var buf = new byte[lck.RowBytes * h];
+                    System.Runtime.InteropServices.Marshal.Copy(lck.Address, buf, 0, buf.Length);
+                    return buf;
+                }).GetTask();
+            }
+        }
+            /// <summary>
+            /// Export entry point used when this plotter has a <see cref="LinkedSource"/>.
+            /// Delegates file dialog, host construction, and frame driving to the source plotter,
+            /// but renders frames from this plotter's own <see cref="_view"/>.
+            /// </summary>
+            private async Task InvokeExportForLinkedSourceAsync(ExportFormatDescriptor desc)
+            {
+                var source = LinkedSource;
+                if (source == null) { await InvokeExportAsync(desc); return; }
+
+                var md = source._currentData;
+                if (md == null) return;
+
+                int digits = md.FrameCount > 1 ? md.FrameCount.ToString().Length : 0;
+                var baseName = Path.GetFileNameWithoutExtension(source.Title ?? "Image");
+                if (string.IsNullOrWhiteSpace(baseName)) baseName = "Image";
+
+                // Derive view label and excluded axis from LinkedSourceExcludedAxes
+                string? excludedAxisName = LinkedSourceExcludedAxes?.Count > 0
+                    ? LinkedSourceExcludedAxes[0] : null;
+                string viewSuffix = excludedAxisName != null ? $" [XY {excludedAxisName}-Proj]" : " [XY Proj]";
+
+                string suggestedName = desc.RequiresStack
+                    ? baseName + viewSuffix
+                    : baseName + viewSuffix + $"_frame{source._view.FrameIndex.ToString($"D{Math.Max(digits, 1)}")}";
+
+                var sp = StorageProvider;
+                var file = await sp.SaveFilePickerAsync(new FilePickerSaveOptions
+                {
+                    Title = $"Export XY Projection as {desc.FileTypeName}",
+                    SuggestedFileName = suggestedName,
+                    FileTypeChoices = [new FilePickerFileType(desc.FileTypeName) { Patterns = [desc.FilePattern] }],
+                });
+                if (file == null) return;
+
+                var path = file.TryGetLocalPath();
+                if (string.IsNullOrEmpty(path)) return;
+
+                var (effW, effH) = _view.GetEffectiveBmpDims();
+                int w = Math.Max(1, (int)Math.Round(effW));
+                int h = Math.Max(1, (int)Math.Round(effH));
+
+                string? viewLabel = excludedAxisName != null
+                    ? $"XY {excludedAxisName}-Projection" : "XY Projection";
+
+                using var host = new XYProjectionRenderHostImpl(
+                    _view, md, new global::Avalonia.Size(w, h),
+                    viewLabel, excludedAxisName, source._orthoController);
+
+                int savedActiveIndex = md.ActiveIndex;
+                using var cts = new CancellationTokenSource();
+                IProgress<int> progress = BeginProgress("Exporting\u2026", blockInput: true);
+                try
+                {
+                    await desc.Exporter(path, this, host, progress, cts.Token);
+                }
+                finally
+                {
+                    md.ActiveIndex = savedActiveIndex;
+                    EndProgress();
+                }
+            }
+
+            /// <summary>
+            /// <see cref="Plugins.IRenderHost"/> for XY projection views.
+            /// Drives frame iteration through the parent's <see cref="MxPlot.Core.IMatrixData"/>;
+            /// for each frame, recomputes the XY projection via <see cref="Controls.OrthogonalViewController"/>
+            /// and renders the projection view bitmap.
+            /// </summary>
+            private sealed class XYProjectionRenderHostImpl : Plugins.IRenderHost, IDisposable
+            {
+                private readonly Controls.MxView _projView;
+                private readonly MxPlot.Core.IMatrixData _sourceData;
+                private readonly global::Avalonia.Size _size;
+                private readonly Controls.OrthogonalViewController _orthoController;
+
+                internal XYProjectionRenderHostImpl(
+                    Controls.MxView projView,
+                    MxPlot.Core.IMatrixData sourceData,
+                    global::Avalonia.Size size,
+                    string? viewLabel,
+                    string? excludedAxisName,
+                    Controls.OrthogonalViewController orthoController)
+                {
+                    _projView = projView;
+                    _sourceData = sourceData;
+                    _size = size;
+                    ViewLabel = viewLabel;
+                    ExcludedAxisName = excludedAxisName;
+                    _orthoController = orthoController;
+                    _orthoController.BeginExport();
+                }
+
+                public void Dispose() => _orthoController.EndExport();
+
+                public MxPlot.Core.IMatrixData Data => _sourceData;
+                public global::Avalonia.Size CurrentRenderSize => _size;
+                public bool IsOverlayVisible => _projView.OverlayManager.OverlaysVisible;
+                public string? ViewLabel { get; }
+                public string? ExcludedAxisName { get; }
+
+                public async Task<byte[]> RenderFrameAsync(int frameIndex, global::Avalonia.Size size, bool withOverlay)
+                {
+                    // Recompute XY projection for this frame index (background-safe).
+                    var projResult = await _orthoController.ComputeXYProjectionForExportAsync();
+
+                    // All UI-touching work (Axis.Index sync, SetMatrixDataInternal,
+                    // RenderToBitmap) must run on the UI thread.
+                    return await Dispatcher.UIThread.InvokeAsync<byte[]>(() =>
+                    {
+                        /*
+                        var dims = _sourceData.Dimensions;
+                        dims.SetActiveIndices(dims.GetAxisIndices(frameIndex));
+                        */
+                        _sourceData.ActiveIndex = frameIndex;
+
+                        if (projResult != null)
+                            _projView.SetMatrixDataInternal(projResult);
+                        int w = Math.Max(1, (int)Math.Round(size.Width));
+                        int h = Math.Max(1, (int)Math.Round(size.Height));
+                        var rtb = _projView.RenderToBitmap(w, h, withOverlay);
+                        if (rtb == null) return [];
+                        using var wb = new WriteableBitmap(
+                            new PixelSize(w, h), new Vector(96, 96),
+                            PixelFormat.Bgra8888, AlphaFormat.Premul);
+                        using var lck = wb.Lock();
+                        rtb.CopyPixels(lck, AlphaFormat.Premul);
+                        var buf = new byte[lck.RowBytes * h];
+                        System.Runtime.InteropServices.Marshal.Copy(lck.Address, buf, 0, buf.Length);
+                        return buf;
+                    }).GetTask();
+                }
+            }
+        }
     }
-}

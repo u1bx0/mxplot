@@ -1,6 +1,5 @@
 ﻿using MxPlot.Core;
 using MxPlot.Core.Processing;
-using MxPlot.UI.Avalonia;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -116,17 +115,16 @@ namespace MxPlot.UI.Avalonia.Views
                 $"radius={p.Kernel.Radius}{detailSuffix}");
 
             string resultTitle = $"{kernelLabel} of {Title}";
-            var resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
-
+            MatrixPlotter resultPlotter;
             if (p.SyncSource && singleFrame)
             {
-                // Register as linked child before Show() so dashboard can nest it
-                PlotWindowNotifier.SetParentLink(resultPlotter, this);
+                resultPlotter = CreateLinked(result, _view.Lut, resultTitle, linkRefresh: false);
                 resultPlotter.Show();
                 resultPlotter.StartFilterSync(this, p.Kernel);
             }
             else
             {
+                resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
                 resultPlotter.Show();
             }
         }

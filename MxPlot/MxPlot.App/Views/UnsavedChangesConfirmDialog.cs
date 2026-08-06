@@ -12,9 +12,9 @@ namespace MxPlot.App.Views
     /// Returns <c>true</c> if the user chose "Don't Save" (proceed with exit),
     /// or <c>false</c> / <c>null</c> if the user cancelled.
     /// </summary>
-    internal sealed class AppExitConfirmDialog : Window
+    internal sealed class UnsavedChangesConfirmDialog : Window
     {
-        private AppExitConfirmDialog(IReadOnlyList<string> titles)
+        private UnsavedChangesConfirmDialog(IReadOnlyList<string> titles, string actionLabel = "Don't Save")
         {
             Title = "Unsaved Changes";
             CanResize = false;
@@ -46,17 +46,17 @@ namespace MxPlot.App.Views
 
             var dontSaveBtn = new Button
             {
-                Content = "Don't Save",
-                Width = 88,
-                Height = 26,
+                Content = actionLabel,
+                Width = 95,
+                Height = 28,
                 FontSize = 11,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
             };
             var cancelBtn = new Button
             {
                 Content = "Cancel",
-                Width = 72,
-                Height = 26,
+                Width = 80,
+                Height = 28,
                 FontSize = 11,
                 IsCancel = true,
                 IsDefault = true,
@@ -88,9 +88,9 @@ namespace MxPlot.App.Views
         /// Shows the dialog modally.
         /// Returns <c>true</c> if the user chose "Don't Save", <c>false</c> or <c>null</c> if cancelled.
         /// </summary>
-        public static async Task<bool> ShowAsync(Window owner, IReadOnlyList<string> unsavedTitles)
+        public static async Task<bool> ShowAsync(Window owner, IReadOnlyList<string> unsavedTitles, string actionLabel = "Don't Save")
         {
-            var dlg = new AppExitConfirmDialog(unsavedTitles);
+            var dlg = new UnsavedChangesConfirmDialog(unsavedTitles, actionLabel);
             return await dlg.ShowDialog<bool>(owner);
         }
     }

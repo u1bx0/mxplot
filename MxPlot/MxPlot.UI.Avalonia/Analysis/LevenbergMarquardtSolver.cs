@@ -48,7 +48,7 @@ namespace MxPlot.UI.Avalonia.Analysis
                 string u = string.IsNullOrEmpty(unit) ? "" : $" [{unit}]";
 
                 var sb = new StringBuilder();
-                sb.AppendLine($"── {Fitter.Name} fit ──────────────");
+                sb.AppendLine($"── {Fitter.Name} fit ──────");
                 sb.AppendLine("Function:");
                 sb.AppendLine($"  {Fitter.FormulaDescription}");
                 sb.AppendLine("Result:");

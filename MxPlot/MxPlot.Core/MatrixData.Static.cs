@@ -47,15 +47,42 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Internally calls Clone() method
+        /// Creates a type-preserving deep copy of the matrix data.
         /// </summary>
-        /// <typeparam name="T"></typeparam>
-        /// <param name="target"></param>
-        /// <returns></returns>
-        public static T Duplicate<T>(this T target)
+        /// <remarks>
+        /// This extension method wraps <see cref="IMatrixData.Clone(bool)"/> to preserve the concrete type
+        /// when working with <see cref="IMatrixData"/> references.
+        /// <para>
+        /// Unlike calling <c>Clone()</c> directly, which returns <see cref="IMatrixData"/>,
+        /// <c>Duplicate()</c> returns the same concrete type as the source (e.g., <c>MatrixData&lt;double&gt;</c>),
+        /// eliminating the need for casting.
+        /// </para>
+        /// </remarks>
+        /// <typeparam name="T">
+        /// The concrete type implementing <see cref="IMatrixData"/> (e.g., <c>MatrixData&lt;double&gt;</c>).
+        /// </typeparam>
+        /// <param name="target">The matrix data instance to duplicate.</param>
+        /// <param name="forceInMemory">
+        /// When <c>true</c>, forces the copy to be fully loaded into memory,
+        /// even if the source is virtual (e.g., memory-mapped file).
+        /// When <c>false</c> (default), preserves the original backing structure.
+        /// </param>
+        /// <returns>
+        /// A new instance of type <typeparamref name="T"/> with identical data.
+        /// If <paramref name="forceInMemory"/> is <c>true</c>, the returned instance
+        /// will have <see cref="IMatrixData.IsVirtual"/> = <c>false</c>.
+        /// </returns>
+        /// <example>
+        /// <code>
+        /// IMatrixData data = GetSomeMatrix(); // runtime type: MatrixData&lt;double&gt;
+        /// var copy = data.Duplicate();        // ✅ MatrixData&lt;double&gt; — no cast needed
+        /// var inMem = data.Duplicate(true);   // ✅ Force in-memory copy
+        /// </code>
+        /// </example>
+        public static T Duplicate<T>(this T target, bool forceInMemory = false)
             where T : IMatrixData
         {
-            return (T)target.Clone();
+            return (T)target.Clone(forceInMemory);
         }
 
         /// <summary>

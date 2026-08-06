@@ -1,8 +1,8 @@
 ﻿# WinForms / WPF から Avalonia MxPlotter を使う手順
 
 **作成日**: 2026-4-19  
-**更新日**: 2026-04-29  
-**対象バージョン**: `MxPlot.UI.Avalonia` (Avalonia 11.3.14), .NET 10
+**更新日**: 2026-07-16  
+**対象バージョン**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 10
 
 ---
 

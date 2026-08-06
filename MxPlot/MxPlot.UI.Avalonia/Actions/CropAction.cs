@@ -9,6 +9,7 @@ using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
 using MxPlot.UI.Avalonia.Views;
 using System;
+using System.Diagnostics;
 using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Actions
@@ -42,10 +43,6 @@ namespace MxPlot.UI.Avalonia.Actions
     /// <c>XY.X / XY.Width</c> ↔ <c>XZ.X / XZ.Width</c> (shared X range)<br/>
     /// <c>XY.Y / XY.Height</c> ↔ <c>ZY.X / ZY.Width</c> (shared Y range)<br/>
     /// <c>XZ.Y / XZ.Height</c> ↔ <c>ZY.Y / ZY.Height</c> (shared Z/depth range)<br/>
-    /// <para>
-    /// TODO: When orthogonal views are active, also substack along the depth axis on Apply
-    /// (zStart = <c>(int)(_xzRoi.Y + 0.5)</c>, zCount = <c>(int)_xzRoi.Height</c>).
-    /// </para>
     /// </remarks>
     public sealed class CropAction : IPlotterAction
     {
@@ -63,14 +60,21 @@ namespace MxPlot.UI.Avalonia.Actions
         private readonly CropRole _role;
         private double _offsetX;
         private double _offsetY;
+        private double _offsetZ;
         private double _lastLeaderX;
         private double _lastLeaderY;
+        private double _lastLeaderZ;
         private CropRoiBounds? _finalBounds;
-        // Follower: Z range received from the leader via SyncUpdateLeaderBounds
+        
+        // Follower: logical Z range received from the leader via SyncUpdateLeaderBounds.
+        // These values reflect the leader's crop axis and are preserved across orthogonal
+        // view axis switches so that the correct range is restored when the matching axis
+        // is re-activated. Reset to (0, -1) when the leader switches to CropMode.XY.
         private CropMode _followerMode = CropMode.XY;
         private string? _followerZAxisName;
         private int _followerZStart;
         private int _followerZCount = -1;
+        
         private OverlayLayer? _overlay;
         private EventHandler? _sizeEditHandler;
         private EventHandler? _xzSizeEditHandler;
@@ -85,7 +89,7 @@ namespace MxPlot.UI.Avalonia.Actions
         private Button? _applyBtn;
         private ComboBox? _modeCombo;
         private TextBlock? _cropLabel;
-        private TextBlock? _hintIcon;
+        private PathIcon? _hintIcon;
         private bool _refreshingModeCombo;
         private CropMode _mode = CropMode.XY;
 
@@ -191,16 +195,17 @@ namespace MxPlot.UI.Avalonia.Actions
                 {
                     int zCount = ctx.Data.Axes.FirstOrDefault(a => a.Name == ctx.DepthAxisName)?.Count ?? 1;
                     bool zAxisMatches = ctx.DepthAxisName == _followerZAxisName;
-                    if (!zAxisMatches)
-                    {
-                        // Follower orth axis differs from leader crop axis: show full Z range.
-                        _followerZStart = 0;
-                        _followerZCount = zCount;
-                    }
-                    BuildSideRoisFollower(ctx.Data, zCount);
+                    int displayStart = zAxisMatches ? _followerZStart : 0;
+                    int displayCount = zAxisMatches ? (_followerZCount > 0 ? _followerZCount : zCount) : zCount;
+                    BuildSideRoisFollower(ctx.Data, zCount, displayStart, displayCount);
                     ctx.OrthoPanel.BottomView.OverlayManager.AddObject(_xzRoi!);
                     ctx.OrthoPanel.RightView.OverlayManager.AddObject(_zyRoi!);
                     WireFollowerSyncHandlers();
+
+                    // Initialize Z offset from clamped Z start position (same pattern as X/Y offset).
+                    int clampedZStart = Math.Clamp(displayStart, 0, zCount - 1);
+                    _lastLeaderZ = InitialBounds.ZStart;
+                    _offsetZ = clampedZStart - _lastLeaderZ;
                 }
             }
             else
@@ -252,9 +257,36 @@ namespace MxPlot.UI.Avalonia.Actions
             Cleanup();
         }
 
+        /// <summary>
+        /// Called by the host whenever the orthogonal view axis or data context changes
+        /// (e.g. the user switches the Volume axis while a crop action is in progress).
+        /// Updates ROI bounds, data extents, and the mode ComboBox to reflect the new context.
+        /// </summary>
+        /// <remarks>
+        /// This method is invoked twice when switching Volume axes:
+        /// first with <c>depthAxisName = null</c> (deactivation of the old axis),
+        /// then with the new axis name (activation).
+        /// The first call removes any existing XZ/ZY ROIs via <paramref name="newContext"/>'s
+        /// predecessor context; the second call re-creates them with the correct extents.
+        /// <para>
+        /// For the Leader role, switching axes while in Substack or Volume mode automatically
+        /// downgrades to <see cref="CropMode.XY"/> and resets the Z range to full extent
+        /// (handled by <see cref="RefreshModeComboItems"/>).
+        /// </para>
+        /// <para>
+        /// For the Follower role, the displayed Z range is restored from
+        /// <see cref="_followerZStart"/>/<see cref="_followerZCount"/> when the axis matches
+        /// the leader's crop axis, or set to full extent on mismatch — without overwriting
+        /// the stored logical Z range.
+        /// </para>
+        /// </remarks>
         public void NotifyContextChanged(PlotterActionContext newContext)
         {
+            Debug.WriteLine($"[CropAction] NotifyContextChanged, depth={newContext.DepthAxisName}");
+            Debug.WriteLine($"[CropAction] _followerZStart - ZCount = {_followerZStart} - {_followerZCount}");
+
             if (_disposed || _xyRoi == null) return;
+            var oldCtx = _ctx;
             _ctx = newContext;
 
             var data = newContext.Data;
@@ -267,7 +299,21 @@ namespace MxPlot.UI.Avalonia.Actions
             RefreshModeComboItems(newContext.DepthAxisName);
 
             // ── No ortho views: nothing more to clamp ─────────────────────────
-            if (newContext.OrthoPanel == null || newContext.DepthAxisName == null) return;
+            if (newContext.OrthoPanel == null || newContext.DepthAxisName == null)
+            {
+                if (_xzRoi != null && oldCtx?.OrthoPanel != null)
+                {
+                    UnwireSyncHandlers();
+                    oldCtx.OrthoPanel.BottomView.OverlayManager.RemoveObject(_xzRoi);
+                    _xzRoi = null;
+                }
+                if (_zyRoi != null && oldCtx?.OrthoPanel != null)
+                {
+                    oldCtx.OrthoPanel.RightView.OverlayManager.RemoveObject(_zyRoi);
+                    _zyRoi = null;
+                }
+                return;
+            }
 
             // OrthoPanel is now available but side ROIs don't exist yet — create them.
             if (_xzRoi == null && _zyRoi == null && _role == CropRole.Leader)
@@ -286,13 +332,11 @@ namespace MxPlot.UI.Avalonia.Actions
             {
                 int zCount = data.Axes.FirstOrDefault(a => a.Name == newContext.DepthAxisName)?.Count ?? 1;
                 bool zAxisMatches = newContext.DepthAxisName == _followerZAxisName;
-                if (!zAxisMatches)
-                {
-                    // Follower orth axis differs from leader crop axis: show full Z range.
-                    _followerZStart = 0;
-                    _followerZCount = zCount;
-                }
-                BuildSideRoisFollower(data, zCount);
+                int displayStart = zAxisMatches ? _followerZStart : 0;
+                int displayCount = zAxisMatches ? (_followerZCount > 0 ? _followerZCount : zCount) : zCount;
+                
+                BuildSideRoisFollower(data, zCount, displayStart, displayCount);
+
                 newContext.OrthoPanel.BottomView.OverlayManager.AddObject(_xzRoi!);
                 newContext.OrthoPanel.RightView.OverlayManager.AddObject(_zyRoi!);
                 WireFollowerSyncHandlers();
@@ -303,13 +347,33 @@ namespace MxPlot.UI.Avalonia.Actions
 
             if (_xzRoi == null || _zyRoi == null) return;
 
-            int newZCount = data.Axes.FirstOrDefault(a => a.Name == newContext.DepthAxisName)?.Count ?? 1;
+            int newZCount = data[newContext.DepthAxisName]?.Count ?? 1;
             _dataZCount = newZCount;
 
             // ── XZ ROI: re-sync X from clamped XY, then clamp Z to new range ─
             _xzRoi.DataBounds = new Rect(-0.5, -0.5, data.XCount, newZCount);
             _xzRoi.X = _xyRoi.X;
             _xzRoi.Width = _xyRoi.Width;
+            if (_role == CropRole.Follower)
+            {
+                bool zAxisMatches = newContext.DepthAxisName == _followerZAxisName;
+                if (zAxisMatches && _followerZCount > 0)
+                {
+                    int zStart = Math.Clamp(_followerZStart, 0, newZCount - 1);
+                    int zCount = Math.Min(_followerZCount, newZCount - zStart);
+                    _xzRoi.Y = zStart - 0.5;
+                    _xzRoi.Height = zCount;
+                }
+                else
+                {
+                    _xzRoi.Y = -0.5;
+                    _xzRoi.Height = newZCount;
+                }
+            }
+            else
+            { //Leader or Single window
+                _xzRoi.Height = newZCount;
+            }
             ClampToDataBounds(_xzRoi);
 
             // ── ZY ROI: re-derive entirely from clamped XY + XZ ──────────────
@@ -319,6 +383,7 @@ namespace MxPlot.UI.Avalonia.Actions
             _zyRoi.Y = _dataZCount - _xzRoi.Y - _xzRoi.Height - 1;
             _zyRoi.Width = _xyRoi.Height;
             _zyRoi.Height = _xzRoi.Height;
+            
 
             // ── Invalidate all three views ────────────────────────────────────
             newContext.MainView.OverlayManager.InvalidateVisual();
@@ -392,7 +457,23 @@ namespace MxPlot.UI.Avalonia.Actions
             _zyRoi.SizeEditRequested += _zySizeEditHandler;
         }
 
-        private void BuildSideRoisFollower(IMatrixData data, int zCount)
+        /// <summary>
+        /// Creates the XZ and ZY follower ROIs for the orthogonal views.
+        /// </summary>
+        /// <param name="data">The follower's matrix data.</param>
+        /// <param name="zCount">The total number of frames along the depth axis.</param>
+        /// <param name="displayZStart">
+        /// Optional override for the initial Z start index shown in the ROI.
+        /// When <c>null</c>, <see cref="_followerZStart"/> is used.
+        /// Pass an explicit value when the displayed axis differs from the leader's crop axis
+        /// (axis mismatch) to avoid overwriting the stored Z range with the mismatched axis's extent.
+        /// </param>
+        /// <param name="displayZCount">
+        /// Optional override for the initial Z count shown in the ROI.
+        /// When <c>null</c>, <see cref="_followerZCount"/> is used (falling back to full range when negative).
+        /// </param>
+        private void BuildSideRoisFollower(IMatrixData data, int zCount,
+            int? displayZStart = null, int? displayZCount = null)
         {
             _dataYCount = data.YCount;
             _dataZCount = zCount;
@@ -400,10 +481,9 @@ namespace MxPlot.UI.Avalonia.Actions
             var accent = Color.Parse("#E57373");
 
             // Initial Z range from leader bounds (clamp to local data depth).
-            int initZStart = Math.Clamp(_followerZStart, 0, zCount - 1);
-            int initZCount = _followerZCount > 0
-                ? Math.Min(_followerZCount, zCount - initZStart)
-                : zCount;
+            int initZStart = Math.Clamp(displayZStart ?? _followerZStart, 0, zCount - 1);
+            int initZCount = (displayZCount ?? (_followerZCount > 0 ? _followerZCount : zCount));
+            initZCount = Math.Min(initZCount, zCount - initZStart);
 
             _xzRoi = new RoiObject
             {
@@ -490,12 +570,19 @@ namespace MxPlot.UI.Avalonia.Actions
                 _zyRoi.Y = _dataZCount - _xzRoi.Y - _xzRoi.Height - 1;
             _syncing = false;
 
+            // Update logical Z range from ROI position.
+            _followerZStart = (int)(_xzRoi.Y + 0.5);
+            _followerZCount = (int)_xzRoi.Height;
+
             // Recalculate X offset from updated XY position.
             if (_ctx?.Data != null)
             {
                 int actualX = (int)(_xyRoi.X + 0.5);
                 _offsetX = actualX - _lastLeaderX;
             }
+
+            // Recalculate Z offset from updated Z position.
+            _offsetZ = _followerZStart - _lastLeaderZ;
 
             _ctx?.MainView.OverlayManager.InvalidateVisual();
             _ctx?.OrthoPanel?.RightView.OverlayManager.InvalidateVisual();
@@ -518,6 +605,13 @@ namespace MxPlot.UI.Avalonia.Actions
                 _xzRoi.Y = _dataZCount - _zyRoi.Y - _zyRoi.Height - 1;
             _syncing = false;
 
+            // Update logical Z range from ROI position (ZY has FlipY=true, so invert).
+            if (_xzRoi != null)
+            {
+                _followerZStart = (int)(_xzRoi.Y + 0.5);
+                _followerZCount = (int)_xzRoi.Height;
+            }
+
             // Recalculate Y offset from updated XY position.
             if (_ctx?.Data != null)
             {
@@ -525,6 +619,9 @@ namespace MxPlot.UI.Avalonia.Actions
                 int actualDataY = _ctx.Data.YCount - actualBitmapY - (int)_xyRoi.Height;
                 _offsetY = actualDataY - _lastLeaderY;
             }
+
+            // Recalculate Z offset from updated Z position.
+            _offsetZ = _followerZStart - _lastLeaderZ;
 
             _ctx?.MainView.OverlayManager.InvalidateVisual();
             _ctx?.OrthoPanel?.BottomView.OverlayManager.InvalidateVisual();
@@ -659,12 +756,13 @@ namespace MxPlot.UI.Avalonia.Actions
                     FontSize = PanelFontSize,
                     VerticalAlignment = VerticalAlignment.Center,
                 };
-                _hintIcon = new TextBlock
+                _hintIcon = new PathIcon
                 {
-                    Text = "\u2139",
-                    FontSize = PanelFontSize,
-                    Opacity = 0.75,
-                    Margin = new Thickness(3, 0, 0, 0),
+                    Data = MenuIcons.Info,
+                    Width = 12,
+                    Height = 12,
+                    Foreground = new SolidColorBrush(Color.Parse("#29B6F6")),
+                    Margin = new Thickness(4, 0, 0, 0),
                     VerticalAlignment = VerticalAlignment.Center,
                     IsVisible = false,
                 };
@@ -1048,6 +1146,15 @@ namespace MxPlot.UI.Avalonia.Actions
             int frameIndex = _role == CropRole.Follower && thisFrameOnly ? LeaderFrameIndex : -1;
 
             CropMode effectiveMode = _role == CropRole.Follower ? _followerMode : _mode;
+
+            if (_role == CropRole.Follower && effectiveMode != CropMode.XY)
+            {
+                bool hasAxis = _followerZAxisName != null
+                    && _ctx?.Data?.Axes.Any(a => a.Name == _followerZAxisName) == true;
+                if (!hasAxis)
+                    effectiveMode = CropMode.XY;
+            }
+
             bool hasZ = effectiveMode != CropMode.XY;
             return new CropParameters(x, y, w, h, replaceData, thisFrameOnly, frameIndex,
                 Mode: effectiveMode,
@@ -1448,7 +1555,17 @@ namespace MxPlot.UI.Avalonia.Actions
                 int hPx = (int)_xyRoi.Height;
                 string dxStr = _offsetX >= 0 ? $"+{(int)_offsetX}" : $"{(int)_offsetX}";
                 string dyStr = _offsetY >= 0 ? $"+{(int)_offsetY}" : $"{(int)_offsetY}";
-                SetInfoText($"Offset = ({dxStr}, {dyStr}) px\nSize = {wPx} \u00d7 {hPx} px");
+
+                // Include Z offset if orthogonal views are active.
+                if (_xzRoi != null && _zyRoi != null)
+                {
+                    string dzStr = _offsetZ >= 0 ? $"+{(int)_offsetZ}" : $"{(int)_offsetZ}";
+                    SetInfoText($"Offset = ({dxStr}, {dyStr}, {dzStr})\nSize = {wPx} \u00d7 {hPx} px");
+                }
+                else
+                {
+                    SetInfoText($"Offset = ({dxStr}, {dyStr}) px\nSize = {wPx} \u00d7 {hPx} px");
+                }
                 return;
             }
 
@@ -1682,6 +1799,20 @@ namespace MxPlot.UI.Avalonia.Actions
         /// Maintains the user's pixel offset; clamps to this window's data bounds.
         /// Call only when <see cref="Role"/> is <see cref="CropRole.Follower"/>.
         /// </summary>
+        /// <remarks>
+        /// Z-axis synchronisation rules:
+        /// <list type="bullet">
+        ///   <item>When the follower's data contains the leader's crop axis (<see cref="_followerZAxisName"/>),
+        ///         the Z range (<see cref="_followerZStart"/>/<see cref="_followerZCount"/>) is updated
+        ///         regardless of whether the follower's orthogonal view is currently active.
+        ///         This ensures Substack/Volume crops are applied even when the ortho panel is hidden.</item>
+        ///   <item>When the leader switches to <see cref="CropMode.XY"/> (<c>leader.ZCount == -1</c>),
+        ///         the follower's Z range is reset to full extent and any visible XZ/ZY ROIs are
+        ///         updated accordingly.</item>
+        ///   <item>When the follower does not have the leader's crop axis, the mode is downgraded
+        ///         to <see cref="CropMode.XY"/> and all frames are retained.</item>
+        /// </list>
+        /// </remarks>
         internal void SyncUpdateLeaderBounds(CropRoiBounds leader)
         {
             if (_xyRoi == null || _ctx?.Data == null) return;
@@ -1705,26 +1836,47 @@ namespace MxPlot.UI.Avalonia.Actions
             _offsetY = actualDataY - leader.Y;
 
             // Store leader Z info for use in ComputeParameters (only when axes match).
-            _followerMode = leader.Mode;
             bool zAxisMatches = _ctx.DepthAxisName != null && _ctx.DepthAxisName == leader.ZAxisName;
-            if (zAxisMatches)
+            bool followerHasAxis = leader.ZAxisName != null && _ctx.Data.Axes.Any(a => a.Name == leader.ZAxisName);
+
+            if (followerHasAxis)
             {
+                _followerMode = leader.Mode;
                 _followerZAxisName = leader.ZAxisName;
-                _followerZStart = leader.ZStart;
+
+                // Apply Z offset to leader's Z range before clamping.
+                int targetZStart = leader.ZStart + (int)_offsetZ;
+                int clampedZStart = Math.Clamp(targetZStart, 0, _ctx.Data[leader.ZAxisName]?.Count - 1 ?? 0);
+                _followerZStart = clampedZStart;
                 _followerZCount = leader.ZCount;
+
+                // Recalculate offset from clamped result (same pattern as X/Y).
+                _lastLeaderZ = leader.ZStart;
+                _offsetZ = clampedZStart - leader.ZStart;
             }
-            // else: keep existing _followerZAxisName/_followerZStart/_followerZCount (full range for mismatched axis)
+            else
+            {
+                _followerMode = CropMode.XY;
+               if(leader.ZCount == -1)
+                {
+                    _followerZStart = 0;
+                    _followerZCount = -1;
+                    _offsetZ = 0;
+                }
+            }
+
 
             // Update follower XZ/ZY ROIs to reflect the new XY position and, if axes match, Z range.
             if (_xzRoi != null && _zyRoi != null)
             {
                 if (zAxisMatches)
                 {
+                    // Use the already-clamped _followerZStart/_followerZCount values.
                     int zStart = leader.ZCount > 0
-                        ? Math.Clamp(leader.ZStart, 0, _dataZCount - 1)
+                        ? _followerZStart
                         : 0;
                     int zCount = leader.ZCount > 0
-                        ? Math.Min(leader.ZCount, _dataZCount - zStart)
+                        ? Math.Min(_followerZCount, _dataZCount - zStart)
                         : _dataZCount;
 
                     _xzRoi.X = _xyRoi.X;
@@ -1744,6 +1896,14 @@ namespace MxPlot.UI.Avalonia.Actions
                     _xzRoi.Width = _xyRoi.Width;
                     _zyRoi.X = _dataYCount - _xyRoi.Y - _xyRoi.Height - 1;
                     _zyRoi.Width = _xyRoi.Height;
+
+                    if (leader.ZCount == -1)
+                    {
+                        _xzRoi.Y = -0.5;
+                        _xzRoi.Height = _dataZCount;
+                        _zyRoi.Y = -0.5;
+                        _zyRoi.Height = _dataZCount;
+                    }
                 }
 
                 _ctx.OrthoPanel?.BottomView.OverlayManager.InvalidateVisual();
@@ -1755,17 +1915,19 @@ namespace MxPlot.UI.Avalonia.Actions
             {
                 if (leader.Mode != CropMode.XY && leader.ZCount > 0)
                 {
-                    if (zAxisMatches)
-                    {
+                    if (followerHasAxis)
+                    {/*
                         string axName = leader.ZAxisName ?? "Z";
                         int zEnd = leader.ZStart + leader.ZCount - 1;
                         _zInfoText.Text = $"{axName}: {leader.ZStart + 1}\u2013{zEnd + 1} ({leader.ZCount})";
+                        */
+                        string axName = leader.ZAxisName ?? "Z";
+                        int zEnd = _followerZStart + _followerZCount - 1;
+                        _zInfoText.Text = $"{axName}: {_followerZStart + 1}–{zEnd + 1} ({_followerZCount})";
                     }
                     else
                     {
-                        // Axes differ: orth view shows full range, note it.
-                        string axName = _ctx.DepthAxisName ?? "Z";
-                        _zInfoText.Text = $"{axName}: full (axis mismatch)";
+                        _zInfoText.Text = "All frames retained";
                     }
                     _zInfoText.IsVisible = true;
                 }

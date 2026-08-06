@@ -23,7 +23,8 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 Text = currentName,
                 Width = 150,
-                Height = 24,
+                MinHeight = 0,
+                Padding = new Thickness(6, 6),
                 VerticalContentAlignment = VerticalAlignment.Center,
                 FontSize = 11,
             };

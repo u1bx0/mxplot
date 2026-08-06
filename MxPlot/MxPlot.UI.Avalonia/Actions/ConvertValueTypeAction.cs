@@ -1,4 +1,4 @@
-using Avalonia.Controls;
+﻿using Avalonia.Controls;
 using MxPlot.Core;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Views;

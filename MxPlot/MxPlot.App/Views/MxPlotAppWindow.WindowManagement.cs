@@ -1,0 +1,175 @@
+﻿using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.VisualTree;
+using MxPlot.App.ViewModels;
+using System.Linq;
+
+namespace MxPlot.App.Views
+{
+    public partial class MxPlotAppWindow
+    {
+        // ── Window focus helper ───────────────────────────────────────────
+
+        /// <summary>
+        /// Called when a managed window gains focus.
+        /// Updates the dashboard list selection to match the focused window,
+        /// preserving multi-selection after operations like Tile.
+        /// </summary>
+        private void OnManagedWindowFocused(Window window)
+        {
+            if (_isSyncActive) return;
+            var item = ViewModel.ManagedWindows.FirstOrDefault(m => m.Window == window);
+            if (item == null) return;
+
+            // If the focused window is already part of a multi-selection, keep the
+            // selection as-is (e.g. after Tile repositions and activates windows).
+            if (_windowList.SelectedItems?.Count > 1 &&
+                _windowList.SelectedItems.Contains(item))
+                return;
+
+            _windowList.SelectedItem = item;
+        }
+
+        // ── Window list context menu ──────────────────────────────────────
+
+        /// <summary>
+        /// Dynamically builds a context menu for the window list with Rename, Hide/Show, and Close options.
+        /// Menu content adapts based on single vs. multi-selection and visibility states.
+        /// </summary>
+        private void OnWindowListContextRequested(object? sender, ContextRequestedEventArgs e)
+        {
+            // No context menu during Sync mode, as selection is locked to the sync snapshot.
+            if (_isSyncActive) return;
+
+            // This ensures that the context menu actions apply to the clicked item even if it wasn't previously selected.
+            var target = (e.Source as Control)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
+            if (target?.DataContext is not WindowListItemViewModel clicked) return;
+
+            if (!clicked.IsSelected)
+            {
+                _windowList.SelectedItem = clicked;
+            }
+
+            var selected = _windowList.SelectedItems?
+                .OfType<WindowListItemViewModel>()
+                .ToList() ?? [];
+            if (selected.Count == 0) return;
+
+            bool multi = selected.Count > 1;
+            bool anyVisible = selected.Any(m => m.IsWindowVisible);
+            bool anyHidden = selected.Any(m => !m.IsWindowVisible);
+
+            var menu = new ContextMenu();
+
+            // ── Rename (single selection only, visible window only) ────────────────
+            if (!multi && clicked.IsWindowVisible)
+            {
+                var renameItem = new MenuItem { Header = "Rename" };
+                renameItem.Click += (_, _) => clicked.RenameCommand.Execute(null);
+                menu.Items.Add(renameItem);
+            }
+
+            // ── Hide / Show ───────────────────────────────────────────────
+            if (!multi)
+            {
+                // Single selection: Toggle based on current state
+                var toggleItem = new MenuItem { Header = clicked.IsWindowVisible ? "Hide" : "Show" };
+                toggleItem.Click += (_, _) => clicked.ToggleVisibility();
+                menu.Items.Add(toggleItem);
+            }
+            else if (anyVisible && !anyHidden)
+            {
+                // All visible → Hide Selected
+                var hideItem = new MenuItem { Header = "Hide Selected" };
+                hideItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(hideItem);
+            }
+            else if (!anyVisible && anyHidden)
+            {
+                // All hidden → Show Selected
+                var showItem = new MenuItem { Header = "Show Selected" };
+                showItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(showItem);
+            }
+            else
+            {
+                // Mixed → Hide Selected and Show Selected
+                var hideItem = new MenuItem { Header = "Hide Selected" };
+                hideItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                var showItem = new MenuItem { Header = "Show Selected" };
+                showItem.Click += (_, _) =>
+                {
+                    foreach (var vm in selected.Where(m => !m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(hideItem);
+                menu.Items.Add(showItem);
+            }
+
+            // ── Hide Others (visible window only, other visible windows exist) ────
+            if (clicked.IsWindowVisible && ViewModel.ManagedWindows.Any(m => m != clicked && m.IsWindowVisible))
+            {
+                var hideOthersItem = new MenuItem { Header = "Hide Others" };
+                hideOthersItem.Click += (_, _) =>
+                {
+                    foreach (var vm in ViewModel.ManagedWindows.Where(m => m != clicked && m.IsWindowVisible))
+                        vm.ToggleVisibility();
+                };
+                menu.Items.Add(hideOthersItem);
+            }
+
+            // ── Close ─────────────────────────────────────────────────────
+            menu.Items.Add(new Separator());
+            var closeItem = new MenuItem { Header = multi ? "Close Selected" : "Close" };
+            closeItem.Click += (_, _) =>
+            {
+                foreach (var vm in selected.ToList())
+                    vm.Window.Close();
+            };
+            menu.Items.Add(closeItem);
+
+            menu.Open(_windowList);
+            e.Handled = true;
+        }
+
+        // ── Selection helpers ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Removes hidden (non-visible) items from the ListBox selection and
+        /// refreshes <see cref="MxPlotAppViewModel.RefreshSelectionState"/>.
+        /// Should be called before Tile or Sync so that only visible windows participate.
+        /// </summary>
+        private void DeselectHiddenItems()
+        {
+            var toDeselect = _windowList.SelectedItems?
+                .OfType<WindowListItemViewModel>()
+                .Where(vm => !vm.IsWindowVisible)
+                .ToList();
+            if (toDeselect is not { Count: > 0 }) return;
+            _processingSelectionChange = true;
+            try
+            {
+                foreach (var vm in toDeselect)
+                {
+                    _windowList.SelectedItems!.Remove(vm);
+                    vm.IsSelected = false;
+                }
+                ViewModel.RefreshSelectionState();
+            }
+            finally { _processingSelectionChange = false; }
+        }
+    }
+}
