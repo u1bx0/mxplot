@@ -2,8 +2,8 @@
 
 **MxPlot.Core 技術リファレンス**
 
-> 最終更新: 2026-02-08  
-> バージョン: 0.0.2
+> 最終更新: 2026-08-31  
+> バージョン: 0.3.0
 
 ## 📚 目次
 
@@ -12,11 +12,12 @@
 3. [Innermost実装の詳細](#innermost実装の詳細)
 4. [ストライド計算](#ストライド計算)
 5. [他ライブラリとの比較](#他ライブラリとの比較)
-6. [軸定義の再構成と並べ替え](#軸定義の再構成と並べ替え)
-7. [実用例](#実用例)
-8. [ベストプラクティス](#ベストプラクティス)
-9. [FovAxis: 視野タイリング](#fovaxis-視野タイリング)
-10. [将来の拡張](#将来の拡張)
+6. [軸のサブタイプ: IsIndexBased, TaggedAxis, ColorAxis](#軸のサブタイプ-isindexbased-taggedaxis-coloraxis)
+7. [FovAxis: 視野タイリング](#fovaxis-視野タイリング)
+8. [実用例](#実用例)
+9. [軸定義の再構成と並べ替え](#軸定義の再構成と並べ替え)
+10. [ベストプラクティス](#ベストプラクティス)
+11. [将来の拡張](#将来の拡張)
 
 ---
 
@@ -258,60 +259,117 @@ for (int i = 0; i < axisCount; i++)
 
 ## 他ライブラリとの比較
 
-### 比較表
+これは**フレーム選択軸**（Z, Channel, Timeなど）どうしの順序、つまり`DimensionStructure`の
+strideが管理する範囲だけの話です。各フレーム**内**のX,Yピクセル配列は、これとは別の固定された
+規約（row-major、Xが最内側 — `VolumeAccessor`のインデクサ`frames[iz][iy * width + ix]`参照）で
+あり、フレーム軸の順序に関わらずstride計算が触れることはありません。この表を「X,Yも含めた
+N次元配列全体」に拡張して読まないよう注意してください。
 
-| ライブラリ | デフォルト順序 | 最速変化軸 | MxPlot互換性 |
+| ライブラリ | フレーム軸の順序 | 最速変化フレーム軸 | MxPlot互換性 |
 |-----------|--------------|-----------|-------------|
 | **MxPlot.Core** | First-fastest | axes[0] | ✅ (基準) |
 | **MATLAB** | Column-major | 最初の次元 | ✅ 同じ |
-| **NumPy (C順序)** | Row-major | 最後の次元 | ❌ 逆 |
+| **NumPy (C順序、デフォルト)** | Row-major | 最後の次元 | ❌ 逆（`order='F'`で一致） |
 | **NumPy (F順序)** | Column-major | 最初の次元 | ✅ 同じ |
-| **OpenCV** | Row-major | 最後の次元 | ❌ 逆 |
-| **ImageJ** | 設定可能 | 通常はChannel | △ 異なる |
+| **OpenCV** (`cv::Mat`, N次元) | Row-major | 最後の次元 | ❌ 逆 |
+| **ImageJ** (ハイパースタック、デフォルト`XYCZT`) | ファイルごとに設定可能 | 通常はChannel | △ 異なる — 次元順序はファイルごとの文字列で固定ではない |
 
-### NumPy (Python) - Row-Major (C順序)
+---
 
-```python
-import numpy as np
-arr = np.zeros((4, 2, 3))  # shape = (T, C, Z)
-# メモリ順: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ..., Z2C1T3
-# 最後の軸(Z)が最速変化
+## 軸のサブタイプ: IsIndexBased, TaggedAxis, ColorAxis
+
+### 概要
+
+`Axis`は小さなポリモーフィック階層のベースも兼ねており、`Axis`自身に付けられた
+`[JsonDerivedType]`によってシリアライズされます。これにより、他のどこにも判別子を持たずに
+どのサブタイプも`.mxd`/メタデータを往復できます:
+
+```csharp
+[JsonDerivedType(typeof(Axis), "base")]
+[JsonDerivedType(typeof(FovAxis), "fov")]
+[JsonDerivedType(typeof(TaggedAxis), "tagged")]
+[JsonDerivedType(typeof(ColorAxis), "colored")]
+public class Axis : ICloneable { ... }
 ```
 
-**MxPlotに合わせるには**: Fortran順序を使用
-```python
-arr = np.zeros((3, 2, 4), order='F')  # shape = (Z, C, T)
-# これで最初の軸(Z)が最速変化
+これらのサブタイプはいずれも、上記セクション3〜4のメモリレイアウト/ストライド計算を変更
+しません — サブタイプが追加するのは軸に沿った各位置の**識別情報**（タグ、色、波長、タイル原点）
+だけです。`DimensionStructure`のストライド計算とフレームインデックス変換は、サブタイプに関係
+なくすべての`Axis`を同じように扱います。
+
+### `IsIndexBased`
+
+通常の`Axis`は**値ベース**です: `Min`/`Max`は`Count`と独立しており、
+`Step = (Max - Min) / (Count - 1)`がインデックスを物理的な値（µm, sなど）に対応付けます。
+`IsIndexBased = true`を設定すると**インデックスベース**に切り替わります: `Min`は強制的に`0`、
+`Max`は`Count - 1`になり、以降の`Min`/`Max`への書き込みは無視されます（それぞれのセッターが
+`IsIndexBased`をチェックして早期returnします）。物理的なスケールを持たない軸 — Channel、
+任意のタグリストなど、位置そのものだけが意味を持つ軸に使います。
+
+```csharp
+// 値ベース（デフォルト）: Min/Maxが物理単位を持つ
+var z = Axis.Z(10, 0, 50, "µm");            // 10スライス、0-50µm
+
+// インデックスベース: 位置だけが意味を持つ座標
+var channel = Axis.Channel(4);               // Min=0, Max=3, IsIndexBased=true
+var custom = Axis.IndexBased("Stage", 12);   // 任意のインデックスベース軸用の汎用ファクトリ
 ```
 
-### MATLAB - Column-Major (Fortran)
+### `TaggedAxis` — 位置ごとの文字列識別子
 
-```matlab
-A = zeros(3, 2, 4);  % size = [Z, C, T]
-% 最初の次元(Z)が最速変化
-% メモリ順: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ...
+`TaggedAxis`は常にインデックスベースです（コンストラクタが`isIndexBased: true`を強制します）。
+各位置に、単なる整数の代わりに一意な文字列タグを付与します:
+
+```csharp
+var sensors = TaggedAxis.Of("Sensor1", "Sensor2", "Sensor3");
+// 同じDefineDimensions呼び出し内で複数のTaggedAxisを定義する場合は、
+// インラインの `new TaggedAxis(...)` ではなく TaggedAxis.Of を使うこと -- そうしないと
+// すべてデフォルト名"Tag"のままで衝突する。
+
+sensors.CurrentTag;             // Indexにあるタグ
+sensors["Sensor2"];             // -> 1（タグからインデックスを逆引き）
+sensors.SetTag(0, "SensorA");   // その場でリネーム、TagNameChangedを発火
 ```
 
-**✅ MxPlotと完全一致！**
+`Clone()`と`Slice(start, count)`はオーバーライドされており、タグリストを（`Slice`の場合は
+絞り込んだ上で）維持し、プレーンな`Axis`へ格下げされることはありません。これは実運用上重要な
+挙動です: 以前の実装は`FovAxis`だけを特別扱いし、それ以外はプレーンな`Axis`にフォールバック
+していたため、`Duplicate()`のたびに昇格済みのChannel軸がタグなしへ静かに格下げされていました
+-- その結果、次にComposite modeへ入る際に軸が再昇格を必要とすると誤認識し、リセットする理由の
+ない直交ビューを不必要に破棄・再構築していました。
 
-### OpenCV (C++) - Row-Major
+### `ColorAxis` — Channel / Composite用の軸型
 
-```cpp
-cv::Mat volume(std::vector<int>{4, 2, 3}, CV_64F);  // dims = {T, C, Z}
-// 最後の次元(Z)が最速変化
+`ColorAxis : TaggedAxis`は、タグリストに加えてチャンネルごとの色
+（`AssignColors`/`SetColor`/`GetColor`）とオプションの波長
+（`AssignWavelengths`/`SetWavelength`/`GetWavelength`）メタデータを持ちます。常に自身を
+`"Channel"`と命名し、ユーザーが**Composite mode**に入る際にプレーンな軸が昇格される先が
+これです（[Composite描画ガイド](MatrixPlotter_Composite_Guide.md)参照）— タグがチャンネル名に、
+色がブレンドレシピの既定値になります。
+
+```csharp
+var ch = new ColorAxis("DAPI", "GFP", "RFP");
+ch.AssignColors([0xFF0000FF, 0xFF00FF00, 0xFFFF0000]);   // チャンネルごとのARGB
+ch.AssignWavelengths([461, 509, 584]);                    // 任意、nm
+
+// 分解済みカラー画像で使われる標準R/G/Bトリプレット
+var rgb = ColorAxis.CreateRgb();      // タグ"R","G","B"、純色が事前割り当て済み
+ColorAxis.IsRgbTriplet(rgb);          // -> true
 ```
 
-**❌ MxPlotと逆**
+`IsRgbTriplet`は、UI層がRGB向けの既定動作（元の色を再現してComposite modeで自動的に開く、
+グレースケール変換時のRec.709輝度）を、あらゆる3チャンネルデータセットにハードコードせずに
+判定する仕組みです — タグがR/G/BまたはRed/Green/Blueと読めるかだけをチェックし、その軸が
+実際に`CreateRgb()`由来かどうかは問いません。
 
-### ImageJ (Java) - ハイパースタック
+### 軸サブタイプ早見表
 
-```java
-ImagePlus imp = IJ.openImage("path/to/hyperstack.tif");
-// 典型的順序: XYCZT または XYZCT
-// 通常はChannelが最速変化（設定可能）
-```
-
-**△ 異なる規約** - ImageJは可視化のためChannelを優先。
+| 型 | インデックスベース？ | 各位置に追加する情報 | 典型的な用途 |
+|---|---|---|---|
+| `Axis` | どちらもあり得る | — | Z, Time, 一般的な数値軸 |
+| `TaggedAxis` | 常に | 文字列タグ | 任意の名前付き位置（センサー、条件） |
+| `ColorAxis` | 常に | タグ + 色 + 波長 | Channel軸、特にComposite mode下 |
+| `FovAxis` | 常に | タイルレイアウト + グローバル（実世界）原点 | マルチタイル/スティッチング顕微鏡 — 下記参照 |
 
 ---
 
@@ -917,4 +975,4 @@ frameIndex = Σ(axisIndex[i] × stride[i])
 
 ---
 
-*最終更新: 2026-02-08*
+*最終更新: 2026-08-31*

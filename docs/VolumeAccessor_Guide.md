@@ -2,8 +2,8 @@
 
 **MxPlot.Core 3D Volume Operations Reference**
 
-> Last Updated: 2026-02-08  
-> Version: 0.0.2
+> Last Updated: 2026-08-31  
+> Version: 0.3.0
 
 ## 📚 Table of Contents
 
@@ -67,6 +67,25 @@ var viewFromY = volume.Restack(ViewFrom.Y);
 
 **Use cases**: Inspect 3D data from multiple directions, generate XZ/YZ plane data
 
+**Output mode, progress, and cancellation**: `Restack` also accepts an optional
+`LoadingMode outputMode` (`Auto` by default, deferring to `VirtualPolicy` based on the restacked
+volume's size), an `IProgress<int>? progress`, and a `CancellationToken`:
+
+```csharp
+var progress = new Progress<int>(i => Console.WriteLine($"Restacked frame {i}"));
+using var cts = new CancellationTokenSource();
+
+var large = volume.Restack(ViewFrom.X, LoadingMode.Auto, progress, cts.Token);
+```
+
+For `X`/`Y` (a genuine transpose) resolved to `Virtual` output, the write path buffers a
+RAM-bounded band of output frames in managed memory before handing each completed frame to the
+MMF vessel as one contiguous write — writing scattered individual rows directly into a freshly
+created multi-GB sparse MMF was measured to be catastrophically slow. `Z` (already frame-ordered)
+always streams one frame at a time, so its peak memory stays at one frame regardless of
+`outputMode`. See `VolumeAccessor.Restack`'s XML doc and `docs/MatrixData_MethodCallMap.md` for
+the full accounting.
+
 ### 2. SliceAt - 2D Cross-section Extraction
 
 Extract a 2D plane at a specific index.
@@ -80,6 +99,21 @@ var yzSlice = volume.SliceAt(ViewFrom.X, 256);
 ```
 
 **Use cases**: Examine specific cross-sections, export representative slices
+
+**Buffer reuse**: for `X`/`Y`, `SliceAt` also accepts an optional `IMatrixData? dst` and
+`int dstIndex`. When `dst`'s frame at `dstIndex` is already large enough, the slice is written
+straight into it and the returned wrapper shares that buffer — a caller re-slicing repeatedly
+into an on-screen frame (e.g. an orthogonal side view following the crosshair) allocates nothing
+and keeps the same instance displayed. Ignored for `ViewFrom.Z`, which already returns a frame by
+reference with no copy at all.
+
+```csharp
+// First call: no dst yet, allocates.
+var xzSlice = volume.SliceAt(ViewFrom.Y, 128);
+
+// Later calls: reuse xzSlice's own frame buffer -- no per-update allocation.
+volume.SliceAt(ViewFrom.Y, 130, dst: xzSlice, dstIndex: 0);
+```
 
 ---
 
@@ -272,7 +306,9 @@ var stdDevMap = volume.ReduceAlong(ViewFrom.Z,
 1. **Prioritize built-in projections**: `CreateProjection` is zero-copy optimized
 2. **Choose projection direction**: X/Y projections are faster than Z projection (depends on data access pattern)
 3. **Reuse VolumeAccessor**: Use the same instance for multiple operations
-4. **Chunk large data**: `Restack` creates a full copy
+4. **Chunk large data**: `Restack` creates a full copy — for very large volumes, pass
+   `LoadingMode.Virtual` (or let `Auto`/`VirtualPolicy` decide) to keep peak RAM near one
+   band's worth of frames instead of the whole output
 
 ```csharp
 // ✅ Recommended (zero-copy projection)
@@ -316,8 +352,13 @@ var volAtTime1 = multiAxis.AsVolume("Z", baseIndices: new[] { 0, 1 });
 
 ### Memory Usage
 
-- `Restack` creates a full copy (requires memory equal to original size)
-- 512×512×100 `float`: about 100MB × 2 = 200MB
+- `Restack` creates a full copy of the output.
+  - `LoadingMode.InMemory` (or `Auto` resolving to it): requires managed heap memory equal to
+    the output size, on top of the source — 512×512×100 `float`: about 100MB × 2 = 200MB.
+  - `LoadingMode.Virtual` (or `Auto` resolving to it for a large enough output): the output lives
+    in an MMF; for `X`/`Y` peak *managed* memory is bounded by one band of output frames (a
+    fraction of `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`), not the full output size — see
+    [VirtualFrames Guide](VirtualFrames_Guide.md). `Z` always streams one frame at a time.
 - Consider sub-region processing for large volumes
 
 ### Thread Safety
@@ -341,14 +382,19 @@ Direct voxel access with zero-copy.
 #### Core Methods
 
 ```csharp
-public MatrixData<T> Restack(ViewFrom direction)
+public MatrixData<T> Restack(ViewFrom direction,
+    LoadingMode outputMode = LoadingMode.Auto,
+    IProgress<int>? progress = null,
+    CancellationToken cancellationToken = default)
 ```
-Reorganize volume from different viewpoint. Creates full copy.
+Reorganize volume from different viewpoint. Creates a full copy — in-memory or MMF-backed
+(`Virtual`) depending on `outputMode` and, for `Auto`, `VirtualPolicy`.
 
 ```csharp
-public MatrixData<T> SliceAt(ViewFrom axis, int index)
+public MatrixData<T> SliceAt(ViewFrom axis, int index, IMatrixData? dst = null, int dstIndex = 0)
 ```
-Extract 2D cross-section at specified index.
+Extract 2D cross-section at specified index. `dst`/`dstIndex` let the caller reuse an existing
+frame buffer instead of allocating a new one (ignored for `ViewFrom.Z`).
 
 ```csharp
 public MatrixData<T> ReduceAlong(ViewFrom axis, ReduceFunc op)
@@ -401,4 +447,4 @@ public enum ProjectionMode
 
 **End of Guide**
 
-*Last Updated: 2026-02-08  (Generated by GitHub Copilot)*
+*Last Updated: 2026-08-31  (Generated by GitHub Copilot)*

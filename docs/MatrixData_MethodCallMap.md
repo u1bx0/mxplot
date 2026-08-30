@@ -81,8 +81,8 @@ flowchart LR
     AVOL(["MatrixData.AsVolume()\n[Zero-copy wrapper]"]):::zero
 
     AVOL --> VSZ["SliceAt(ViewFrom.Z)\n[Zero copy]"]:::zero
-    AVOL --> VSXY["SliceAt(ViewFrom.X/Y)\n[Deep copy]"]
-    AVOL --> RESTZ["Restack(ViewFrom)\n[Deep copy]"]
+    AVOL --> VSXY["SliceAt(ViewFrom.X/Y, dst?)\n[Deep copy / buffer reuse]"]
+    AVOL --> RESTZ["Restack(ViewFrom, LoadingMode)\n[Deep copy, In-Memory or Virtual]"]
     AVOL --> VSO["SliceOrthogonal(x, y)\n[Buffer reuse available]"]
     AVOL --> PROJ["CreateProjection&lt;T&gt;(axis, mode)\n[Deep copy]"]
 
@@ -127,8 +127,11 @@ Foundational `MatrixData<T>` generator methods that serve as entry points for hi
 
 | Method | Zero-copy | Description |
 |---|---|---|
-| `Clone()` | ✗ Deep only | Full deep copy including statistics, dimension info, and metadata |
-| `Duplicate<T>()` *(extension method)* | ✗ Deep only | Sugar syntax that calls `Clone()` |
+| `Clone()` *(`ICloneable`)* | ✗ Deep only | Equivalent to `Clone(forceInMemory: false)` below |
+| `Clone(bool forceInMemory)` | ✗ Deep only | Full deep copy including statistics, dimension info, and metadata. For Virtual source data, streams frame-by-frame into a new MMF vessel (`CloneAsVirtual`) unless `forceInMemory` is set — never materializes the whole dataset in managed heap |
+| `Clone(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)` | ✗ Deep only | Same as above, with progress reporting (`-N` once, then `0..N-1` per frame) and cancellation checked between frames |
+| `Duplicate<T>(bool forceInMemory = false)` *(extension method)* | ✗ Deep only | Sugar syntax that calls `Clone(forceInMemory)` |
+| `Duplicate<T>(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)` *(extension method)* | ✗ Deep only | Sugar syntax that calls the progress/cancellation-aware `Clone` overload above |
 
 ### VolumeAccessor
 
@@ -136,10 +139,10 @@ Methods operating on the `VolumeAccessor<T>` returned by `AsVolume()`.
 
 | Method | Zero-copy | Description |
 |---|---|---|
-| `Restack(ViewFrom direction)` | ✗ Deep only | 3D→3D. Switches viewpoint to X/Y/Z direction and rearranges all data |
-| `SliceAt(ViewFrom.Z, index)` | ✓ **Zero copy** | Directly wraps the `T[]` at `_frames[iz]` into a `MatrixData<T>`. **The only VA zero-copy operation** |
-| `SliceAt(ViewFrom.X, index)` | ✗ Deep only | Writes the YZ plane into a new array via column-direction scan |
-| `SliceAt(ViewFrom.Y, index)` | ✗ Deep only | Writes the XZ plane into a new array via row copy (`Span.CopyTo`) |
+| `Restack(ViewFrom direction, LoadingMode outputMode = Auto, IProgress<int>? progress = null, CancellationToken cancellationToken = default)` | ✗ Deep only | 3D→3D. Switches viewpoint to X/Y/Z direction and rearranges all data. `outputMode` (default `Auto`) resolves via `VirtualPolicy` to in-memory or Virtual (MMF-backed) output based on the result's size. For X/Y (a genuine transpose) resolved to Virtual, output frames are built in RAM-bounded bands (parallelized per-band by source frame), and each completed frame is written to the vessel as one contiguous whole-frame write — never scattered row-by-row into the MMF directly, which was measured to be catastrophically slow from per-row page-fault overhead. Progress reporting and cancellation are supported throughout; Z (already frame-ordered) streams one frame at a time regardless of `outputMode` |
+| `SliceAt(ViewFrom.Z, index)` | ✓ **Zero copy** | Directly wraps the `T[]` at `_frames[iz]` into a `MatrixData<T>`. **The only VA zero-copy operation**; the `dst`/`dstIndex` parameters (see below) are ignored here since there's no array to reuse a buffer for |
+| `SliceAt(ViewFrom.X, index, dst?, dstIndex)` | △ Buffer reuse available | Writes the YZ plane into a new array via column-direction scan. Passing an existing `IMatrixData` as `dst` writes straight into its frame at `dstIndex` (when large enough) and the returned wrapper shares that buffer, so repeated re-slicing into the same displayed frame allocates nothing |
+| `SliceAt(ViewFrom.Y, index, dst?, dstIndex)` | △ Buffer reuse available | Writes the XZ plane into a new array via row copy (`Span.CopyTo`). Same `dst`/`dstIndex` buffer-reuse behavior as X above |
 | `SliceOrthogonal(x, y, numThreads, dstXZ, dstYZ)` | △ Buffer reuse available | Simultaneously extracts XZ + YZ planes in a single pass. Passing existing `MatrixData<T>` as `dstXZ`/`dstYZ` reuses their arrays |
 
 ### VolumeOperator (VolumeAccessorExtensions)

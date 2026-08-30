@@ -2,8 +2,8 @@
 
 **MxPlot.Core Technical Reference**
 
-> Last Updated: 2026-02-08  
-> Version: 0.0.2
+> Last Updated: 2026-08-31  
+> Version: 0.3.0
 
 ## 📚 Table of Contents
 
@@ -12,11 +12,12 @@
 3. [Innermost Implementation Details](#innermost-implementation-details)
 4. [Stride Calculation](#stride-calculation)
 5. [Comparison with Other Libraries](#comparison-with-other-libraries)
-6. [Axis Reconfiguration and Reordering](#axis-reconfiguration-and-reordering)
-7. [Practical Examples](#practical-examples)
-8. [Best Practices](#best-practices)
-9. [FovAxis: Field-of-View Tiling](#fovaxis-field-of-view-tiling)
-10. [Future Extensions](#future-extensions)
+6. [Axis Subtypes: IsIndexBased, TaggedAxis, and ColorAxis](#axis-subtypes-isindexbased-taggedaxis-and-coloraxis)
+7. [FovAxis: Field-of-View Tiling](#fovaxis-field-of-view-tiling)
+8. [Practical Examples](#practical-examples)
+9. [Axis Reconfiguration and Reordering](#axis-reconfiguration-and-reordering)
+10. [Best Practices](#best-practices)
+11. [Future Extensions](#future-extensions)
 
 ---
 
@@ -258,60 +259,117 @@ for (int i = 0; i < axisCount; i++)
 
 ## Comparison with Other Libraries
 
-### Summary Table
+This only concerns the ordering of **frame-selector axes** (Z, Channel, Time, ...) among
+themselves — i.e. what `DimensionStructure`'s strides govern. The X,Y pixel grid *within* each
+frame is a separate, fixed convention (row-major, X innermost — see `VolumeAccessor`'s indexer,
+`frames[iz][iy * width + ix]`) that stride calculation never touches, regardless of frame-axis
+order. Don't extend this table to "the whole N-D array including X,Y" without accounting for that.
 
-| Library | Default Order | Fastest Axis | MxPlot Compatible |
-|---------|--------------|--------------|-------------------|
+| Library | Frame-axes order | Fastest frame-axis | MxPlot-compatible |
+|---|---|---|---|
 | **MxPlot.Core** | First-fastest | axes[0] | ✅ (reference) |
 | **MATLAB** | Column-major | First dimension | ✅ Same |
-| **NumPy (C-order)** | Row-major | Last dimension | ❌ Opposite |
+| **NumPy (C-order, default)** | Row-major | Last dimension | ❌ Opposite (use `order='F'` to match) |
 | **NumPy (F-order)** | Column-major | First dimension | ✅ Same |
-| **OpenCV** | Row-major | Last dimension | ❌ Opposite |
-| **ImageJ** | Configurable | Usually Channel | △ Different |
+| **OpenCV** (`cv::Mat`, N-D) | Row-major | Last dimension | ❌ Opposite |
+| **ImageJ** (hyperstack, default `XYCZT`) | Configurable per file | Usually Channel | △ Different — dimension order is a per-file string, not fixed |
 
-### NumPy (Python) - Row-Major (C-order)
+---
 
-```python
-import numpy as np
-arr = np.zeros((4, 2, 3))  # shape = (T, C, Z)
-# Memory order: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ..., Z2C1T3
-# Last axis (Z) varies fastest
+## Axis Subtypes: IsIndexBased, TaggedAxis, and ColorAxis
+
+### Overview
+
+`Axis` doubles as the base of a small polymorphic hierarchy, serialized via `[JsonDerivedType]`
+declared right on `Axis` itself so any subtype round-trips through `.mxd`/metadata without a
+discriminator living anywhere else:
+
+```csharp
+[JsonDerivedType(typeof(Axis), "base")]
+[JsonDerivedType(typeof(FovAxis), "fov")]
+[JsonDerivedType(typeof(TaggedAxis), "tagged")]
+[JsonDerivedType(typeof(ColorAxis), "colored")]
+public class Axis : ICloneable { ... }
 ```
 
-**To match MxPlot**: Use Fortran order
-```python
-arr = np.zeros((3, 2, 4), order='F')  # shape = (Z, C, T)
-# Now first axis (Z) varies fastest
+None of these subtypes change the memory-layout/stride math from Sections 3-4 above — a subtype
+only adds identity *at* each position along the axis (a tag, a colour, a wavelength, a tile
+origin). `DimensionStructure`'s stride calculation and frame-index conversion treat every `Axis`
+identically regardless of subtype.
+
+### `IsIndexBased`
+
+An ordinary `Axis` is **value-based**: `Min`/`Max` are independent of `Count`, and
+`Step = (Max - Min) / (Count - 1)` maps index to a physical value (µm, s, ...). Setting
+`IsIndexBased = true` switches it to **index-based**: `Min` is forced to `0` and `Max` to
+`Count - 1`, and further `Min`/`Max` writes are silently ignored (their setters check
+`IsIndexBased` and return early). Use it for an axis with no physical scale — Channel, an
+arbitrary tag list, anything where only the position itself is meaningful.
+
+```csharp
+// Value-based (default): Min/Max carry a physical unit
+var z = Axis.Z(10, 0, 50, "µm");            // 10 slices, 0-50µm
+
+// Index-based: position is the only meaningful coordinate
+var channel = Axis.Channel(4);               // Min=0, Max=3, IsIndexBased=true
+var custom = Axis.IndexBased("Stage", 12);   // general factory for any index-based axis
 ```
 
-### MATLAB - Column-Major (Fortran)
+### `TaggedAxis` — per-position string identity
 
-```matlab
-A = zeros(3, 2, 4);  % size = [Z, C, T]
-% First dimension (Z) varies fastest
-% Memory order: Z0C0T0, Z1C0T0, Z2C0T0, Z0C1T0, ...
+`TaggedAxis` is always index-based (its constructors force `isIndexBased: true`) and attaches a
+unique string tag to every position instead of a plain integer:
+
+```csharp
+var sensors = TaggedAxis.Of("Sensor1", "Sensor2", "Sensor3");
+// Use TaggedAxis.Of, not `new TaggedAxis(...)` inline, when defining several TaggedAxis
+// instances in the same DefineDimensions call -- they'd otherwise all start with the
+// default Name "Tag" and collide.
+
+sensors.CurrentTag;             // tag at Index
+sensors["Sensor2"];             // -> 1 (index lookup by tag)
+sensors.SetTag(0, "SensorA");   // rename in place, fires TagNameChanged
 ```
 
-**✅ Matches MxPlot perfectly!**
+`Clone()` and `Slice(start, count)` are overridden to carry the tag list along (narrowed, for
+`Slice`) instead of degrading to a plain `Axis`. This matters in practice: an earlier
+implementation special-cased only `FovAxis` here and fell back to a plain `Axis` for everything
+else, which silently downgraded a promoted Channel axis back to untagged on every `Duplicate()` —
+making the next Composite-mode entry think the axis needed re-promoting, tearing down and
+rebuilding orthogonal views that had no reason to reset.
 
-### OpenCV (C++) - Row-Major
+### `ColorAxis` — the Channel / Composite axis type
 
-```cpp
-cv::Mat volume(std::vector<int>{4, 2, 3}, CV_64F);  // dims = {T, C, Z}
-// Last dimension (Z) varies fastest
+`ColorAxis : TaggedAxis` adds per-channel colour (`AssignColors`/`SetColor`/`GetColor`) and
+optional wavelength (`AssignWavelengths`/`SetWavelength`/`GetWavelength`) metadata on top of the
+tag list. It always names itself `"Channel"`, and it's what **Composite mode** promotes a plain
+axis to when the user enters it (see the
+[Composite Rendering Guide](MatrixPlotter_Composite_Guide.md)) — the tags become channel names,
+the colours become blend-recipe defaults.
+
+```csharp
+var ch = new ColorAxis("DAPI", "GFP", "RFP");
+ch.AssignColors([0xFF0000FF, 0xFF00FF00, 0xFFFF0000]);   // ARGB per channel
+ch.AssignWavelengths([461, 509, 584]);                    // optional, nm
+
+// The standard R/G/B triplet used by decomposed colour images
+var rgb = ColorAxis.CreateRgb();      // tags "R","G","B", pure primaries pre-assigned
+ColorAxis.IsRgbTriplet(rgb);          // -> true
 ```
 
-**❌ Opposite to MxPlot**
+`IsRgbTriplet` is how the UI layer decides RGB-specific defaults (auto-open in Composite mode with
+the original colours reproduced, Rec.709 luma for grayscale conversion) without hard-coding them
+for every three-channel dataset — it only checks that the tags read as R/G/B or Red/Green/Blue, not
+that the axis specifically came from `CreateRgb()`.
 
-### ImageJ (Java) - Hyperstack
+### Axis Subtype Summary
 
-```java
-ImagePlus imp = IJ.openImage("path/to/hyperstack.tif");
-// Typical order: XYCZT or XYZCT
-// Often Channel varies fastest (configurable)
-```
-
-**△ Different convention** - ImageJ prioritizes channels for visualization.
+| Type | Index-based? | Adds per position | Typical use |
+|---|---|---|---|
+| `Axis` | Either | — | Z, Time, generic numeric axes |
+| `TaggedAxis` | Always | String tag | Arbitrary named positions (sensors, conditions) |
+| `ColorAxis` | Always | Tag + colour + wavelength | Channel axis, especially under Composite mode |
+| `FovAxis` | Always | Tile layout + global (world) origin | Multi-tile / stitched microscopy — see below |
 
 ---
 
@@ -917,4 +975,4 @@ where stride[i] = ∏(axisCount[j] for j < i)
 
 ---
 
-*Last Updated: 2026-02-08*
+*Last Updated: 2026-08-31*

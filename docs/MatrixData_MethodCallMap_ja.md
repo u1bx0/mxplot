@@ -18,7 +18,7 @@
 
 ## 概要
 
-`MatrixData<T>`
+`MatrixData<T>` の操作メソッドは3つの層に分類されます。
 
 | 層 | 説明 |
 |---|---|
@@ -81,8 +81,8 @@ flowchart LR
     AVOL(["MatrixData.AsVolume()\n[Zero-copy wrapper]"]):::zero
 
     AVOL --> VSZ["SliceAt(ViewFrom.Z)\n[Zero copy]"]:::zero
-    AVOL --> VSXY["SliceAt(ViewFrom.X/Y)\n[Deep copy]"]
-    AVOL --> RESTZ["Restack(ViewFrom)\n[Deep copy]"]
+    AVOL --> VSXY["SliceAt(ViewFrom.X/Y, dst?)\n[Deep copy / buffer reuse]"]
+    AVOL --> RESTZ["Restack(ViewFrom, LoadingMode)\n[Deep copy, In-Memory or Virtual]"]
     AVOL --> VSO["SliceOrthogonal(x, y)\n[Buffer reuse available]"]
     AVOL --> PROJ["CreateProjection&lt;T&gt;(axis, mode)\n[Deep copy]"]
 
@@ -98,12 +98,12 @@ flowchart LR
 
 | メソッド / プロパティ | 場所 | 戻り値 | ゼロコピー | 備考 |
 |---|---|---|---|---|
-| `GetArray(frameIndex)` | `MatrixData<T>` | `T[]` | ? 参照共有 | 書き込み可能。`IsReadOnly=false` の場合は呼び出し時に統計キャッシュを自動無効化 |
-| `AsSpan(frameIndex)` | `MatrixData<T>` | `ReadOnlySpan<T>` | ? 参照共有 | 読み取り専用。統計キャッシュは無効化しない |
-| `AsMemory(frameIndex)` | `MatrixData<T>` | `ReadOnlyMemory<T>` | ? 参照共有 | 読み取り専用。async パイプラインに適する |
-| `this[ix, iy]` | `MatrixData<T>` | `T` | ? 直接アクセス | ピクセル1点の get/set。set で統計無効化 |
+| `GetArray(frameIndex)` | `MatrixData<T>` | `T[]` | ✓ 参照共有 | 書き込み可能。`IsReadOnly=false` の場合は呼び出し時に統計キャッシュを自動無効化 |
+| `AsSpan(frameIndex)` | `MatrixData<T>` | `ReadOnlySpan<T>` | ✓ 参照共有 | 読み取り専用。統計キャッシュは無効化しない |
+| `AsMemory(frameIndex)` | `MatrixData<T>` | `ReadOnlyMemory<T>` | ✓ 参照共有 | 読み取り専用。async パイプラインに適する |
+| `this[ix, iy]` | `MatrixData<T>` | `T` | ✓ 直接アクセス | ピクセル1点の get/set。set で統計無効化 |
 | `SetArray(array, frameIndex)` | `MatrixData<T>` | `void` | △ In-place | 配列長が一致すれば `CopyTo` でコピー。参照が同一なら無操作 |
-| `AsVolume(axisName)` | `MatrixData<T>` | `VolumeAccessor<T>` | ? ラッパー | `_arrayList` の参照を保持するだけで、データコピーは発生しない |
+| `AsVolume(axisName)` | `MatrixData<T>` | `VolumeAccessor<T>` | ✓ ラッパー | `_arrayList` の参照を保持するだけで、データコピーは発生しない |
 
 ---
 
@@ -116,19 +116,22 @@ flowchart LR
 
 | メソッド | ゼロコピー | 起点となる Layer 2 メソッド | 説明 |
 |---|---|---|---|
-| **`Reorder(List<int> order, bool deepCopy)`** | ? / ? 選択可 | `SelectBy`, `SliceAt(int)`, `ExtractAlong`, `Reorder(string[])` | **最重要基盤**。`deepCopy=false` では `T[]` 参照を共有。次元情報は除去される |
-| **`Crop(int x, int y, int w, int h)`** | ? Deep only | `CropByCoordinates`, `CropCenter` | 行単位 `Array.Copy` で矩形 ROI を切り出す。物理スケールも自動更新 |
-| `Map<TSrc, TDst>(converter, strategy)` | ? Deep only | `MapAt` | 全要素の型変換・変換処理。`NoValueRangeCheck` / `ParallelAlongFrames` の2戦略 |
-| `Reduce(EntireReducerFunc)` | ? Deep only | ― | 全フレーム → 1フレームに縮約。`Parallel.For` でスレッドローカルバッファを使用 |
-| `Reduce(targetAxisName, ReducerFunc)` | ? Deep only | ― | 指定軸を削除して N→N-1 次元縮約。コンテキスト座標 `ReadOnlySpan<int>` を提供 |
-| `Transpose()` | ? Deep only | ― | キャッシュブロッキング (BlockSize=32) 付き並列転置 |
+| **`Reorder(List<int> order, bool deepCopy)`** | ✓ / ✗ 選択可 | `SelectBy`, `SliceAt(int)`, `ExtractAlong`, `Reorder(string[])` | **最重要基盤**。`deepCopy=false` では `T[]` 参照を共有。次元情報は除去される |
+| **`Crop(int x, int y, int w, int h)`** | ✗ Deep only | `CropByCoordinates`, `CropCenter` | 行単位 `Array.Copy` で矩形 ROI を切り出す。物理スケールも自動更新 |
+| `Map<TSrc, TDst>(converter, strategy)` | ✗ Deep only | `MapAt` | 全要素の型変換・変換処理。`NoValueRangeCheck` / `ParallelAlongFrames` の2戦略 |
+| `Reduce(EntireReducerFunc)` | ✗ Deep only | ― | 全フレーム → 1フレームに縮約。`Parallel.For` でスレッドローカルバッファを使用 |
+| `Reduce(targetAxisName, ReducerFunc)` | ✗ Deep only | ― | 指定軸を削除して N→N-1 次元縮約。コンテキスト座標 `ReadOnlySpan<int>` を提供 |
+| `Transpose()` | ✗ Deep only | ― | キャッシュブロッキング (BlockSize=32) 付き並列転置 |
 
 ### MatrixData / MatrixData.Static
 
 | メソッド | ゼロコピー | 説明 |
 |---|---|---|
-| `Clone()` | ? Deep only | 統計・次元情報・メタデータごと完全複製 |
-| `Duplicate<T>()` *(拡張メソッド)* | ? Deep only | `Clone()` を呼ぶシュガー構文 |
+| `Clone()` *(`ICloneable`)* | ✗ Deep only | 下記 `Clone(forceInMemory: false)` と等価 |
+| `Clone(bool forceInMemory)` | ✗ Deep only | 統計・次元情報・メタデータごと完全複製。Virtual由来のソースデータは、`forceInMemory`指定がない限り新しいMMFへフレーム単位でストリーミングされる（`CloneAsVirtual`）— データセット全体をmanaged heapに展開することはない |
+| `Clone(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)` | ✗ Deep only | 上記と同様だが、進捗報告（開始時に`-N`、以降フレームごとに`0..N-1`）とフレーム間でのキャンセルチェックに対応 |
+| `Duplicate<T>(bool forceInMemory = false)` *(拡張メソッド)* | ✗ Deep only | `Clone(forceInMemory)` を呼ぶシュガー構文 |
+| `Duplicate<T>(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)` *(拡張メソッド)* | ✗ Deep only | 進捗・キャンセル対応版の `Clone` オーバーロードを呼ぶシュガー構文 |
 
 ### VolumeAccessor
 
@@ -136,17 +139,17 @@ flowchart LR
 
 | メソッド | ゼロコピー | 説明 |
 |---|---|---|
-| `Restack(ViewFrom direction)` | ? Deep only | 3D→3D。視点を X/Y/Z 方向に切り替えて全データ再配置 |
-| `SliceAt(ViewFrom.Z, index)` | ? **Zero copy** | `_frames[iz]` の `T[]` を直接ラップして `MatrixData<T>` を生成。**唯一の VA ゼロコピー** |
-| `SliceAt(ViewFrom.X, index)` | ? Deep only | YZ 平面を列方向スキャンで新配列に書き出す |
-| `SliceAt(ViewFrom.Y, index)` | ? Deep only | XZ 平面を行コピー (`Span.CopyTo`) で新配列に書き出す |
+| `Restack(ViewFrom direction, LoadingMode outputMode = Auto, IProgress<int>? progress = null, CancellationToken cancellationToken = default)` | ✗ Deep only | 3D→3D。視点を X/Y/Z 方向に切り替えて全データ再配置。`outputMode`（既定は`Auto`）は、結果のサイズに応じて`VirtualPolicy`経由でIn-Memory出力かVirtual（MMFバックエンド）出力かを解決する。X/Y方向（真の転置）でVirtualに解決された場合、出力フレームはRAMに収まる帯（バンド）単位でソースフレームごとに並列構築され、完成したフレームは1回の連続書き込みとしてvesselへ書き込まれる — MMFへ行単位で直接散らして書くことは絶対にしない（この方式は1行ごとのページフォルトのオーバーヘッドにより破滅的に遅いことが実測で判明している）。進捗報告・キャンセルは全経路で対応。Z方向（既にフレーム順）は`outputMode`によらず常に1フレームずつストリーミングする |
+| `SliceAt(ViewFrom.Z, index)` | ✓ **Zero copy** | `_frames[iz]` の `T[]` を直接ラップして `MatrixData<T>` を生成。**唯一の VA ゼロコピー**。`dst`/`dstIndex`引数（下記参照）はここでは無視される（再利用すべきバッファが存在しないため） |
+| `SliceAt(ViewFrom.X, index, dst?, dstIndex)` | △ バッファ再利用可 | YZ 平面を列方向スキャンで新配列に書き出す。既存の`IMatrixData`を`dst`として渡すと、（十分なサイズがあれば）`dstIndex`のフレームへ直接書き込み、返されるラッパーはそのバッファを共有する — 同じ表示フレームへ繰り返し再スライスする場合、確保が一切発生しない |
+| `SliceAt(ViewFrom.Y, index, dst?, dstIndex)` | △ バッファ再利用可 | XZ 平面を行コピー (`Span.CopyTo`) で新配列に書き出す。`dst`/`dstIndex`によるバッファ再利用はXと同様 |
 | `SliceOrthogonal(x, y, numThreads, dstXZ, dstYZ)` | △ バッファ再利用可 | XZ + YZ 平面を1パスで同時抽出。`dstXZ`/`dstYZ` に既存 `MatrixData<T>` を渡すと配列を再利用 |
 
 ### VolumeOperator (VolumeAccessorExtensions)
 
 | メソッド | ゼロコピー | 制約 | 説明 |
 |---|---|---|---|
-| `CreateProjection<T>(axis, mode)` | ? Deep only | `INumber<T>, IMinMaxValue<T>` 必須 | MIP / MinIP / AIP 投影。X/Y/Z 軸の3方向に対応 |
+| `CreateProjection<T>(axis, mode)` | ✗ Deep only | `INumber<T>, IMinMaxValue<T>` 必須 | MIP / MinIP / AIP 投影。X/Y/Z 軸の3方向に対応 |
 
 ---
 
@@ -159,24 +162,24 @@ Layer 1 メソッドを組み合わせた高レベル API です。
 
 | メソッド | 内部で呼ぶ Layer 1 | ゼロコピー | 説明 |
 |---|---|---|---|
-| `SelectBy(axisName, index, deepCopy)` | `Reorder(List<int>, bool)` | ? / ? 選択可 | 指定軸の1スライスを選択し、その軸を次元から除去して返す |
-| `SliceAt(int frameIndex, bool deepCopy)` | `Reorder(List<int>, bool)` | ? / ? 選択可 | 単フレームを「要素数1の `Reorder`」として実装 |
-| `SliceAt((string, int)[] coords)` | `SliceAt(int, false)` | ? **Zero copy only** | 軸名+インデックスの組み合わせで座標指定。`deepCopy` オプションなし、常に shallow |
-| `ExtractAlong(axisName, baseIndices, deepCopy)` | `Reorder(List<int>, bool)` | ? / ? 選択可 | 他軸を固定して指定軸に沿った 1D スライスを抽出 |
-| `Reorder(string[] newAxisOrder, bool deepCopy)` | `Reorder(List<int>, bool)` | ? / ? 選択可 | 軸の順序組み替え（例: `ZCT → CZT`）。全フレームの並び替えのみでデータは不変 |
+| `SelectBy(axisName, index, deepCopy)` | `Reorder(List<int>, bool)` | ✓ / ✗ 選択可 | 指定軸の1スライスを選択し、その軸を次元から除去して返す |
+| `SliceAt(int frameIndex, bool deepCopy)` | `Reorder(List<int>, bool)` | ✓ / ✗ 選択可 | 単フレームを「要素数1の `Reorder`」として実装 |
+| `SliceAt((string, int)[] coords)` | `SliceAt(int, false)` | ✓ **Zero copy only** | 軸名+インデックスの組み合わせで座標指定。`deepCopy` オプションなし、常に shallow |
+| `ExtractAlong(axisName, baseIndices, deepCopy)` | `Reorder(List<int>, bool)` | ✓ / ✗ 選択可 | 他軸を固定して指定軸に沿った 1D スライスを抽出 |
+| `Reorder(string[] newAxisOrder, bool deepCopy)` | `Reorder(List<int>, bool)` | ✓ / ✗ 選択可 | 軸の順序組み替え（例: `ZCT → CZT`）。全フレームの並び替えのみでデータは不変 |
 
 ### DimensionalOperator（`Crop` ベース）
 
 | メソッド | 内部で呼ぶ Layer 1 | ゼロコピー | 説明 |
 |---|---|---|---|
-| `CropByCoordinates(xMin, xMax, yMin, yMax)` | `Crop(x, y, w, h)` | ? Deep only | 物理座標 → ピクセルインデックスに変換してから `Crop` に委譲 |
-| `CropCenter(w, h)` | `Crop(x, y, w, h)` | ? Deep only | 中心座標を自動計算してから `Crop` に委譲 |
+| `CropByCoordinates(xMin, xMax, yMin, yMax)` | `Crop(x, y, w, h)` | ✗ Deep only | 物理座標 → ピクセルインデックスに変換してから `Crop` に委譲 |
+| `CropCenter(w, h)` | `Crop(x, y, w, h)` | ✗ Deep only | 中心座標を自動計算してから `Crop` に委譲 |
 
 ### DimensionalOperator（`Map` + `SliceAt` ベース）
 
 | メソッド | 内部で呼ぶ Layer 1 | ゼロコピー | 説明 |
 |---|---|---|---|
-| `MapAt<TSrc,TDst>(converter, frame)` | `SliceAt(int, false)` → `Map` | ? Deep only | Shallow な `SliceAt` の後に `Map` を適用するため、最終的に Deep copy となる |
+| `MapAt<TSrc,TDst>(converter, frame)` | `SliceAt(int, false)` → `Map` | ✗ Deep only | Shallow な `SliceAt` の後に `Map` を適用するため、最終的に Deep copy となる |
 
 ---
 
@@ -189,9 +192,9 @@ Layer 1 メソッドを組み合わせた高レベル API です。
 
 ```
 MatrixData<T> src                   MatrixData<T> result (shallow)
-  _arrayList[0] ──────────────────────? 同じ T[] インスタンス
-  _arrayList[1] ──────────────────────? 同じ T[] インスタンス
-  _arrayList[2] ──────────────────────? 同じ T[] インスタンス
+  _arrayList[0] ──────────────────────→ 同じ T[] インスタンス
+  _arrayList[1] ──────────────────────→ 同じ T[] インスタンス
+  _arrayList[2] ──────────────────────→ 同じ T[] インスタンス
 ```
 
 ### 注意事項
@@ -211,14 +214,14 @@ MatrixData<T> src                   MatrixData<T> result (shallow)
 |---|---|---|
 | 特定フレームを読み取りのみで参照 | `AsSpan(frameIndex)` / `AsMemory(frameIndex)` | Zero |
 | 軸を指定してフレーム群を切り出す（読み取り中心） | `SelectBy` / `SliceAt` / `ExtractAlong`（`deepCopy=false`） | Zero |
-| 独立した編集用コピーを作る | `Clone()` / `Duplicate()` / `deepCopy=true` | Deep |
+| 独立した編集用コピーを作る | `Clone()` / `Duplicate()` / `deepCopy=true`（進捗・キャンセル対応オーバーロードあり） | Deep |
 | 軸の順序を変えて再配置する | `Reorder(string[])` | Zero / Deep |
 | 型変換・ピクセル演算 | `Map<TSrc,TDst>` / `MapAt` | Deep |
 | 全フレームを1枚に統合（Mean, Max など） | `Reduce(EntireReducerFunc)` | Deep |
 | 指定軸を削除して次元削減 | `Reduce(targetAxisName, ReducerFunc)` | Deep |
 | 矩形 ROI の切り出し | `Crop` / `CropByCoordinates` / `CropCenter` | Deep |
 | 3D 直交断面の高速更新 | `VolumeAccessor.SliceOrthogonal`（バッファ再利用） | △ |
-| 視点変換（XY → YZ 積層など） | `VolumeAccessor.Restack(ViewFrom)` | Deep |
+| 視点変換（XY → YZ 積層など） | `VolumeAccessor.Restack(ViewFrom, LoadingMode)`（In-Memory/Virtual選択・進捗・キャンセル対応） | Deep |
 | MIP / MinIP / AIP 投影 | `VolumeAccessor.CreateProjection<T>` | Deep |
 | Z 軸方向の単フレーム参照 | `VolumeAccessor.SliceAt(ViewFrom.Z, iz)` | Zero |
 

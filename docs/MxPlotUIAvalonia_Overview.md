@@ -1,7 +1,7 @@
 ﻿# MxPlot.UI.Avalonia — Overview
 
 **Created**: 2026-04-22  
-**Updated**: 2026-08-20  
+**Updated**: 2026-08-31  
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 ---
@@ -37,6 +37,7 @@ A full-featured `Window` subclass. One window per `IMatrixData`.
 | Status bar | Data type, memory size, zoom %, progress, notice/toast |
 | Linked plotters | `LinkRefresh` for synchronized multi-window display |
 | Composite mode | Multi-channel color compositing — see [Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md) |
+| ColorCoded projection | Depth-coded XY (Z-axis) projection, on its own child window — see [below](#colorcoded-depth-coded-projection) |
 | External control | Facade properties (`Lut`, `IsInvertedColor`, `LutDepth`, `RangeMode`, `IsFixedRange`, `FixedRange`) — see [Usage Guide](./MatrixPlotter_Usage_Guide.md) |
 | Plugin actions | `IPlotterAction` / `IMatrixPlotterContext` for tool extensions |
 
@@ -57,7 +58,7 @@ Key properties:
 - `Lut` — active `LookupTable`
 - `IsFixedRange` / `FixedMin` / `FixedMax` — range override
 - `IsInvertedColor` / `LutDepth` — LUT inversion and quantization level
-- `RenderingMode` — `Lut` (default), `Composite`, or `ColorCoded`
+- `RenderingMode` — `Lut` (default), `Composite`, or `ColorCoded` (see [ColorCoded](#colorcoded-depth-coded-projection) below)
 - `CompositeRecipes` / `CompositeBlendMode` / `CompositeFrameIndices` — multi-channel composite state
 - `Zoom`, `IsFitToView` — display transform
 - `OverlayManager` — manages overlay objects
@@ -85,6 +86,36 @@ Key events:
 - Manages the XY-projection window (Z-axis depth display)
 
 Orthogonal mode is activated automatically when `MatrixData` has 3+ axes.
+
+### ColorCoded (depth-coded projection)
+
+`RenderingMode.ColorCoded` is not an independent feature or a mode a user "enters" on an
+arbitrary window the way Composite is — it's **one form of the XY (Z-axis) projection**: the same
+winner-value scan as a Max/Min projection (`ExtremumIndexOperation`), plus the winner's *source
+Z-index* colorized through a depth palette. Because of that:
+
+- It only ever appears on the **ephemeral XY-projection child window** created by
+  `MatrixPlotter.VolumeOperation.cs`'s `OnXYProjectionChanged` — never as something set directly
+  on an ordinary window's `MxView`. `ProjectionSelector` offers it only on the X-Y (Z Projection)
+  row, as two extra picks (Color(Max)/Color(Min)) layered on top of the plain projection modes;
+  `MxPlot.Core`'s own `ProjectionMode` enum is untouched — the distinction is reported separately
+  via `ProjectionSelector.IsColorCoded(plane)`.
+- The child window's own live `MatrixData` stays an ordinary winner-*value* projection result
+  (same type as the source) — Duplicate/Convert/Filter/Save all work on it like any other
+  projection. Only the **display** is special: `ColorCodedBitmapWriter` combines that data with a
+  winner-index/depth-palette/range/invert bundle (`ColorCodedRenderInfo`), scanned and owned by
+  the *parent*'s `OrthogonalViewController`.
+- It does have a **dedicated UI component**: `MatrixPlotter.ColorCoded.cs` reuses the ordinary LUT
+  header's `LutSelector`/`ValueRangeBar` controls as-is, but swaps in its own details panel —
+  Start/End (scan range) + Invert — replacing the normal Level/Histogram panel, which has no
+  meaning for a depth-coded projection.
+- Composite and ColorCoded are mutually exclusive (both are defined in terms of a
+  depth/Z-like axis).
+- Unlike the live child window, **baking** a ColorCoded projection (via the ordinary Create
+  Projection dialog) does *not* keep the winner-value data — it decomposes the already-colorized
+  ARGB result into a genuine 3-channel **RGB `MatrixData<byte>`** (`ColorAxis.CreateRgb()`), the
+  same shape as any other RGB dataset. The bake carries its Start/End/LUT/Invert (and the
+  ValueMin/Max actually applied) into the operation's history entry for reproducibility.
 
 ### `ProfilePlotter`
 
@@ -136,6 +167,14 @@ for the full API and the thread-affinity contract shared with `MxPlotHostApplica
 
 ## Plugin / Action Model
 
+There are three distinct extension points, for three different jobs:
+
+| Interface | Job | Menu location |
+|---|---|---|
+| `IPlotterAction` | Interactive on-canvas tool (crop, measure, annotate) | Toolbar / context menu |
+| `IMatrixPlotterPlugin` | One-shot command against the current data/context | "Plugins" tab |
+| `IRenderExportPlugin` | Export the rendered view (not raw data) to a file | "Export as…" submenu |
+
 ### `IPlotterAction`
 
 Implement `IPlotterAction` to create interactive tools (crop, measure, annotate, etc.).
@@ -143,13 +182,20 @@ Implement `IPlotterAction` to create interactive tools (crop, measure, annotate,
 ```csharp
 public interface IPlotterAction : IDisposable
 {
-    event EventHandler? Completed;
+    event EventHandler<IMatrixData?>? Completed;
     event EventHandler? Cancelled;
+
+    void Invoke(PlotterActionContext context);
+    void NotifyContextChanged(PlotterActionContext newContext) { }  // default: no-op
 }
 ```
 
-The active action is managed by `MatrixPlotter` internally. Only one action can be active at a time.  
-When `Completed` fires, the action result is applied (e.g., cropped data replaces the current dataset).
+The active action is managed by `MatrixPlotter` internally. Only one action can be active at a time.
+`Invoke` starts the action and receives a `PlotterActionContext` (`MainView`, `HostVisual`, `Data`,
+`OrthoPanel`, `DepthAxisName`); when `Completed` fires, its `IMatrixData?` argument — the action
+result, or `null` if no data change occurred — is applied (e.g., cropped data replaces the current
+dataset). `NotifyContextChanged` lets a running action re-validate itself when the host context
+changes underneath it (e.g., the depth axis is switched, or the data is replaced).
 
 ### `IMatrixPlotterContext`
 
@@ -166,12 +212,47 @@ public interface IMatrixPlotterContext
     int ActiveFrameIndex { get; }
     LookupTable? CurrentLut { get; }
     bool IsLutInverted { get; }
+
+    WriteableBitmap RenderFrame(int frameIndex,
+                                 double valueMin = double.NaN,
+                                 double valueMax = double.NaN);
 }
 ```
 
+`RenderFrame` is the primary building block for frame-export plugins: it renders any frame with
+the plotter's current (or an overridden) LUT and value range, returning a caller-owned
+`WriteableBitmap` at the data's native resolution. Looping it over every frame index produces the
+sequence needed for video/GIF export.
+
+### `IMatrixPlotterPlugin`
+
+Implement `IMatrixPlotterPlugin` to add a one-shot command to the "Plugins" menu tab:
+
+```csharp
+public interface IMatrixPlotterPlugin
+{
+    string CommandName { get; }             // menu label
+    string Description { get; }             // tooltip
+    string? GroupName => null;              // optional sub-header grouping
+    void Run(IMatrixPlotterContext context); // runs on the UI thread
+}
+```
+
+### `IRenderExportPlugin`
+
+Implement `IRenderExportPlugin` to add an entry to every window's "Export as…" submenu. Unlike
+`IMatrixDataWriter` (registered via `FormatRegistry` for raw pixel data), this exports the
+*rendered* view — LUT and overlays already applied — as BGRA32 frames via `IRenderHost.RenderFrameAsync`.
+Used by `MxPlot.UI.Avalonia.Video` for AVI/MP4 export; see the interface's own XML doc for the
+full `ExportAsync` contract (progress reporting, cancellation, `RequiresStack`).
+
 ### `MatrixPlotterPluginRegistry`
 
-Registers plugins and provides the `IPlotWindowService` used by `IMatrixPlotterContext`.
+Central static registry for all three kinds of plugin (`Plugins`, `ExportPlugins` — `IPlotterAction`
+instances are per-invocation, not registered here). Plugins can be added programmatically via
+`AddPlugin`/`AddExportPlugin` or discovered from a directory of DLLs via `LoadFromDirectory`.
+`PluginsChanged`/`ExportPluginsChanged` fire on the UI thread so `MatrixPlotter` can rebuild its
+menus when the list changes. Also provides the `IPlotWindowService` used by `IMatrixPlotterContext`.
 
 ---
 

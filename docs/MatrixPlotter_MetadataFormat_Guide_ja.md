@@ -2,7 +2,7 @@
 
 **MxPlot.Core / MxPlot.UI.Avalonia — メタデータ運用規約**
 
-> 最終更新日: 2026-08-20
+> 最終更新日: 2026-08-31
 
 *注意: このドキュメントは大部分がAIによって生成されたものであり、正確性の確認が必要です。*
 
@@ -275,14 +275,23 @@ internal static void AppendHistory(
     string? detail = null)
 ```
 
-現在の呼び出し箇所:
+現在の呼び出し箇所（すべて `MxPlot.UI.Avalonia.Views` 内の `MatrixPlotter` partial クラス）:
 
 | 呼び出し箇所 | `op` | `from` | `detail` |
 |---|---|---|---|
-| `ApplyCropResult` | `"Crop"` | ウィンドウタイトル | `"X=10 Y=20 W=100 H=100"`（単一フレームCrop時は `" (frame N)"` を付加） |
-| `DuplicateWindowAsync` | `"Duplicate"` | ウィンドウタイトル | *(なし)* |
-| `ConvertValueTypeAsync` | `"Convert Type"` | ウィンドウタイトル | `"float → double; scale [0, 255] → [0, 1]"` または `"float → int; direct cast"` |
-| `ReverseStackAsync` | `"Reverse Stack"` | ウィンドウタイトル | `"all frames"` または `"axis: Z"` |
+| `ApplyCropResult`（`.Processings.cs`） | `"Crop"` / `"Substack"` / `"3D Crop"`（モードによる） | ウィンドウタイトル | `"X=10 Y=20 W=100 H=100"`（体積Cropでは `Z=...` を付加、単一フレームCrop時は `" (frame N)"` を付加） |
+| `DuplicateAsync`（`.Actions.cs`） | `"Duplicate"` | ウィンドウタイトル | *(なし)* |
+| `ConvertValueTypeAsync`（`.Actions.cs`） | `"Convert Type"` | ウィンドウタイトル | `"float → double; scale [0, 255] → [0, 1]"` または `"float → int; direct cast"` |
+| `ConvertComplexValueAsync`（`.Actions.cs`） | `"Convert Complex"` | ウィンドウタイトル | `"Complex → double (Real)"`（log₁₀適用時は `" + log₁₀"` を付加） |
+| `ExecuteFilterAsync`（`.Filters.cs`） | カーネル名、例: `"Median 3×3"`, `"Gaussian 5×5"` | ウィンドウタイトル | `"radius=1..."`（フレーム/Compositeキューブの補足付き） |
+| `InvokeLogTransformAsync`（`.LogTransform.cs`） | `"Log Transform (Log₁₀)"` など | ウィンドウタイトル | 底（base）/ ゼロ以下の扱い（handling）の要約 |
+| `InvokeNormalizeAsync`（`.Normalize.cs`） | `"Normalize (max→1)"` など | ウィンドウタイトル | スコープ / ターゲット値の要約 |
+| `InvokeExtractFrame`（`.Processings.cs`、XZ/YZ Sideビュー分岐） | `"Extract Frame (XZ)"` / `"Extract Frame (YZ)"` | ウィンドウタイトル | 固定したスライス位置 + 他軸のインデックス |
+| `InvokeExtractFrame`（`.Processings.cs`、メインビュー分岐） | `"Extract Frame"` / `"Extract Frame(deep copy)"` / `"Extract Frame (Composite)"` | ウィンドウタイトル | フレーム番号 / 固定軸の要約 |
+| `InvokeCreateProjectedDataAsync`（`.VolumeOperation.cs`） | `"{Mode} {Axis}-Projection"`、例: `"Sum X-Projection"` | ウィンドウタイトル | 投影面、スコープ（この位置のみ／全位置）、フレーム数（ColorCoded焼き込み時はそのパラメータも付加） |
+| `InvokeReverseStackAsync`（`.Processings.cs`） | `"Reverse Stack"` | ウィンドウタイトル | `"all frames"` または `"axis: Z"` |
+| `InvokeConvertToGrayscaleAsync`（`.Processings.cs`） | `"Convert to Grayscale"` | ウィンドウタイトル | チャンネル数 + 変換方式（Rec.709輝度 または 平均） |
+| `InvokeRestackAsync`（`.VolumeOperation.cs`） | `"Restack along {X/Y/Z}"` | ウィンドウタイトル | 投影面、他軸の位置、フレーム数 |
 
 このメソッドの動作:
 1. 既存の JSON 配列をパース（`CopyPropertiesFrom` 経由で継承された場合など）

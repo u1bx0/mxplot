@@ -2,7 +2,7 @@
 
 **MxPlot.Core / MxPlot.UI.Avalonia — Metadata Conventions**
 
-> Last Updated: 2026-08-20
+> Last Updated: 2026-08-31
 
 *Note: This document is largely based on AI-generated content and requires further review for accuracy.*
 
@@ -278,14 +278,23 @@ internal static void AppendHistory(
     string? detail = null)
 ```
 
-Current call sites:
+Current call sites (all in `MxPlot.UI.Avalonia.Views`, `MatrixPlotter` partial classes):
 
 | Call site | `op` | `from` | `detail` |
 |---|---|---|---|
-| `ApplyCropResult` | `"Crop"` | Window title | `"X=10 Y=20 W=100 H=100"` (appends `" (frame N)"` for single-frame crop) |
-| `DuplicateWindowAsync` | `"Duplicate"` | Window title | *(none)* |
-| `ConvertValueTypeAsync` | `"Convert Type"` | Window title | `"float → double; scale [0, 255] → [0, 1]"` or `"float → int; direct cast"` |
-| `ReverseStackAsync` | `"Reverse Stack"` | Window title | `"all frames"` or `"axis: Z"` |
+| `ApplyCropResult` (`.Processings.cs`) | `"Crop"` / `"Substack"` / `"3D Crop"` (mode-dependent) | Window title | `"X=10 Y=20 W=100 H=100"` (+ `Z=...` for volume crop, + `" (frame N)"` for single-frame) |
+| `DuplicateAsync` (`.Actions.cs`) | `"Duplicate"` | Window title | *(none)* |
+| `ConvertValueTypeAsync` (`.Actions.cs`) | `"Convert Type"` | Window title | `"float → double; scale [0, 255] → [0, 1]"` or `"float → int; direct cast"` |
+| `ConvertComplexValueAsync` (`.Actions.cs`) | `"Convert Complex"` | Window title | `"Complex → double (Real)"` (+ `" + log₁₀"` if applied) |
+| `ExecuteFilterAsync` (`.Filters.cs`) | Kernel label, e.g. `"Median 3×3"`, `"Gaussian 5×5"` | Window title | `"radius=1..."` (+ frame/composite-cube suffix) |
+| `InvokeLogTransformAsync` (`.LogTransform.cs`) | `"Log Transform (Log₁₀)"` etc. | Window title | base/handling summary |
+| `InvokeNormalizeAsync` (`.Normalize.cs`) | `"Normalize (max→1)"` etc. | Window title | scope/target summary |
+| `InvokeExtractFrame` (`.Processings.cs`, XZ/YZ side-view branches) | `"Extract Frame (XZ)"` / `"Extract Frame (YZ)"` | Window title | fixed slice position + other-axis indices |
+| `InvokeExtractFrame` (`.Processings.cs`, main view branch) | `"Extract Frame"` / `"Extract Frame(deep copy)"` / `"Extract Frame (Composite)"` | Window title | frame index / fixed-axis summary |
+| `InvokeCreateProjectedDataAsync` (`.VolumeOperation.cs`) | `"{Mode} {Axis}-Projection"`, e.g. `"Sum X-Projection"` | Window title | plane, scope (this position / all positions), frame count (+ ColorCoded bake params when applicable) |
+| `InvokeReverseStackAsync` (`.Processings.cs`) | `"Reverse Stack"` | Window title | `"all frames"` or `"axis: Z"` |
+| `InvokeConvertToGrayscaleAsync` (`.Processings.cs`) | `"Convert to Grayscale"` | Window title | channel count + method (Rec.709 luma or mean) |
+| `InvokeRestackAsync` (`.VolumeOperation.cs`) | `"Restack along {X/Y/Z}"` | Window title | plane, other-axis positions, frame count |
 
 The method:
 1. Parses the existing JSON array (if any, e.g. inherited via `CopyPropertiesFrom`)

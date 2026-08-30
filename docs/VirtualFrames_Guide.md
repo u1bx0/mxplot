@@ -2,7 +2,7 @@
 
 **MxPlot.Core — MMF-backed Virtual Storage Architecture**
 
-> Last Updated: 2026-04-24
+> Last Updated: 2026-08-31
 
 *This document covers the design and usage of the Virtual (MMF-backed) storage layer in MxPlot.Core.
 For how to consume Virtual data from a file format plugin, see the
@@ -199,6 +199,30 @@ var clone = md.Clone();  // or md.Duplicate()
 // The clone is independent; SaveAs uses the fast-path
 clone.SaveAs("snapshot.mxd", new MxBinaryFormat());
 ```
+
+### Progress and cancellation
+
+Both `Clone` and `Duplicate` have an overload that reports per-frame progress and honors a
+`CancellationToken`, for either dispatch path (Virtual or InMemory):
+
+```csharp
+var progress = new Progress<int>(i => Console.WriteLine($"Cloned frame {i}"));
+using var cts = new CancellationTokenSource();
+
+var clone = md.Clone(forceInMemory: false, progress, cts.Token);
+// or: md.Duplicate(forceInMemory: false, progress, cts.Token);
+```
+
+If cancelled mid-copy, `CloneAsVirtual` disposes and deletes the partially-written temp vessel
+before the `OperationCanceledException` propagates — no orphaned multi-GB temp file is left behind.
+
+### ValueRange propagation
+
+`CloneAsVirtual` propagates any already-cached per-frame `ValueRange` (Min/Max) from the source
+to the clone, mirroring what `CloneInMemory` already does via `SetArray`'s `minValues`/`maxValues`
+parameters. Only frames whose range was actually cached on the source are copied — this reuses
+prior work, it never triggers a scan. A frame the source never scanned stays "not yet calculated"
+on the clone too, and will lazily scan on first access as usual.
 
 ### Current limitation: source format matching
 

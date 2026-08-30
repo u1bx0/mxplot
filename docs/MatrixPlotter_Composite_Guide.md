@@ -54,9 +54,13 @@ While Composite mode is active:
   selector, value-range bar, revert — so the two modes feel identical to operate. Its tooltip
   names the composited axis (`"Composite axis: Z"`, etc.), since that is no longer implicitly
   "Channel".
-- `MatrixData.ActiveIndex` is pinned to position 0 on the composited axis. That axis is no longer
-  a navigation axis; every position along it is on screen at once. This matters for any operation
-  that would otherwise restrict itself to the active frame (see
+- The composited axis's own `Axis.Index` is pinned to `0` for the whole session — not
+  `MatrixData.ActiveIndex` itself, which is a single flat frame index over *all* axes, not a
+  per-axis coordinate. Pinning the axis coordinate means `ActiveIndex` always resolves to
+  "channel 0 at the current position of every other axis" (e.g. current Z, current T) — 0 only
+  when every other axis also happens to be at 0. That axis is no longer a navigation axis; every
+  position along it is on screen at once. This matters for any operation that would otherwise
+  restrict itself to the active frame (see
   [Interaction with Other Features](#interaction-with-other-features)).
 
 Entering Composite mode also **promotes the target axis to a `ColorAxis`** (a `TaggedAxis`
@@ -203,9 +207,10 @@ The UI exposes this through a dedicated grayscale dialog.
 
 ## Interaction with Other Features
 
-Because `ActiveIndex` is pinned to position 0 on the composited axis, operations that would
-normally act on "the current frame" are redirected to act on **the whole composited axis at the
-current position of every other axis** — the channel cube.
+Because the composited axis's coordinate is pinned to `0` (see above), `ActiveIndex` always
+resolves to channel 0 at the current position of every other axis. Operations that would normally
+act on "the current frame" are redirected to act on **the whole composited axis at the current
+position of every other axis** instead — the channel cube.
 
 | Feature | Behaviour in Composite mode |
 |---|---|
@@ -256,7 +261,9 @@ plotter.MainView.CompositeFrameIndices = frameIndices; // source frame per chann
 This is the low-level rendering contract: `CompositeFrameIndices[i]` is the real source-frame
 index that channel `i` currently maps to, and the caller is responsible for keeping it consistent
 with the data on screen. The orchestration `MatrixPlotter` performs when the user switches modes —
-promoting the axis to a `ColorAxis`, building default recipes, pinning `ActiveIndex`, rebuilding
+promoting the axis to a `ColorAxis`, building default recipes, pinning the composited axis's
+coordinate to `0` (see [Requirements and Entry Points](#requirements-and-entry-points) for why
+that isn't the same as pinning `ActiveIndex` itself), rebuilding
 the header and settings panel, wiring the orthogonal views — is `internal` and is **not** reachable
 from outside the assembly.
 
