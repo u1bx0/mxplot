@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.3.0-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.3.1-orange)](https://github.com/u1bx0/mxplot/releases)
 [![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 

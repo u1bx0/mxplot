@@ -4,6 +4,12 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<Nullable>enable</Nullable>
 		<AssemblyName>MxPlot</AssemblyName>
+		<!-- AssemblyName intentionally matches the MxPlot metapackage's own PackageId (its project
+		     name, "MxPlot"). Without this, a Release build of the whole solution would generate
+		     LocalPackages\MxPlot.<version>.nupkg from BOTH this app and the real metapackage, and
+		     whichever finished building last would silently overwrite the other on disk, since this
+		     app is a WinExe reference application, never meant to be a NuGet library in the first place. -->
+		<IsPackable>false</IsPackable>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
 		<Platforms>AnyCPU</Platforms>
