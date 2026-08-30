@@ -1,7 +1,7 @@
 ﻿# Hosting MatrixPlotter in WinForms / WPF
 
 **Created**: 2026-04-24  
-**Updated**: 2026-07-16
+**Updated**: 2026-08-20
 **Target version**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 10
 
 ---
@@ -439,6 +439,35 @@ arr[iy * width + ix] = newValue;    // → cache becomes stale
 data.Invalidate();                  // explicit Invalidate required only in this case
 plotter.Refresh();
 ```
+
+### Replacing the data instead of refreshing
+
+`Refresh()` redraws the current data. To swap in a **different** `IMatrixData` instance, assign it
+on the UI thread:
+
+```csharp
+await Dispatcher.UIThread.InvokeAsync(() => plotter.MainView.MatrixData = newData);
+```
+
+Prefer `Refresh()` for a live feed whose shape does not change — replacing the data rebuilds the
+whole window chrome (axis trackers, menus, range bar) and resets overlay state.
+
+### Controlling the display (LUT, value range)
+
+A WinForms/WPF host has no ViewModel of its own, so use the Facade properties on `MatrixPlotter`:
+
+```csharp
+await Dispatcher.UIThread.InvokeAsync(() =>
+{
+    plotter.Lut = ColorThemes.Jet;
+    plotter.RangeMode = ValueRangeMode.Fixed;
+    plotter.FixedRange = new RangeInfo(0, 4095);
+});
+```
+
+See [Controlling the Display from Code](./MatrixPlotter_Usage_Guide.md#controlling-the-display-from-code)
+in the Usage Guide for the full property list, the frame-position API
+(`plotter.MatrixData.ActiveIndex`), and the properties that still have to go through `MainView`.
 
 ---
 

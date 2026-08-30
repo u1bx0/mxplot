@@ -42,6 +42,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly Slider _slider;
         private readonly TextBox _indicator;
         private readonly Button _playButton;
+        private readonly Button _axisConfigButton;  // … AxisConfig button (shared by every axis)
 
         // ── Animation ─────────────────────────────────────────────────────────
         private readonly DispatcherTimer _timer;
@@ -62,6 +63,18 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>The 🧊 orthogonal-view toggle button (right of the indicator).</summary>
         public ToggleButton FreezeButton => _freezeButton;
 
+        /// <summary>Fired when the user selects "Rename Axis" from the config menu.</summary>
+        public event EventHandler? RenameAxisRequested;
+
+        /// <summary>Fired when the user selects "Scale Setting" from the config menu.</summary>
+        public event EventHandler? ScaleSettingRequested;
+
+        /// <summary>
+        /// Fired when the user selects "Switch to Composite Mode" from the config menu. Reachable
+        /// for every axis, not just one named "Channel".
+        /// </summary>
+        public event EventHandler? CompositeModeRequested;
+
         /// <summary>Fired after every index change (0-based).</summary>
         public event EventHandler<int>? IndexChanged;
 
@@ -81,7 +94,7 @@ namespace MxPlot.UI.Avalonia.Controls
             set { if (value > 0) _timer.Interval = TimeSpan.FromMilliseconds(value); }
         }
 
-       
+
         // ── Constructor ───────────────────────────────────────────────────────
 
         public AxisTracker(Axis axis)
@@ -100,7 +113,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 MinHeight = 0,
                 TextTrimming = TextTrimming.CharacterEllipsis,
             };
-            ToolTip.SetTip(_nameLabel, axis.Name);
+            ToolTip.SetTip(_nameLabel, BuildAxisLabelTooltip());
 
             // ── Slider ────────────────────────────────────────────────────────
             _slider = new Slider
@@ -120,7 +133,7 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 if (e.NameScope.Find("thumb") is Thumb thumb)
                 {
-                    // デフォルトの制約を解除して小さくする
+                    //make the thumb smaller than the default 20x20, so it doesn't take up too much vertical space
                     thumb.MinWidth = 0;
                     thumb.MinHeight = 0;
                     thumb.Width = 12;
@@ -168,6 +181,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
                 VerticalContentAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 0, 0),
             };
 
             // ── Freeze (orthogonal) button ─────────────────────────────────────
@@ -191,6 +205,33 @@ namespace MxPlot.UI.Avalonia.Controls
             };
             ToolTip.SetTip(_freezeButton, $"Volume: XY-{axis.Name}");
 
+            // ── AxisConfig button (⋮) ── shared by every axis ────────────────
+            _axisConfigButton = new Button
+            {
+                Width = ButtonSize,
+                Height = ButtonSize,
+                Content = new PathIcon
+                {
+                    Data = MenuIcons.DotsVertical,
+                    Width = 12,
+                    Height = 12,
+                },
+                Padding = new Thickness(0),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 0, 0),
+                Background = Brushes.Transparent,
+            };
+            ToolTip.SetTip(_axisConfigButton, "Axis options");
+            _axisConfigButton.Click += (_, _) =>
+            {
+                var menu = BuildAxisConfigMenu();
+                menu.Placement = PlacementMode.BottomEdgeAlignedLeft;
+                _axisConfigButton.ContextMenu = menu;
+                menu.Open(_axisConfigButton);
+            };
+
             // ── Animation timer ───────────────────────────────────────────────
             _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(DefaultInterval) };
             _timer.Tick += OnTimerTick;
@@ -207,35 +248,29 @@ namespace MxPlot.UI.Avalonia.Controls
             _playButton.ContextMenu = BuildPlayButtonContextMenu();
             UpdatePlayButtonToolTip();
             _axis.IndexChanged += OnAxisIndexChanged;
-            _axis.NameChanged += (_, _) =>
-            {
-                _nameLabel.Text = _axis.Name;
-                ToolTip.SetTip(_nameLabel, _axis.Name);
-                ToolTip.SetTip(_freezeButton, $"Volume: XY-{_axis.Name}");
-            };
-
-            // ── Function slot spacer (reserves column for specialized buttons) ──
-            var funcSpacer = new Border { Width = ButtonSize, Height = ButtonSize };
+            _axis.NameChanged  += OnAxisNameChanged;
+            _axis.ScaleChanged += OnAxisScaleChanged;
+            _axis.UnitChanged  += OnAxisScaleChanged;  // Unit changes also refresh the ToolTip
 
             // ── Layout ────────────────────────────────────────────────────────
             var grid = new Grid { Margin = new Thickness(5, 0, 5, 0) };
             grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Name
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // FuncSlot (reserved)
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // … AxisConfig
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Play/Stop
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Star));   // Slider
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Indicator
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Freeze
 
             Grid.SetColumn(_nameLabel, 0);
-            Grid.SetColumn(funcSpacer, 1);
+            Grid.SetColumn(_axisConfigButton, 1);
             Grid.SetColumn(_playButton, 2);
             Grid.SetColumn(_slider, 3);
             Grid.SetColumn(_indicator, 4);
             Grid.SetColumn(_freezeButton, 5);
 
             grid.Children.Add(_nameLabel);
-            grid.Children.Add(funcSpacer);
+            grid.Children.Add(_axisConfigButton);
             grid.Children.Add(_slider);
             grid.Children.Add(_indicator);
             grid.Children.Add(_playButton);
@@ -273,28 +308,45 @@ namespace MxPlot.UI.Avalonia.Controls
         private void UpdateIndicator()
         {
             if (!_indicator.IsFocused)
-                _indicator.Text = $"{_axis.Index + 1}/{_axis.Count}";
+                _indicator.Text = $"{_axis.Index} [{_axis.Count}]";
             ToolTip.SetTip(_indicator, BuildPositionText());
         }
 
         /// <summary>
         /// Builds the axis position string shown in the indicator tooltip and, while dragging,
         /// in the <see cref="MxView"/> top-right overlay.
-        /// Format: <c>"Z: 12.500 um (8/100)"</c> for scaled axes, <c>"Z: 8/100"</c> for index-based.
+        /// Format: <c>"Z: 12.500 um (7 [100])"</c> for scaled axes, <c>"Z: 7 [100]"</c> for
+        /// index-based -- 0-based throughout, matching <see cref="_axis"/>.Index and every other
+        /// index the rest of the codebase already works in (ColorCoded's Start/End, GetValueAt's
+        /// frameIndex, DimensionStructure, ...). Deliberately not "index/count": that would still
+        /// read as a fraction whose numerator and denominator disagree in base (0-based index over
+        /// a 1-based-feeling count, e.g. "19/20" for the last of 20) -- "[count]" alone sidesteps
+        /// that without needing a 1-based display convention that existed only here and nowhere else
+        /// in the UI. No "i=" label either (an earlier version of this had one): the drag overlay
+        /// (<see cref="MatrixPlotter.UpdateAxisDragOverlay"/>) appends the *global* linearised frame
+        /// position right after this text, separated by "|" and labelled "i=" there -- if this text
+        /// carried the same "i=" label, the two would look like the same number shown twice instead
+        /// of two different ones (per-axis position vs. the global flattened frame).
         /// </summary>
         internal string BuildPositionText()
         {
             if (_axis is TaggedAxis tagAx)
-                return $"{_axis.Name}: {tagAx.CurrentTag} ({_axis.Index + 1}/{_axis.Count})";
+                return $"{_axis.Name}: {tagAx.CurrentTag} ({_axis.Index} [{_axis.Count}])";
             else if (_axis.IsIndexBased)
-                return $"{_axis.Name}: {_axis.Index + 1}/{_axis.Count}";
+                return $"{_axis.Name}: {_axis.Index} [{_axis.Count}]";
 
             double val = _axis.ValueAt(_axis.Index);
             string unit = string.IsNullOrEmpty(_axis.Unit) ? "" : $" {_axis.Unit}";
-            return $"{_axis.Name}: {val:F4}{unit} ({_axis.Index + 1}/{_axis.Count})";
+            return $"{_axis.Name}: {val:F4}{unit} ({_axis.Index} [{_axis.Count}])";
         }
 
-        private void StopAnimation()
+        /// <summary>
+        /// Stops this axis's Play animation, if running. Public so callers outside this control
+        /// (e.g. <c>MatrixPlotter.EnterCompositeMode</c>, which must stop every axis's Play before
+        /// consuming one of them into Composite) can force a stop without going through the button.
+        /// No-op if not currently animating.
+        /// </summary>
+        public void StopAnimation()
         {
             _timer.Stop();
             _stopwatch.Reset();
@@ -347,10 +399,10 @@ namespace MxPlot.UI.Avalonia.Controls
             finally { _isUpdating = false; }
         }
 
-        /// <summary>GotFocus → switch to edit mode: show 1-based index only.</summary>
+        /// <summary>GotFocus → switch to edit mode: show the raw 0-based index only.</summary>
         private void OnIndicatorGotFocus(object? sender, GotFocusEventArgs e)
         {
-            _indicator.Text = (_axis.Index + 1).ToString();
+            _indicator.Text = _axis.Index.ToString();
             Dispatcher.UIThread.Post(() => _indicator.SelectAll());
         }
 
@@ -366,7 +418,7 @@ namespace MxPlot.UI.Avalonia.Controls
             }
             else if (e.Key == Key.Escape)
             {
-                _indicator.Text = $"{_axis.Index + 1}/{_axis.Count}";
+                _indicator.Text = $"{_axis.Index} [{_axis.Count}]";
                 _slider.Focus();
                 e.Handled = true;
             }
@@ -375,9 +427,104 @@ namespace MxPlot.UI.Avalonia.Controls
         private void CommitIndicator()
         {
             if (int.TryParse(_indicator.Text, out int parsed))
-                ApplyIndex(Math.Clamp(parsed - 1, 0, _axis.Count - 1));   // 1-based → 0-based
+                ApplyIndex(Math.Clamp(parsed, 0, _axis.Count - 1));
             else
                 UpdateIndicator();
+        }
+
+        // ── AxisConfig menu ───────────────────────────────────────────────────
+
+        /// <summary>
+        /// Rebuilt fresh on every click rather than cached. Historically this mattered because
+        /// which items appeared depended on whether the axis was named "Channel"; that gate is
+        /// gone now (Composite is offered for every axis -- see the comment further down), but
+        /// rebuilding on each click remains harmless and keeps the menu trivially always current.
+        /// </summary>
+        private ContextMenu BuildAxisConfigMenu()
+        {
+            var rename = new MenuItem
+            {
+                Header = "Rename Axis",
+                Icon = new PathIcon { Data = MenuIcons.Edit, Width = 14, Height = 14 },
+                FontSize = BaseFontSize,
+            };
+            rename.Click += (_, _) => RenameAxisRequested?.Invoke(this, EventArgs.Empty);
+
+            var scale = new MenuItem
+            {
+                Header = "Scale Setting",
+                Icon = new PathIcon { Data = MenuIcons.Ruler, Width = 14, Height = 14 },
+                FontSize = BaseFontSize,
+            };
+            scale.Click += (_, _) => ScaleSettingRequested?.Invoke(this, EventArgs.Empty);
+
+            var menu = new ContextMenu { Items = { rename, scale } };
+
+            // No longer restricted to an axis literally named "Channel" -- any axis can become the
+            // Composite axis. See Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md
+            // section 3.3.7. The scale-loss confirmation for a non-index-based axis (Z, Time, ...)
+            // lives at the click-handler side (MatrixPlotter.cs's WireAxisConfigButtons), not here.
+            menu.Items.Add(new Separator());
+            var composite = new MenuItem
+            {
+                Header = "Switch to Composite Mode",
+                Icon = ControlFactory.MakeCompositeIcon(14),
+                FontSize = BaseFontSize,
+            };
+            composite.Click += (_, _) => CompositeModeRequested?.Invoke(this, EventArgs.Empty);
+            menu.Items.Add(composite);
+
+            return menu;
+        }
+
+        // ── NameChanged ───────────────────────────────────────────────────────
+
+        private void OnAxisNameChanged(object? sender, EventArgs e)
+        {
+            _nameLabel.Text = _axis.Name;
+            ToolTip.SetTip(_nameLabel, BuildAxisLabelTooltip());
+            ToolTip.SetTip(_freezeButton, $"Volume: XY-{_axis.Name}");
+            // ContextMenu is rebuilt fresh by BuildAxisConfigMenu() on every click, so there is
+            // nothing more to update here.
+        }
+
+        private void OnAxisScaleChanged(object? sender, EventArgs e)
+        {
+            ToolTip.SetTip(_nameLabel, BuildAxisLabelTooltip());
+        }
+
+        /// <summary>
+        /// Builds the label's ToolTip string.
+        /// Format:
+        /// <list type="bullet">
+        /// <item>Scaled axis: <c>Name | n=100 | 0.000 – 9.900 s (step: 0.100 s)</c></item>
+        /// <item>Index-based axis: <c>Name | n=3</c></item>
+        /// <item>TaggedAxis (Composite-compatible): <c>Name (Index-based) | n=3 | R / G / B</c>
+        ///       (tags shown when there are 8 or fewer)</item>
+        /// </list>
+        /// </summary>
+        private string BuildAxisLabelTooltip()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.Append(_axis.Name);
+            if (_axis is TaggedAxis) sb.Append(" (Index-based)");
+            sb.Append($" | n={_axis.Count}");
+
+            if (_axis is TaggedAxis tagAx)
+            {
+                // Show every tag when there are 8 or fewer; otherwise just the count.
+                if (tagAx.Tags.Count <= 8)
+                    sb.Append(" | ").Append(string.Join(" / ", tagAx.Tags));
+            }
+            else if (!_axis.IsIndexBased)
+            {
+                string unit = string.IsNullOrEmpty(_axis.Unit) ? "" : $" {_axis.Unit}";
+                sb.Append($" | {_axis.Min:G5} to {_axis.Max:G5}{unit}");
+                if (_axis.Step > 0)
+                    sb.Append($" (step: {_axis.Step:G4}{unit})");
+            }
+
+            return sb.ToString();
         }
 
         private void OnPlayButtonClick(object? sender, RoutedEventArgs e)
@@ -440,6 +587,9 @@ namespace MxPlot.UI.Avalonia.Controls
             base.OnDetachedFromVisualTree(e);
             StopAnimation();
             _axis.IndexChanged -= OnAxisIndexChanged;
+            _axis.NameChanged  -= OnAxisNameChanged;
+            _axis.ScaleChanged -= OnAxisScaleChanged;
+            _axis.UnitChanged  -= OnAxisScaleChanged;
         }
     }
 }

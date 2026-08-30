@@ -89,18 +89,24 @@ namespace MxPlot.UI.Avalonia.Views
 
         private Control BuildContent(string[] labels)
         {
-            var tabControl = new TabControl { Padding = new Thickness(0) };
+            var tabControl = new TabControl
+            {
+                Padding = new Thickness(0),
+                Margin = new Thickness(0, -10, 0, 0),
+            };
+            tabControl.Classes.Add("property-tabs");
+
 
             if (labels.Length > 0)
                 tabControl.Items.Add(new TabItem
                 {
-                    Header = new TextBlock { Text = "Geometry", FontSize = 12 },
+                    Header = new TextBlock { Text = "Geometry", FontSize = 11, Margin = new Thickness(0, 0, 0, -10) },
                     Content = BuildGeometryTab(labels),
                 });
 
             tabControl.Items.Add(new TabItem
             {
-                Header = new TextBlock { Text = "Pen", FontSize = 12 },
+                Header = new TextBlock { Text = "Pen", FontSize = 11, Margin = new Thickness(0, 0, 0, -10) },
                 Content = BuildPenTab(),
             });
 

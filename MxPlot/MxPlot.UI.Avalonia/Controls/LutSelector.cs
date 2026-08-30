@@ -63,6 +63,18 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Currently selected <see cref="LookupTable"/>, or <c>null</c>.</summary>
         public LookupTable? SelectedLut => (_comboBox.SelectedItem as LutItem)?.Lut;
 
+        /// <summary>
+        /// Text shown by the label preceding the ComboBox. Default is <c>"LUT:"</c>; a host that
+        /// repurposes this same control for a different meaning (e.g. MatrixPlotter's ColorCoded
+        /// projection child window, where it picks a depth palette instead of a value→colour LUT)
+        /// can override it so the two are not visually indistinguishable.
+        /// </summary>
+        public string LabelText
+        {
+            get => _lutLabel.Text ?? string.Empty;
+            set => _lutLabel.Text = value;
+        }
+
         /// <summary>A <see cref="WindowIcon"/> representing the currently selected LUT gradient.</summary>
         public WindowIcon? SelectedIcon => (_comboBox.SelectedItem as LutItem)?.Icon;
 
@@ -336,7 +348,7 @@ namespace MxPlot.UI.Avalonia.Controls
             for (int ix = 0; ix < PreviewW; ix++)
                 arr[ix] = (byte)ix;
 
-            return BitmapWriter.CreateBitmap(data, frameIndex: 0, lut: lut,
+            return LutBitmapWriter.CreateBitmap(data, frameIndex: 0, lut: lut,
                                              valueMin: 0, valueMax: 255);
         }
 
@@ -350,7 +362,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 for (int x = 0; x < S; x++)
                     arr[y * S + x] = (byte)(y * 255 / (S - 1));
 
-            using var bmp = BitmapWriter.CreateBitmap(data, 0, lut, valueMin: 0, valueMax: 255);
+            using var bmp = LutBitmapWriter.CreateBitmap(data, 0, lut, valueMin: 0, valueMax: 255);
             using var ms = new MemoryStream();
             bmp.Save(ms);
             ms.Position = 0;

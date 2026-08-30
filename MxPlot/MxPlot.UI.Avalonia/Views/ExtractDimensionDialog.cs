@@ -4,6 +4,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
 using MxPlot.UI.Avalonia.Helpers;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -28,13 +29,13 @@ namespace MxPlot.UI.Avalonia.Views
             string AxisName,
             bool ReplaceData);
 
-        internal static Task<ExtractDimensionParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes)
+        internal static Task<ExtractDimensionParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false)
         {
-            var dlg = new ExtractDimensionDialog(axes);
+            var dlg = new ExtractDimensionDialog(axes, isLinkWindow);
             return dlg.ShowDialog<ExtractDimensionParameters?>(owner);
         }
 
-        private ExtractDimensionDialog(IReadOnlyList<Axis> axes) : base("Extract...", width: 300)
+        private ExtractDimensionDialog(IReadOnlyList<Axis> axes, bool isLinkWindow) : base("Extract...", width: 300, isLinkWindow: isLinkWindow)
         {
             const double LW = 90;
 
@@ -98,13 +99,13 @@ namespace MxPlot.UI.Avalonia.Views
             void UpdateDesc()
             {
                 string axisName = axisCombo.SelectedItem as string ?? "";
-                var otherAxes = axes.Where(a => a.Name != axisName).Select(a => $"{a.Name}={a.Index + 1}").ToList();
+                var otherAxes = axes.Where(a => !string.Equals(a.Name, axisName, StringComparison.OrdinalIgnoreCase)).Select(a => $"{a.Name}={a.Index}").ToList();
                 string others = otherAxes.Count > 0 ? string.Join(", ", otherAxes) : "—";
 
                 if (modeCombo.SelectedIndex == 0) // Extract Along
                     descLabel.Text = $"Extracts a 1-D slice along {axisName} at the current position of all other axes ({others}).";
                 else // Extract At
-                    descLabel.Text = $"Fixes {axisName} at index {(axisCombo.SelectedItem != null ? axes.FirstOrDefault(a => a.Name == axisName)?.Index + 1 : "—")} and returns the remaining dimensions as a hyperstack.";
+                    descLabel.Text = $"Fixes {axisName} at index {(axisCombo.SelectedItem != null ? axes.FindAxis(axisName)?.Index : "—")} and returns the remaining dimensions as a hyperstack.";
             }
 
             modeCombo.SelectionChanged += (_, _) => UpdateDesc();

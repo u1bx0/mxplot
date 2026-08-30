@@ -15,6 +15,21 @@ namespace MxPlot.Core
     public readonly record struct GlobalPoint(double X, double Y, double Z);
 
     /// <summary>
+    /// Tile counts of a FOV grid, along X, Y and Z.
+    /// </summary>
+    /// <remarks>
+    /// A named type rather than a <c>(int, int, int)</c> tuple: the tuple's backing members are
+    /// fields named <c>Item1</c>/<c>Item2</c>/<c>Item3</c>, which forced
+    /// <c>JsonSerializerOptions.IncludeFields</c> on for the whole <c>.mxd</c> header and wrote
+    /// those meaningless names into every file. A record struct serializes as
+    /// <c>{"X":..,"Y":..,"Z":..}</c> through ordinary properties.
+    /// </remarks>
+    /// <param name="X">Number of tiles along X.</param>
+    /// <param name="Y">Number of tiles along Y.</param>
+    /// <param name="Z">Number of tiles along Z.</param>
+    public readonly record struct TileGrid(int X, int Y, int Z);
+
+    /// <summary>
     /// Result of tile overlap validation.
     /// </summary>
     /// <param name="TileIndex">One-dimensional tile index.</param>
@@ -45,25 +60,29 @@ namespace MxPlot.Core
     /// </remarks>
     public class FovAxis : Axis
     {
-        // Recommended to use as property to prevent data loss during JSON serialization.
-        // (Private fields may not be serialized in some cases)
-        [System.Text.Json.Serialization.JsonInclude]
-        private GlobalPoint[] _origins;
-
-
         private int _zIndex = 0;
 
         /// <summary>
-        /// Provides read-only access to the entire origins array (also serves for serialization compatibility).
-        /// Individual elements can also be accessed via indexers: <c>FovAxis[ix, iy, iz]</c>.
+        /// The origin coordinate of every tile, indexed by one-dimensional tile index.
+        /// Individual elements can also be reached through the indexers: <c>FovAxis[ix, iy, iz]</c>.
         /// </summary>
-        public GlobalPoint[] Origins => _origins;
+        /// <remarks>
+        /// This property is the single serialization surface for the origins; it is restored
+        /// through the <c>[JsonConstructor]</c> below. It previously shadowed a
+        /// <c>[JsonInclude]</c>-annotated private field, which left it ambiguous whether the array
+        /// round-tripped under the field's name, the property's name, or both.
+        /// <para>
+        /// The array itself is mutable by design — the indexers write through it and raise
+        /// <see cref="OriginChanged"/>. Callers that mutate it directly bypass that event.
+        /// </para>
+        /// </remarks>
+        public GlobalPoint[] Origins { get; }
 
         /// <summary> 
-        /// Tile layout information when FOVs are arranged in a grid (X count, Y count, Z count).
+        /// Tile counts when FOVs are arranged in a grid.
         /// Note: The actual display position is determined by the <see cref="Origins"/> property.
         /// </summary>
-        public (int X, int Y, int Z) TileLayout { get; }
+        public TileGrid TileLayout { get; }
 
         
         /// <summary>
@@ -90,14 +109,14 @@ namespace MxPlot.Core
         /// <returns>The <see cref="GlobalPoint"/> at the specified index.</returns>
         public GlobalPoint this[int index]
         {
-            get => _origins[index];
+            get => Origins[index];
             set
             {
-                if (_origins[index] == value)
+                if (Origins[index] == value)
                     return;
 
                 // 1. Update the value
-                _origins[index] = value;
+                Origins[index] = value;
 
                 OriginChanged?.Invoke(this, index);
             }
@@ -112,7 +131,7 @@ namespace MxPlot.Core
         {
             get
             {
-                return _origins[GetIndex(x, y, ZIndex)];
+                return Origins[GetIndex(x, y, ZIndex)];
             }
             set
             {
@@ -129,7 +148,7 @@ namespace MxPlot.Core
         /// <returns>The <see cref="GlobalPoint"/> at the specified (x, y, z) position.</returns>
         public GlobalPoint this[int x, int y, int z]
         {
-            get => _origins[GetIndex(x, y, z)];
+            get => Origins[GetIndex(x, y, z)];
             set => this[GetIndex(x, y, z)] = value; // Delegate to one-dimensional indexer
         }
 
@@ -425,10 +444,10 @@ namespace MxPlot.Core
              /// <param name="origins">Array of tile origin coordinates.</param>
              /// <param name="tileLayout">Tile layout (X, Y, Z counts).</param>
              [JsonConstructor]
-             private FovAxis(GlobalPoint[] origins, (int X, int Y, int Z) tileLayout)
+             private FovAxis(GlobalPoint[] origins, TileGrid tileLayout)
                  : base(origins?.Length ?? 0, 0, (origins?.Length ?? 1) - 1, "FOV", "", isIndexBased: true)
              {
-                 _origins = origins ?? Array.Empty<GlobalPoint>();
+                 Origins = origins ?? Array.Empty<GlobalPoint>();
                  TileLayout = tileLayout;
              }
 
@@ -450,8 +469,8 @@ namespace MxPlot.Core
                     "3D tiling (zNum > 1) is not currently supported. " +
                     "Index and ZIndex synchronization is not implemented.");
             }
-            _origins = new GlobalPoint[Count];
-            TileLayout = (xNum, yNum, zNum);
+            Origins = new GlobalPoint[Count];
+            TileLayout = new TileGrid(xNum, yNum, zNum);
         }
 
         /// <summary>
@@ -474,8 +493,8 @@ namespace MxPlot.Core
                     "Index and ZIndex synchronization is not implemented.");
             }
 
-            _origins = origins.ToArray();
-            TileLayout = (xNum, yNum, zNum);
+            Origins = origins.ToArray();
+            TileLayout = new TileGrid(xNum, yNum, zNum);
             if (xNum * yNum * zNum != origins.Count)
                 throw new ArgumentException("Tile layout size does not match origins count.");
         }
@@ -512,7 +531,8 @@ namespace MxPlot.Core
         /// <returns>A new <see cref="FovAxis"/> instance with the same origin values and tile layout.</returns>
         public override FovAxis Clone()
         {
-            var fov = new FovAxis(new List<GlobalPoint>(this._origins), this.TileLayout.X, this.TileLayout.Y, this.TileLayout.Z);
+            var fov = new FovAxis(new List<GlobalPoint>(this.Origins), this.TileLayout.X, this.TileLayout.Y, this.TileLayout.Z);
+            fov.Unit = this.Unit;
             return fov;
         }
     }

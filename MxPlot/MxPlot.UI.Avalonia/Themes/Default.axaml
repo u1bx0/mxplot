@@ -7,6 +7,9 @@
 					<SolidColorBrush x:Key="AppWindowBg">#383838</SolidColorBrush>
 					<SolidColorBrush x:Key="MenuPopupBg">#EE242424</SolidColorBrush>
 					<SolidColorBrush x:Key="MenuItemHoverBg">#38FFFFFF</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuTabSelectedBg" Color="#3A4E67"/>
+					<SolidColorBrush x:Key="MenuTabSelectedBorder" Color="#6F90B4"/>
+					<SolidColorBrush x:Key="MenuTabSelectedFg" Color="#F6F9FF"/>
 					<SolidColorBrush x:Key="ListPanelBorderColor"    Color="#888888"/>
 					<!-- ToggleButton checked — visible against dark background, OS-accent-independent -->
 					<SolidColorBrush x:Key="ToggleCheckedBg"    Color="#3B78E7"/>
@@ -16,15 +19,18 @@
 					<SolidColorBrush x:Key="ProgressBarTrackBg" Color="#3A3A3A"/>
 					<SolidColorBrush x:Key="ProgressBarFill"    Color="#42A5F5"/>
 					<!-- Window list selection ring -->
-						<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#42A5F5"/>
-						<!-- Toast notification -->
-						<SolidColorBrush x:Key="ToastNoticeForeground" Color="#FFD54F"/>
+					<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#42A5F5"/>
+					<!-- Toast notification -->
+					<SolidColorBrush x:Key="ToastNoticeForeground" Color="#FFD54F"/>
 
-					</ResourceDictionary>
+				</ResourceDictionary>
 				<ResourceDictionary x:Key="Light">
 					<SolidColorBrush x:Key="AppWindowBg">#F3F3F3</SolidColorBrush>
 					<SolidColorBrush x:Key="MenuPopupBg">#EEF5F5F5</SolidColorBrush>
 					<SolidColorBrush x:Key="MenuItemHoverBg">#20000000</SolidColorBrush>
+					<SolidColorBrush x:Key="MenuTabSelectedBg" Color="#DDEBFA"/>
+					<SolidColorBrush x:Key="MenuTabSelectedBorder" Color="#98B7DB"/>
+					<SolidColorBrush x:Key="MenuTabSelectedFg" Color="#1E293B"/>
 					<SolidColorBrush x:Key="ListPanelBorderColor"    Color="#AAAAAA"/>
 					<!-- Lighter selection so black text stays readable on accent background -->
 					<SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="#500078D4"/>
@@ -36,10 +42,10 @@
 					<SolidColorBrush x:Key="ProgressBarTrackBg" Color="#DDDDDD"/>
 					<SolidColorBrush x:Key="ProgressBarFill"    Color="#0078D4"/>
 					<!-- Window list selection ring -->
-						<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#4d79ab"/>
-						<!-- Toast notification -->
-						<SolidColorBrush x:Key="ToastNoticeForeground" Color="#92400E"/>
-					</ResourceDictionary>
+					<SolidColorBrush x:Key="WindowListSelectedBorder" Color="#4d79ab"/>
+					<!-- Toast notification -->
+					<SolidColorBrush x:Key="ToastNoticeForeground" Color="#92400E"/>
+				</ResourceDictionary>
 			</ResourceDictionary.ThemeDictionaries>
 		</ResourceDictionary>
 	</Styles.Resources>
@@ -103,6 +109,70 @@
 	<Style Selector="ToggleButton.check:disabled">
 		<Setter Property="Opacity" Value="0.38"/>
 	</Style>
+	<Style Selector="TabControl.menu-tabs">
+		<Setter Property="BorderThickness" Value="0"/>
+		<Setter Property="BorderBrush" Value="Transparent"/>
+		<Setter Property="Background" Value="Transparent"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs /template/ Border">
+		<Setter Property="BorderThickness" Value="0"/>
+		<Setter Property="BorderBrush" Value="Transparent"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem">
+		<Setter Property="MinHeight" Value="30"/>
+		<Setter Property="Padding" Value="0"/>
+		<Setter Property="Margin" Value="0,0,4,0"/>
+		<Setter Property="Background" Value="Transparent"/>
+		<Setter Property="BorderThickness" Value="0"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs /template/ TabStrip#PART_TabStrip">
+		<Setter Property="BorderThickness" Value="0"/>
+		<Setter Property="Background" Value="Transparent"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs /template/ Border#PART_ContentPanel">
+		<Setter Property="BorderThickness" Value="0"/>
+		<Setter Property="BorderBrush" Value="Transparent"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs /template/ ContentPresenter#PART_SelectedContentHost">
+		<Setter Property="BorderThickness" Value="0,1,0,0"/>
+		<Setter Property="BorderBrush" Value="{DynamicResource MenuTabSelectedBorder}"/>
+		<Setter Property="Margin" Value="0,-5,0,0"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Padding" Value="10,5,10,4"/>
+		<Setter Property="VerticalAlignment" Value="Center"/>
+		<Setter Property="CornerRadius" Value="4,4,1,1"/>
+		<Setter Property="Background" Value="Transparent"/>
+		<Setter Property="BorderBrush" Value="Transparent"/>
+		<Setter Property="BorderThickness" Value="1"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource MenuItemHoverBg}"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected">
+		<Setter Property="BorderThickness" Value="0"/>
+		<Setter Property="Foreground" Value="{DynamicResource MenuTabSelectedFg}"/>
+	</Style>
+	<Style Selector="TabControl.property-tabs TabItem:selected">
+		<Setter Property="FontWeight" Value="Bold"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+		<Setter Property="Background" Value="{DynamicResource MenuTabSelectedBg}"/>
+		<Setter Property="BorderBrush" Value="{DynamicResource MenuTabSelectedBorder}"/>
+		<Setter Property="BorderThickness" Value="1,1,1,1"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected /template/ Border#PART_SelectionIndicator">
+		<Setter Property="IsVisible" Value="False"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected /template/ Rectangle#PART_SelectionIndicator">
+		<Setter Property="IsVisible" Value="False"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected /template/ Border#PART_SelectedPipe">
+		<Setter Property="IsVisible" Value="False"/>
+	</Style>
+	<Style Selector="TabControl.menu-tabs TabItem:selected /template/ Rectangle#PART_SelectedPipe">
+		<Setter Property="IsVisible" Value="False"/>
+	</Style>
 	<Style Selector="Button.menuitem">
 		<Setter Property="Background"      Value="Transparent"/>
 		<Setter Property="BorderThickness" Value="0"/>
@@ -114,6 +184,37 @@
 	</Style>
 	<Style Selector="Button.menuitem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
 		<Setter Property="Background" Value="{DynamicResource MenuItemHoverBg}"/>
+	</Style>
+	<Style Selector="Button.colorswatch">
+		<Setter Property="Padding" Value="0"/>
+		<Setter Property="BorderThickness" Value="1"/>
+		<Setter Property="BorderBrush" Value="Transparent"/>
+		<Setter Property="CornerRadius" Value="2"/>
+		<Setter Property="Template">
+			<ControlTemplate>
+				<Border Background="{TemplateBinding Background}"
+						BorderBrush="{TemplateBinding BorderBrush}"
+						BorderThickness="{TemplateBinding BorderThickness}"
+						CornerRadius="{TemplateBinding CornerRadius}">
+					<ContentPresenter HorizontalAlignment="Center"
+									  VerticalAlignment="Center"/>
+				</Border>
+			</ControlTemplate>
+		</Setter>
+	</Style>
+	<Style Selector="Button.colorswatch:pointerover">
+		<Setter Property="BorderBrush" Value="{DynamicResource WindowListSelectedBorder}"/>
+		<Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+		<Setter Property="RenderTransform">
+			<ScaleTransform ScaleX="1.08" ScaleY="1.08"/>
+		</Setter>
+		<Setter Property="ZIndex" Value="10"/>
+	</Style>
+	<Style Selector="Button.colorswatch:pressed">
+		<Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+		<Setter Property="RenderTransform">
+			<ScaleTransform ScaleX="1.03" ScaleY="1.03"/>
+		</Setter>
 	</Style>
 	<!-- ToggleButton checked state — OS accent-colour-independent -->
 	<Style Selector="ToggleButton:checked /template/ ContentPresenter#PART_ContentPresenter">

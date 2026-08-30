@@ -22,7 +22,7 @@ namespace MxPlot.App.Views
         // ── Plugin menu management ────────────────────────────────────────
 
         /// <summary>Built-in item count inside the Tools submenu (before any plugin separator).</summary>
-        private const int ToolsBuiltInCount = 4; // "Sample Mandelbrot…", "Sample Julia Set…", "Sample Hyperstack…"
+        private const int ToolsBuiltInCount = 5; // "Sample Mandelbrot…", "Sample Julia Set…", "Sample Hyperstack…"
 
         /// <summary>
         /// Rebuilds the plugin portion of the Tools submenu.
@@ -101,6 +101,22 @@ namespace MxPlot.App.Views
             md.SetXYScale(0, 63, 0, 255);
             md.Set((ix, iy, x, y) => (float)(y));
             MatrixPlotter.Create(md, title: "Linear Scale").Show();
+        }
+
+        private async void ToolsGenerateColorCodedScaleData_Click(object? sender, RoutedEventArgs e)
+        {
+            int xnum = 64;
+            var md = new MatrixData<byte>(64, 256, 256);
+            md.SetXYScale(0, 63, 0, 255);
+            md.DefineDimensions(Axis.Z(256, 0, 255));
+            md.ForEach((iz, array) =>
+            {
+                for(int i = 0; i < xnum; i++)
+                {
+                    array[iz * xnum + i] = (byte)i;
+                }
+            });
+            MatrixPlotter.Create(md, title: "Color-Coded Scale Data").Show();
         }
 
         private async void ToolsGenerateHyperstack_Click(object? sender, RoutedEventArgs e)

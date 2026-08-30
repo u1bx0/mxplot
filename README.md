@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.2.0-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.3.0-orange)](https://github.com/u1bx0/mxplot/releases)
 ![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -27,7 +27,12 @@ with a focus on high throughput, physical coordinate integrity, and seamless UI 
 <div align="center">
   <img src="docs/images/mp1.png" height="200" alt="Single view"> 
   <img src="docs/images/mp2.png" height="200" alt="Orthogonal view"> 
-  <img src="docs/images/mp3.png" height="200" alt="Analysis">
+    <img src="docs/images/mp4.png" height="200" alt="Composite">
+  <br/>
+    <img src="docs/images/mp3.png" height="200" alt="Analysis">
+  <img src="docs/images/mp5.png" height="200" alt="ColorCoded">
+    
+
 </div>
 
 ---
@@ -52,7 +57,7 @@ with a focus on high throughput, physical coordinate integrity, and seamless UI 
 📦 **Pre-built binaries** (Windows x64 / macOS Apple Silicon) →
 **[Download from Releases](https://github.com/u1bx0/mxplot/releases)**
 &nbsp;·&nbsp;
-📖 **[MxPlot.App Details](./docs/App.md)**
+📖 **[MxPlot.App Details](./MxPlot/MxPlot.App/README.md)**
 
 ---
 
@@ -83,7 +88,7 @@ This repository hosts the **MxPlot ecosystem**, organized into the following lib
 - **MxPlot (Metapackage)**: A convenient entry point that bundles the core, UI layer, and common extensions.
 - **MxPlot.Core**: The foundational, dependency-free data engine (`MatrixData<T>`).
 - **MxPlot.UI.Avalonia**: Cross-platform visualization library built on [Avalonia UI](https://avaloniaui.net/). Runs on Windows, macOS, and Linux. Embeddable from WinForms or WPF via `MxPlotHostApplication`.
-- **MxPlot.UI.Avalonia.Video**: AVI export extension for `MxPlot.UI.Avalonia`, powered by [SharpAvi](https://github.com/baSSiLL/SharpAvi). Enables frame-by-frame video export from `MatrixPlotter`.
+- **MxPlot.UI.Avalonia.Video**: Video export extension for `MxPlot.UI.Avalonia` — uncompressed AVI (via [SharpAvi](https://github.com/baSSiLL/SharpAvi)) and H.264 MP4 (via an external `ffmpeg`), plus a reusable base for adding further formats.
 - **MxPlot.Extensions.Tiff / .Hdf5**: Specialized high-performance file I/O packages.
 - **MxPlot.Extensions.Fft**: FFT processing utilities.
 - **MxPlot.Extensions.Images**: Image loading utilities.
@@ -110,14 +115,17 @@ The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from 
 - 🧮 **Arithmetic Operations**: Element-wise add, subtract, multiply, divide
 
 ### MxPlot.UI.Avalonia
-- 🖥️ **Cross-Platform Viewer**: Runs on Windows, macOS, and Linux via **Avalonia UI 11.3** (Avalonia 11 / 12 have breaking API differences; the current release targets Avalonia 11.3.14)
+- 🖥️ **Cross-Platform Viewer**: Runs on Windows, macOS, and Linux via **Avalonia UI 11.3** (Avalonia 11 / 12 have breaking API differences; the current release targets Avalonia 11.3.18)
 - 🔭 **MatrixPlotter**: Full-featured standalone window — LUT selector, value-range bar, overlay manager, axis trackers, orthogonal views, profile plot, crop/sync/export
 - 🖼️ **MxView**: Low-level Avalonia image surface — pan, zoom, SkiaSharp bitmap rendering
 - 🔗 **WinForms / WPF Embedding**: `MxPlotHostApplication` lets you open `MatrixPlotter` windows from an existing WinForms or WPF app with minimal setup
 - ✏️ **Interactive Overlays**: Line, Rectangle, Oval, Targeting, and Text shapes — drawn via right-click menu or API, with live statistics and profile plots
 - ✂️ **Substack / 3D Crop**: Extract a Z-range substack or crop a full 3D volume region — with sync-group support across linked windows
 - 💾 **File Session Management**: Unsaved-change tracking (`DirtyFlags`), close confirmation dialog, and `SaveAsAsync` / `DuplicateAsync` APIs for programmatic control
-- 🎨 **Composite Rendering** *(beta)*: Multi-channel display with per-channel LUT — assign independent colors to each channel frame and composite them into a single view, as commonly used in fluorescence microscopy
+- 🎨 **Composite Rendering**: Multi-channel display with per-channel color, contrast, gain and gamma — as commonly used in fluorescence microscopy. RGB color images open composited automatically, and can be converted back to grayscale. See the [Composite Rendering Guide](./docs/MatrixPlotter_Composite_Guide.md)
+- 🌈 **ColorCoded Rendering**: Live depth/time colour-coded projection — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection tinted by winning depth, in a linked child window with a drag-to-narrow depth histogram, adjustable palette, and Fixed/Auto intensity range. The projected data itself stays real values, so filtering, converting, and saving it all work normally — only the display is colour-coded.
+- 🎛️ **External Control**: Drive the displayed LUT and value range from host code through Facade properties (`plotter.Lut`, `plotter.RangeMode`, `plotter.FixedRange`) — see the [MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)
+- 📜 **Scripting (`MxPlotScriptHost`)**: Open MatrixPlotter windows from .NET 10 file-based apps (`dotnet run app.cs`), console tools, or notebook cells — no host application required. `Run(script)` starts the message loop, runs your script off the UI thread, and returns when every window it opened has closed. See [MatrixPlotter Usage Guide § Scripting with MxPlotScriptHost](./docs/MatrixPlotter_Usage_Guide.md)
 
 ## 📦 Installation
 
@@ -230,7 +238,7 @@ For **WinForms / WPF** host applications, initialize Avalonia once at startup an
 
 ```csharp
 // Program.cs (WinForms) — add Avalonia.Win32 + Avalonia.Skia NuGet packages to the host project
-// ⚠️ These packages must match the Avalonia version used by MxPlot.UI.Avalonia (11.3.14).
+// ⚠️ These packages must match the Avalonia version used by MxPlot.UI.Avalonia (11.3.18).
 //    A version mismatch causes a hard crash before Main() is reached.
 AppBuilder.Configure<MxPlotHostApplication>()
     .UseWin32().UseSkia()
@@ -245,9 +253,11 @@ var plotter = MatrixPlotter.Create(myData, title: "Result");
 plotter.Show();
 
 // To replace data in an existing window (e.g., live update loop),
-// call SetData on the Avalonia dispatcher thread:
+// assign the new data on the Avalonia dispatcher thread:
 await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
-    plotter.SetData(newData));
+{
+    plotter.MainView.MatrixData = newData;   // or: plotter.ViewModel.MatrixData = newData;
+});
 
 // ResumeSettingsEnabled = true carries over axis index and value-range settings
 // when data is replaced, which is useful for continuous data acquisition.
@@ -258,10 +268,28 @@ await plotter.SaveAsAsync("output.ome.tif");
 var clone = await plotter.DuplicateAsync(show: true);
 ```
 
-> **Note on Avalonia versions**: `MxPlot.UI.Avalonia` currently targets **Avalonia 11.3.14**.
+> **Note on Avalonia versions**: `MxPlot.UI.Avalonia` currently targets **Avalonia 11.3.18**.
 > Avalonia 11 and Avalonia 12 have significant breaking API changes.
 > When adding `Avalonia.Win32` / `Avalonia.Skia` to a host project, always pin them to the same minor version (`11.3.x`).
 > Avalonia 12 support is planned for a future release.
+
+For **scripts, console tools, and notebook cells** — anything without a pre-existing UI loop — use `MxPlotScriptHost` instead:
+
+```csharp
+// app.cs — a .NET 10 file-based app (dotnet run app.cs)
+#:package MxPlot@0.3.0
+
+using MxPlot.Core;
+using MxPlot.UI.Avalonia;
+
+MxPlotScriptHost.Run(() =>
+{
+    var plotter = MxPlotScriptHost.Show(data, title: "My Data");
+    // plotter and its properties are UI-thread affine; marshal through Invoke:
+    var lutName = MxPlotScriptHost.Invoke(() => plotter.Lut?.Name);
+});
+// Run returns once every window opened by the script has closed.
+```
 
 For advanced usage of `MatrixPlotter`, see the **[MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)**.
 
@@ -502,6 +530,19 @@ For detailed guides and technical references, see the **[Documentation Index](./
 
 ## 📊 Version History
 
+**v0.3.0** (Composite workflow completion, ColorCoded rendering, live-link refactor, and stability/performance improvements)
+- 🌈 **ColorCoded Rendering (New)**: New live depth/time colour-coded projection mode — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection, in a linked child window.
+- 🎨 **Composite Rendering (Feature-complete)**: Promoted Composite mode from beta-level base to full workflow support with RGB auto-composite, grayscale conversion, and fallback dialog flow.
+- 🧩 **Composite + Extract Integration**: `Extract Frame` / `This Frame Only` now work consistently in Composite mode, including orthogonal views and full-channel extraction.
+- 🔗 **Linked View Refactor**: Replaced `LinkedSource` with a unified `LinkedView` follower model; live-derived windows now preserve their own display settings.
+- 🔌 **External Control API**: New Facade properties on `MatrixPlotter` (`Lut`, `IsInvertedColor`, `LutDepth`, `RangeMode`, `IsFixedRange`, `FixedRange`); direct `MainView` assignments now up-sync to the ViewModel and UI chrome. `RangeMode` also fixes a bug where switching the value range to All or ROI silently landed in Fixed.
+- 🖥️ **`MxPlotScriptHost`**: Drive `MatrixPlotter` from .NET 10 file-based apps, console tools, and notebook cells — `Run`/`Start` manage the Avalonia message loop so the script itself always runs off the UI thread, on Windows, macOS, and Linux.
+- ⚡ **Live Update Pipeline Optimization**: Reduced projection/live update overhead by avoiding full re-initialization and committing lightweight content updates.
+- 🎬 **MP4 Export**: New `Mp4Exporter` (H.264 via external `ffmpeg`) for macOS/QuickTime-compatible video export, alongside AVI — both now share a reusable `VideoExporterBase` for third-party video-format plugins.
+- 🧊 **Restack Context Menu**: `Restack along X/Y` on the orthogonal side views reconstructs the volume as a new stack viewed from another axis, opened in its own window — Virtual output writes one whole frame at a time from a RAM-bounded band instead of buffering the whole result in memory or scattering individual rows across the output file.
+- 🐛 **Sync and Stability Fixes**: Multiple fixes across Composite/Histogram sync, orthogonal cache/slice behavior, ROI copy orientation, and replace-data interactions.
+- ⚠️ **Breaking Changes**: `MatrixPlotter.LinkedSource` / `LinkedSourceExcludedAxes` and `MatrixPlotterViewModel.ActiveFrame` removed; `BitmapWriter` deprecated in favour of `LutBitmapWriter`. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
+
 **v0.2.0** (Export extensions, Complex type support, and UI/UX enhancements)
 - 🎬 **AVI Export Plugin**: New package **MxPlot.UI.Avalonia.Video** added with `IRenderExportPlugin` / `IRenderHost` abstraction. Supports main view and orthogonal view video export with axis selection, FPS control, and overlay rendering.
 - 📐 **Extract Dimension Dialog**: New `Extract Along` / `Extract At` UI for extracting data along or at specific axis values. Unified title and history formatting.
@@ -515,12 +556,10 @@ For detailed guides and technical references, see the **[Documentation Index](./
 - 🐛 **Bug Fixes**: CSV `flipY` parameter ignored — now fixed. Profile plotter auto-axis setting not applied — fixed. Render thread safety improved.
 - 🔧 **Dependency Update**: Avalonia updated to **11.3.18** (from 11.3.14).
 
-**v0.1.2** (Crop enhancements, file session management, and bug fixes)
-- ✂️ **Substack / 3D Crop**: New crop modes for hyperstacks with ROI synchronization.
-- 💾 **File Session Management**: Unsaved-change tracking, `SaveAsAsync` / `DuplicateAsync` APIs.
-- 🔁 **View Settings Resume**: `ResumeSettingsEnabled` for live acquisition loops.
-
-**v0.1.x and earlier**  
+**v0.1.x and earlier**
+- ✂️ **Crop / Substack Improvements**: Added hyperstack crop modes with ROI-aware behavior.
+- 💾 **Session and File Operations**: Introduced unsaved-change tracking and programmatic `SaveAsAsync` / `DuplicateAsync` operations.
+- 🔁 **Live Loop Usability**: Added `ResumeSettingsEnabled` to preserve view settings during continuous updates.
 
 See [CHANGELOG](./CHANGELOG.md) for full history.
 

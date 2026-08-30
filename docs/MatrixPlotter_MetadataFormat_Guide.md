@@ -2,7 +2,7 @@
 
 **MxPlot.Core / MxPlot.UI.Avalonia — Metadata Conventions**
 
-> Last Updated: 2026-04-24
+> Last Updated: 2026-08-20
 
 *Note: This document is largely based on AI-generated content and requires further review for accuracy.*
 
@@ -11,6 +11,7 @@
 1. [Overview](#overview)
 2. [Metadata Dictionary Basics](#metadata-dictionary-basics)
 3. [Key Namespaces](#key-namespaces)
+   - [System Key Reference (UI Layer)](#system-key-reference-ui-layer)
 4. [Format Header Metadata (Core API)](#format-header-metadata-core-api)
    - [API Reference](#api-reference)
    - [Storage Mechanism](#storage-mechanism)
@@ -71,7 +72,7 @@ public interface IMatrixData
 | Key pattern | Owner | UI visibility | Editable | Copied by `CopyPropertiesFrom` | Examples |
 |---|---|---|---|---|---|
 | *(user-defined)* | User / IO handler | ✅ Shown | ✅ Yes | ✅ Yes | `user_note`, `experiment_id` |
-| `mxplot.*` (general) | MatrixPlotter system | ❌ Hidden | ❌ No | ✅ Yes | `mxplot.lut.min`, `mxplot.metadata.format_header` |
+| `mxplot.*` (general) | MatrixPlotter system | ❌ Hidden | ❌ No | ✅ Yes | `mxplot.vr.min`, `mxplot.metadata.format_header` |
 | `mxplot.*` + `VisibleSystemKeys` | MatrixPlotter system | ✅ Shown (display name) | ❌ No | ✅ Yes | `mxplot.data.history` → "History" |
 | *(any key)* + `MarkAsFormatHeader` | IO handler | ✅ Shown with 🔒 ¹ | ❌ No ¹ | ❌ **No** ² | `OME_XML`, `FITS_HEADER` |
 
@@ -80,6 +81,42 @@ public interface IMatrixData
 > ² Format-header entries describe the source file and become invalid after derivation (Crop, Filter, Slice, etc.). They are fully preserved by `Clone()` (exact duplicate of the same data).
 
 The `mxplot.` prefix is defined in `PlotterConfigKeys.Prefix`. Keys matching this prefix are hidden from the Metadata tab by default, unless explicitly registered in `PlotterConfigKeys.VisibleSystemKeys`.
+
+### System Key Reference (UI Layer)
+
+The keys below are written by `MatrixPlotter` when the display settings are persisted
+(`MatrixPlotter.Settings.cs`) and read back when the data is reopened. Any viewer that does not
+understand MatrixPlotter simply ignores them.
+
+| Key | Meaning | Value format |
+|---|---|---|
+| `mxplot.lut.name` | Active LUT | LUT name, e.g. `Jet` |
+| `mxplot.lut.level` | LUT quantization level (`MxView.LutDepth`) | Integer, invariant culture |
+| `mxplot.lut.inverted` | LUT inversion (`MxView.IsInvertedColor`) | `True` / `False` |
+| `mxplot.vr.mode` | Value-range mode | `Fixed` / `Current` / `All` / `ROI` |
+| `mxplot.vr.min`, `mxplot.vr.max` | Fixed range bounds | Round-trip (`"R"`) double, invariant culture. Written **only** in `Fixed` mode; removed otherwise |
+| `mxplot.axes.indices` | Axis tracker positions | CSV of each `Axis.Index`, in `Axes` order |
+| `mxplot.overlays` | Overlay objects | JSON array (omitted when empty) |
+| `mxplot.ortho.{axis}.scaleMode` | Orthogonal view scaling for one axis | `OrthoScaleMode` name |
+| `mxplot.ortho.{axis}.custom` | Custom aspect ratio for that axis | Round-trip double. Present only when the mode is `Custom` |
+
+Added in 0.3.0 for Composite / ColorCoded rendering:
+
+| Key | Meaning | Value format |
+|---|---|---|
+| `mxplot.render.mode` | Which mode the file opens in | `Lut` / `Composite` / `ColorCoded`. **Absent means `Lut`** — this is what keeps pre-0.3.0 files opening unchanged |
+| `mxplot.composite.axis` | Which axis is composited | The axis's `Name`. No fallback to `"Channel"` when absent — Composite was hardcoded to that one axis name before 0.3.0's generalization, so no pre-existing file could mean anything else; absent simply means the file opens in `Lut` mode regardless of `mxplot.render.mode` |
+| `mxplot.composite.blend` | Composite blend mode | `BlendMode` name |
+| `mxplot.composite.scope` | Value-range scope | Global vs channel-wise. Absent = Global |
+| `mxplot.composite.vrmode` | Global composite value-range mode | `ValueRangeMode` name. Absent = `Current` |
+| `mxplot.composite.{i}.visible` | Channel `i` visibility | `True` / `False` |
+| `mxplot.composite.{i}.color` | Channel `i` color | Hex color |
+| `mxplot.composite.{i}.min`, `.max` | Channel `i` display range | Round-trip double |
+| `mxplot.composite.{i}.gain`, `.gamma` | Channel `i` tone controls | Round-trip double |
+| `mxplot.composite.{i}.vrmode` | Channel `i` value-range mode | `ValueRangeMode` name |
+
+`{i}` is the zero-based channel index along the composite axis; the whole group corresponds to one
+`BlendRecipe` per channel. See the [Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md).
 
 ---
 
@@ -155,6 +192,7 @@ public static void ApplyMetadataToMatrixData(IMatrixData md, MyFormatMetadata me
 - Choose a descriptive, uppercase key name that reflects the format
 - The value can be large (full XML, all header cards) — the UI renders it with monospace font and copy button
 - Do **not** use the `mxplot.*` prefix for your keys — that namespace is reserved for MatrixPlotter internals
+- Respect each format's text rules: XML-based formats (such as OME-XML) normalize CRLF/CR to LF during parsing, so newline byte style is not round-trippable as-is.
 
 ### Derivation and Round-Trip Behaviour
 
@@ -304,7 +342,7 @@ MatrixData.Metadata
 │   → Managed by: mxplot.metadata.format_header CSV
 │   → NOT copied by CopyPropertiesFrom (excluded on derivation)
 │
-├── Hidden system keys: "mxplot.lut.min" = "0"
+├── Hidden system keys: "mxplot.vr.min" = "0"
 │   → Not shown in the list (PlotterConfigKeys.IsReserved = true)
 │
 └── Visible system keys: "mxplot.data.history" = "[...]"

@@ -24,12 +24,6 @@ namespace MxPlot.UI.Avalonia.Views
 
         private CancellationTokenSource? _logCts;
 
-        // Sync state (populated in the result window when SyncSource = true)
-        private MatrixPlotter? _logSyncSourceWindow;
-        private LogTransformDialog.LogTransformParameters? _logSyncParams;
-        private EventHandler? _logSyncRefreshedHandler;
-        private EventHandler? _logSyncActiveIndexHandler;
-        private CancellationTokenSource? _logSyncCts;
 
         private async Task InvokeLogTransformAsync()
         {
@@ -40,11 +34,15 @@ namespace MxPlot.UI.Avalonia.Views
             var (minVal, _) = _currentData.GetValueRange(_currentData.ActiveIndex);
             bool hasNegOrZero = !double.IsNaN(minVal) && minVal <= 0;
 
-            var p = await LogTransformDialog.ShowAsync(this, isMultiFrame, hasNegOrZero);
+            var p = await LogTransformDialog.ShowAsync(this, isMultiFrame, hasNegOrZero, IsSyncFollower);
             if (p == null) return;
 
             bool singleFrame = p.ThisFrameOnly || !isMultiFrame;
             int frameIdx = _currentData.ActiveIndex;
+            // Composite + This Frame Only: process every channel at the current position
+            // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
+            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
+
             string baseLabel = p.Base switch
             {
                 LogBase.Log10 => "Log\u2081\u2080",
@@ -52,9 +50,11 @@ namespace MxPlot.UI.Avalonia.Views
                 _ => "Ln",
             };
             string label = $"Log Transform ({baseLabel})";
-            string detail = singleFrame
-                ? $"frame {frameIdx}, base={baseLabel}, handling={p.Handling}"
-                : $"base={baseLabel}, handling={p.Handling}";
+            string detail = compositeCube != null
+                ? $"[{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}], base={baseLabel}, handling={p.Handling}"
+                : singleFrame
+                    ? $"frame {frameIdx}, base={baseLabel}, handling={p.Handling}"
+                    : $"base={baseLabel}, handling={p.Handling}";
 
             var execProgress = BeginProgress("Applying log transform\u2026", blockInput: true);
             _logCts?.Dispose();
@@ -67,11 +67,11 @@ namespace MxPlot.UI.Avalonia.Views
                 var op = new LogTransformOperation(
                     Base: p.Base,
                     Handling: p.Handling,
-                    SingleFrameIndex: singleFrame ? frameIdx : -1,
+                    SingleFrameIndex: compositeCube != null ? -1 : (singleFrame ? frameIdx : -1),
                     Progress: execProgress,
                     CancellationToken: ct);
 
-                var data = _currentData;
+                var data = compositeCube?.Cube ?? _currentData;
                 result = await Task.Run(() => data.Apply(op), ct);
             }
             catch (OperationCanceledException) { return; }
@@ -83,20 +83,36 @@ namespace MxPlot.UI.Avalonia.Views
 
             if (p.ReplaceData)
             {
-                SetMatrixData(result);
-            }
-            else
-            {
-                var resultPlotter = MatrixPlotter.Create(result, _view.Lut, $"{baseLabel} of {Title}");
-
-                if (p.SyncSource && singleFrame)
+                if (compositeCube != null)
                 {
-                    PlotWindowNotifier.SetParentLink(resultPlotter, this);
-                    resultPlotter.Show();
-                    resultPlotter.StartLogSync(this, p);
+                    var snapshot = CaptureCompositeCubeState();
+                    SetMatrixData(result, closeSyncFollowers: true);
+                    if (snapshot != null) ReenterCompositeMode(snapshot.Value, compositeCube.Value.ChannelAxisName);
                 }
                 else
                 {
+                    SetMatrixData(result, closeSyncFollowers: true);
+                }
+            }
+            else
+            {
+                string resultTitle = $"{baseLabel} of {Title}";
+                MatrixPlotter resultPlotter;
+                if (p.SyncSource && singleFrame)
+                {
+                    // CreateLinked marks the child as secondary (IsSecondaryWindow = true), which
+                    // suppresses the unsaved-changes confirmation on close — a sync-driven window
+                    // is fully derived and recomputed on demand, so it never needs an independent
+                    // save prompt (matches the Spatial Filter sync branch in ExecuteFilterAsync).
+                    resultPlotter = CreateLinked(result, _view.Lut, resultTitle, linkRefresh: false);
+                    if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
+                    resultPlotter.Show();
+                    StartLogSync(resultPlotter, this, p);
+                }
+                else
+                {
+                    resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
+                    if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
                     resultPlotter.Show();
                 }
             }
@@ -104,86 +120,35 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Sync source ───────────────────────────────────────────────────────
 
-        internal void StartLogSync(
-            MatrixPlotter sourceWindow,
-            LogTransformDialog.LogTransformParameters p)
+        /// <summary>
+        /// Keeps <paramref name="follower"/> showing the log transform applied to whatever
+        /// <paramref name="source"/> currently displays.
+        /// </summary>
+        private static void StartLogSync(
+            MatrixPlotter follower, MatrixPlotter source, LogTransformDialog.LogTransformParameters p)
         {
-            StopLogSync();
-
-            _logSyncSourceWindow = sourceWindow;
-            _logSyncParams = p;
-
-            _logSyncRefreshedHandler = (_, _) => _ = FireLogSyncUpdateAsync();
-            sourceWindow.Refreshed += _logSyncRefreshedHandler;
-
-            if (sourceWindow.MatrixData is { FrameCount: > 1 } md)
+            _ = new LinkedView(follower, source, (src, ct) =>
             {
-                _logSyncActiveIndexHandler = (_, _) => _ = FireLogSyncUpdateAsync();
-                md.ActiveIndexChanged += _logSyncActiveIndexHandler;
-            }
+                var sourceData = src.MatrixData;
+                if (sourceData == null) return Task.FromResult<LinkedViewUpdate?>(null);
 
-            sourceWindow.Closed += OnLogSyncSourceClosed;
-            Closed += OnLogSyncWindowClosed;
-        }
+                // Composite-aware: while the source is in Composite mode, take the whole
+                // Channel-axis cube instead of a single-frame slice, so the follower keeps
+                // blending every channel rather than collapsing to channel 0.
+                var compositeCube = src.TryExtractCompositeFrameCube(sourceData);
+                IMatrixData opSource = compositeCube?.Cube
+                    ?? sourceData.Apply(new SliceAtOperation(sourceData.ActiveIndex));
 
-        private async Task FireLogSyncUpdateAsync()
-        {
-            _logSyncCts?.Cancel();
-            _logSyncCts?.Dispose();
-            _logSyncCts = new CancellationTokenSource();
-            var ct = _logSyncCts.Token;
-
-            var sourceData = _logSyncSourceWindow?.MatrixData;
-            if (sourceData == null || _logSyncParams == null) return;
-            int frameIdx = sourceData.ActiveIndex;
-            var p = _logSyncParams;
-
-            IMatrixData updated;
-            try
-            {
-                updated = await Task.Run(() =>
+                return Task.Run<LinkedViewUpdate?>(() =>
                 {
-                    var single = sourceData.Apply(new SliceAtOperation(frameIdx));
-                    return single.Apply(new LogTransformOperation(p.Base, p.Handling,
-                        CancellationToken: ct));
+                    // opSource is already a single frame (or a channel cube), so neither
+                    // SingleFrameIndex nor Progress applies here.
+                    var updated = opSource.Apply(
+                        new LogTransformOperation(p.Base, p.Handling, CancellationToken: ct));
+                    updated.CopyPropertiesFrom(sourceData, copyScale: true, copyDimensions: false);
+                    return new LinkedViewUpdate(updated, compositeCube?.ChannelAxisName);
                 }, ct);
-            }
-            catch (OperationCanceledException) { return; }
-            catch { return; }
-
-            if (ct.IsCancellationRequested) return;
-
-            updated.CopyPropertiesFrom(sourceData, copyScale: true, copyDimensions: false);
-            SetMatrixData(updated);
-        }
-
-        private void StopLogSync()
-        {
-            _logSyncCts?.Cancel();
-            _logSyncCts?.Dispose();
-            _logSyncCts = null;
-
-            if (_logSyncSourceWindow != null)
-            {
-                if (_logSyncRefreshedHandler != null)
-                    _logSyncSourceWindow.Refreshed -= _logSyncRefreshedHandler;
-                if (_logSyncActiveIndexHandler != null && _logSyncSourceWindow.MatrixData != null)
-                    _logSyncSourceWindow.MatrixData.ActiveIndexChanged -= _logSyncActiveIndexHandler;
-                _logSyncSourceWindow.Closed -= OnLogSyncSourceClosed;
-            }
-
-            _logSyncSourceWindow = null;
-            _logSyncParams = null;
-            _logSyncRefreshedHandler = null;
-            _logSyncActiveIndexHandler = null;
-        }
-
-        private void OnLogSyncSourceClosed(object? sender, EventArgs e) => Close();
-
-        private void OnLogSyncWindowClosed(object? sender, EventArgs e)
-        {
-            StopLogSync();
-            Closed -= OnLogSyncWindowClosed;
+            });
         }
     }
 }

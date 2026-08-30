@@ -39,9 +39,32 @@ namespace MxPlot.App.Views
             {
                 // Defer focus + selection until after Avalonia's layout pass so the
                 // TextBox is fully rendered and can accept keyboard input.
+                //
+                // Known macOS issue (root cause confirmed by manual testing): Shift-modified
+                // characters, CapsLock, and IME/Japanese input all produced raw lowercase ASCII
+                // instead -- but clicking anywhere on the *window* (not specifically the TextBox)
+                // fixed it just as reliably as clicking the TextBox itself. That rules out the
+                // TextBox's own focus mechanism as the cause (two targeted TextBox-level fixes,
+                // a DispatcherPriority.Background retry and Focus(NavigationMethod.Pointer), had
+                // already been tried and confirmed not to help) and points one level up: Rename
+                // is invoked from a ContextMenu, itself a separate native popup on macOS, and
+                // closing it apparently doesn't always hand key-window status back to the owning
+                // window in time -- so the TextBox can hold Avalonia's own logical focus while
+                // the window itself still isn't the OS-level key/active window, which is what
+                // Shift/CapsLock/IME routing actually depends on natively. Explicitly reactivating
+                // the window before focusing the TextBox addresses that directly. (Related but not
+                // identical upstream bug, for context: GitHub #13761 "AcceptsReturn & Shift not
+                // working in TextBox within Flyout (macOS)", fixed by #14407, already in MxPlot's
+                // pinned Avalonia 11.3.18 -- that one was about a different container losing
+                // native focus wiring, not a not-yet-key window.)
                 Dispatcher.UIThread.Post(() =>
                 {
                     if (!tb.IsVisible) return;
+
+                    // Must happen before Focus() below -- see the remarks above.
+                    if (TopLevel.GetTopLevel(tb) is Window window)
+                        window.Activate();
+
                     tb.Focus();
 
                     // Select only the base name, excluding known compound extensions

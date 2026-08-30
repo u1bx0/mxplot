@@ -278,16 +278,22 @@ namespace MxPlot.UI.Avalonia.Controls
             _grid.Children.Add(_hSplitter);
             _grid.Children.Add(_cornerHandle); // last → drawn on top
 
-            // Auto-resize overlay buttons (drawn on top of side views)
+            // Auto-resize overlay buttons (drawn on top of side views). Each view's own busy
+            // spinner (MxView.IsBusy) always sits at that view's top-left corner, so the two
+            // buttons are pinned to different corners per view to avoid overlapping it.
             _autoResizeBottomBtn = MakeAutoResizeButton(
                 "M 0,0 L 10,0 M 0,14 L 10,14 M 5,0 L 5,5 M 5,9 L 5,14 M 2,4 L 5,0 L 8,4 M 2,10 L 5,14 L 8,10 M 5,5 L 5,6.5 M 5,7.5 L 5,9",
                 10, 14, "Expand");
+            _autoResizeBottomBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            _autoResizeBottomBtn.VerticalAlignment = VerticalAlignment.Bottom;
             _autoResizeBottomBtn.Click += (_, _) => AutoResizeBottomRequested?.Invoke();
             Grid.SetRow(_autoResizeBottomBtn, 3); Grid.SetColumn(_autoResizeBottomBtn, 0);
 
             _autoResizeRightBtn = MakeAutoResizeButton(
                 "M 0,0 L 0,10 M 14,0 L 14,10 M 0,5 L 5,5 M 9,5 L 14,5 M 4,2 L 0,5 L 4,8 M 10,2 L 14,5 L 10,8 M 5,5 L 6.5,5 M 7.5,5 L 9,5",
                 14, 10, "Expand");
+            _autoResizeRightBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            _autoResizeRightBtn.VerticalAlignment = VerticalAlignment.Top;
             _autoResizeRightBtn.Click += (_, _) => AutoResizeRightRequested?.Invoke();
             Grid.SetRow(_autoResizeRightBtn, 1); Grid.SetColumn(_autoResizeRightBtn, 2);
 
@@ -309,9 +315,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
             // Update button visibility whenever view display state changes (zoom/pan/resize,
             // bitmap rebuild, or scrollbar visibility change after cross-view sync).
-            BottomView.ViewDisplayStateChanged += (_, _) => UpdateAutoResizeButtonVisibility();
-            RightView.ViewDisplayStateChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
-            MainView.ViewDisplayStateChanged   += (_, _) => UpdateAutoResizeButtonVisibility();
+            BottomView.ViewportChanged += (_, _) => UpdateAutoResizeButtonVisibility();
+            RightView.ViewportChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
+            MainView.ViewportChanged   += (_, _) => UpdateAutoResizeButtonVisibility();
         }
 
         // ── Splitter drag wiring ──────────────────────────────────────────────

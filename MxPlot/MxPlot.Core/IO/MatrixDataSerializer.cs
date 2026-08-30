@@ -231,16 +231,24 @@ namespace MxPlot.Core.IO
             fs.Seek(HeaderSize, SeekOrigin.Begin);
 
             List<T[]> frames;
+            List<List<double>>? computedMinValues, computedMaxValues;
             if (config.IsCompressed)
             {
                 using var gzs = new GZipStream(fs, CompressionMode.Decompress);
                 using var buffered = new BufferedStream(gzs, 65536);
-                frames = ReadDataFromStream<T>(buffered, config, progress, ct);
+                frames = ReadDataFromStream<T>(buffered, config, progress, out computedMinValues, out computedMaxValues, ct);
             }
             else
             {
-                frames = ReadDataFromStream<T>(fs, config, progress, ct);
+                frames = ReadDataFromStream<T>(fs, config, progress, out computedMinValues, out computedMaxValues, ct);
             }
+
+            // The file already carries a serialized value-range cache unless it was saved from
+            // virtual (MMF-backed) data (MatrixDataConfig.cs:71: skipped there to avoid a forced
+            // O(W*H) scan at save time). In that one case, ReadDataFromStream computed it here
+            // instead, cache-hot right after each frame was read.
+            if (computedMinValues != null && computedMaxValues != null)
+                config = config with { MinValueList = computedMinValues, MaxValueList = computedMaxValues };
 
             var md = config.CreateNewInstance(frames);
             progress?.Report(md.FrameCount);
@@ -278,17 +286,35 @@ namespace MxPlot.Core.IO
                 byteCounts[i] = [frameByteSize];
             }
 
+            // .mxd has no byte-order marker concept -- MxPlot always writes it host-native (little-endian),
+            // so a .mxd file is never big-endian.
             var vsf = new VirtualStrippedFrames<T>(
-                path, config.XCount, config.YCount, offsets, byteCounts, isYFlipped: false);
+                path, config.XCount, config.YCount, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 
             return config.CreateFromVirtualFrames(vsf);
         }
 
-        private static List<T[]> ReadDataFromStream<T>(Stream sourceStream, MatrixDataConfig config, IProgress<int>? progress, CancellationToken ct = default)
+        /// <summary>
+        /// Reads all frames from the stream. When <paramref name="config"/> does not already carry a
+        /// serialized value-range cache (<c>MinValueList.Count == 0</c> -- only possible when the file
+        /// was saved from virtual data, see <see cref="MatrixDataConfig(IMatrixData)"/>), each frame's
+        /// min/max is computed here instead, right after it's read (cache-hot), via the same
+        /// <see cref="MatrixData{T}.DefaultMinMaxFinder"/> a freshly constructed instance would use.
+        /// Returns null for both out lists when the config already had a cache (recomputing would be
+        /// redundant) or when no MinMaxFinder is registered for <typeparamref name="T"/>.
+        /// </summary>
+        private static List<T[]> ReadDataFromStream<T>(
+            Stream sourceStream, MatrixDataConfig config, IProgress<int>? progress,
+            out List<List<double>>? computedMinValues, out List<List<double>>? computedMaxValues,
+            CancellationToken ct = default)
            where T : unmanaged
         {
             int frameByteSize = config.XCount * config.YCount * Unsafe.SizeOf<T>();
             var arrays = new List<T[]>(config.FrameCount);
+
+            var finder = config.MinValueList.Count == 0 ? MatrixData<T>.DefaultMinMaxFinder : null;
+            computedMinValues = finder != null ? new List<List<double>>(config.FrameCount) : null;
+            computedMaxValues = finder != null ? new List<List<double>>(config.FrameCount) : null;
 
             for (int i = 0; i < config.FrameCount; i++)
             {
@@ -302,6 +328,14 @@ namespace MxPlot.Core.IO
                     throw new InvalidDataException($"Frame {i} size mismatch.");
 
                 arrays.Add(array);
+
+                if (finder != null)
+                {
+                    var (mins, maxs) = finder(array);
+                    computedMinValues!.Add(new List<double>(mins));
+                    computedMaxValues!.Add(new List<double>(maxs));
+                }
+
                 progress?.Report(i + 1);
             }
 

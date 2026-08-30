@@ -4,6 +4,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using MxPlot.Core;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
 using System;
@@ -22,10 +23,11 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void ShowMenuPanel()
         {
-            if (_menuPanel == null || _hamburgerBtn == null) 
+            var hamburgerBtn = ActiveHamburgerButton;
+            if (_menuPanel == null || hamburgerBtn == null)
                 return;
             var overlay = OverlayLayer.GetOverlayLayer(this);
-            if (overlay == null) 
+            if (overlay == null)
                 return;
 
             if (_menuPanel.Parent == null)
@@ -46,7 +48,7 @@ namespace MxPlot.UI.Avalonia.Views
                 _menuPanel.Height = Math.Max(_menuPanel.MinHeight, overlayH * 0.8);
 
             // Position immediately below the hamburger button
-            var pt = _hamburgerBtn.TranslatePoint(new Point(0, _hamburgerBtn.Bounds.Height), overlay);
+            var pt = hamburgerBtn.TranslatePoint(new Point(0, hamburgerBtn.Bounds.Height), overlay);
             if (pt.HasValue)
             {
                 Canvas.SetLeft(_menuPanel, pt.Value.X);
@@ -58,13 +60,48 @@ namespace MxPlot.UI.Avalonia.Views
             RefreshScaleTab();
 
             _menuPanel.IsVisible = true;
-            _hamburgerBtn.Background = Brushes.LightGray;
+            hamburgerBtn.Background = Brushes.LightGray;
+        }
+
+        /// <summary>
+        /// Drops the cached hamburger panel so it is rebuilt on next open.
+        /// The panel is built once and reused, so anything that changes which items belong in it -
+        /// data replacement, plugin registration, an axis rename that creates or removes a
+        /// "Channel" axis - has to call this or the menu keeps showing the stale item set.
+        /// </summary>
+        private void InvalidateMenuPanel()
+        {
+            if (_menuPanel?.Parent is Panel menuParent)
+                menuParent.Children.Remove(_menuPanel);
+            _menuPanel = null;
         }
 
         private void HideMenuPanel()
         {
             if (_menuPanel != null) _menuPanel.IsVisible = false;
-            if (_hamburgerBtn != null) _hamburgerBtn.Background = Brushes.Transparent;
+            if (ActiveHamburgerButton != null) ActiveHamburgerButton.Background = Brushes.Transparent;
+        }
+
+        /// <summary>
+        /// ハンバーガーメニューを開き、Scale タブを前面に出す。
+        /// <see cref="_scaleTabBody"/> の Parent チェーン（StackPanel → ScrollViewer → TabItem → TabControl）
+        /// を遡るため、TabControl をフィールド化する必要がない。
+        /// <para>
+        /// ハンバーガーボタンが一度も押されていない場合は <see cref="_menuPanel"/> が未初期化のため、
+        /// ここで遅延ビルドする。
+        /// </para>
+        /// </summary>
+        private void ShowMenuPanelOnScaleTab()
+        {
+            if (_menuPanel == null)
+                _menuPanel = BuildMenuPanel();
+            ShowMenuPanel();
+            if (_scaleTabBody?.Parent is ScrollViewer sv &&
+                sv.Parent is TabItem ti &&
+                ti.Parent is TabControl tc)
+            {
+                tc.SelectedItem = ti;
+            }
         }
 
         /// <summary>
@@ -82,10 +119,11 @@ namespace MxPlot.UI.Avalonia.Views
                 if (pp.X >= 0 && pp.Y >= 0 && pp.X <= _menuPanel.Bounds.Width && pp.Y <= _menuPanel.Bounds.Height)
                     return;
 
-                if (_hamburgerBtn != null)
+                var hamburgerBtn = ActiveHamburgerButton;
+                if (hamburgerBtn != null)
                 {
-                    var hp = e.GetPosition(_hamburgerBtn);
-                    if (hp.X >= 0 && hp.Y >= 0 && hp.X <= _hamburgerBtn.Bounds.Width && hp.Y <= _hamburgerBtn.Bounds.Height)
+                    var hp = e.GetPosition(hamburgerBtn);
+                    if (hp.X >= 0 && hp.Y >= 0 && hp.X <= hamburgerBtn.Bounds.Width && hp.Y <= hamburgerBtn.Bounds.Height)
                         return;
                 }
                 HideMenuPanel();
@@ -417,16 +455,19 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 ControlFactory.MakeChildMenuItem(pngDesc.Label, ActAsync(() => InvokeExportAsync(pngDesc)), pngDesc.Hint, icon: MenuIcons.Image),
             };
+            // Same rule as the right-click export menu: a frame-stepping exporter needs an axis
+            // that is actually free to step (see HasAnimatableAxis).
+            bool canAnimate = HasAnimatableAxis(BuildExcludedAxisNames());
             foreach (var ef in ExportFormats)
             {
-                if (ef.RequiresStack && (_currentData == null || _currentData.FrameCount <= 1)) continue;
+                if (ef.RequiresStack && !canAnimate) continue;
                 var captured = ef;
                 exportItems.Add(ControlFactory.MakeChildMenuItem(
                     captured.Label, ActAsync(() => InvokeExportAsync(captured)), captured.Hint, icon: MenuIcons.Image));
             }
             foreach (var ep in MatrixPlotterPluginRegistry.ExportPlugins)
             {
-                if (ep.RequiresStack && (_currentData == null || _currentData.FrameCount <= 1)) continue;
+                if (ep.RequiresStack && !canAnimate) continue;
                 var captured = ToDescriptor(ep);
                 exportItems.Add(ControlFactory.MakeChildMenuItem(
                     captured.Label, ActAsync(() => InvokeExportAsync(captured)), captured.Hint, icon: MenuIcons.Image));
@@ -443,11 +484,21 @@ namespace MxPlot.UI.Avalonia.Views
                 ? "Converts complex data to double by extracting a component (Magnitude, Real, Imaginary, Phase, or Power)."
                 : "Converts the matrix data to a different numerical type (e.g., float to ushort).";
 
-            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [
+            var editItems = new List<Control>
+            {
                 ControlFactory.MakeChildMenuItem("Copy to Clipboard", ActAsync(CopyFrameToClipboardAsync), "Copies the current frame to the clipboard as an image or tab-separated text.", icon: MenuIcons.Copy),
                 ControlFactory.MakeChildMenuItem("Duplicate Window",  ActAsync(DuplicateWindowAsync),      "Opens a new window with an independent deep copy of the data.", icon: MenuIcons.Duplicate),
                 ControlFactory.MakeChildMenuItem(convertLabel, Act(ConvertValueTypeAsync), convertHint, icon: MenuIcons.ConvertType),
-            ], icon: MenuIcons.Edit));
+            };
+            // Only meaningful when there is more than one channel to collapse.
+            if (_currentData?.Axes.FindAxis("Channel")?.Count > 1)
+            {
+                editItems.Add(ControlFactory.MakeChildMenuItem("Convert to Grayscale…",
+                    ActAsync(InvokeConvertToGrayscaleAsync),
+                    "Collapses the Channel axis into a single grayscale channel and lets you choose whether to replace the current window or open a new one.",
+                    icon: MenuIcons.Grayscale));
+            }
+            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [.. editItems], icon: MenuIcons.Edit));
             var processingItems = new List<Control>
             {
                 ControlFactory.MakeChildMenuItem("Crop", Act(InvokeCropAction), "Crop the image to ROI selection", icon: MenuIcons.AutoFix),
@@ -481,14 +532,14 @@ namespace MxPlot.UI.Avalonia.Views
             actionsItems.Children.Add(ControlFactory.MakeMenuItem("Close", Act(Close), icon: MenuIcons.Close));
 
             // ── Info tab ──────────────────────────────────────────────────────
-            _scaleTabBody = new StackPanel { Margin = new Thickness(2) };
+            _scaleTabBody = new StackPanel { Margin = new Thickness(2, 5, 2, 2) };
 
             // ── TabControl ────────────────────────────────────────────────────
             Control TabHdr(string t, Geometry? icon = null)
             {
                 if (icon == null)
                     return new TextBlock { Text = t, FontSize = TabFontSize, FontWeight = FontWeight.Bold };
-                var pathIcon = new PathIcon { Data = icon, Width = 12, Height = 12 };
+                var pathIcon = new PathIcon { Data = icon, Width = 11, Height = 11 };
                 var brush = MenuIcons.DefaultBrush(icon);
                 if (brush != null) pathIcon.Foreground = brush;
                 return new StackPanel
@@ -503,14 +554,16 @@ namespace MxPlot.UI.Avalonia.Views
                 };
             }
 
-            var tabControl = new TabControl { 
-                FontSize = MenuFontSize, 
-                Padding = new Thickness(0, 2, 0, 0) 
+            
+            var tabControl = new TabControl {
+                FontSize = MenuFontSize,
+                Padding = new Thickness(0, 5, 0, 0),
+                Classes = { "menu-tabs" }
             };
             tabControl.Items.Add(new TabItem
             {
                 Header = TabHdr("Actions", MenuIcons.Lightning),
-                Padding = new Thickness(8, 3),
+                Padding = new Thickness(0),
                 Content = new ScrollViewer
                 {
                     Content = actionsItems,
@@ -521,7 +574,7 @@ namespace MxPlot.UI.Avalonia.Views
             tabControl.Items.Add(new TabItem
             {
                 Header = TabHdr("Scale", MenuIcons.Ruler),
-                Padding = new Thickness(8, 3),
+                Padding = new Thickness(0),
                 Content = new ScrollViewer
                 {
                     Content = _scaleTabBody,
@@ -529,7 +582,7 @@ namespace MxPlot.UI.Avalonia.Views
                     HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 },
             });
-
+            
 
             // ── Processing tab ───────────────────────────────────────────────────
             var processingTabBody = new StackPanel { Spacing = 1, Margin = new Thickness(4, 6, 4, 4) };
@@ -587,7 +640,7 @@ namespace MxPlot.UI.Avalonia.Views
             tabControl.Items.Add(new TabItem
             {
                 Header  = TabHdr("Processing", MenuIcons.Processing),
-                Padding = new Thickness(8, 3),
+                Padding = new Thickness(0),
                 Content = new ScrollViewer
                 {
                     Content = processingTabBody,
@@ -597,7 +650,7 @@ namespace MxPlot.UI.Avalonia.Views
             });
             void onPluginsChanged() => RebuildPluginsGroup();
             MatrixPlotterPluginRegistry.PluginsChanged += onPluginsChanged;
-            void onExportPluginsChanged() { _menuPanel = null; }
+            void onExportPluginsChanged() { InvalidateMenuPanel(); }
             MatrixPlotterPluginRegistry.ExportPluginsChanged += onExportPluginsChanged;
             Closed += (_, _) =>
             {
@@ -643,8 +696,8 @@ namespace MxPlot.UI.Avalonia.Views
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(3, 0, 0, 0),
-                Width = 400,
-                Height = 300,
+                Width = 380,
+                Height = 360,
                 MinWidth = 220,
                 MinHeight = 120,
                 ClipToBounds = true,
@@ -670,7 +723,7 @@ namespace MxPlot.UI.Avalonia.Views
             // ── Resize state ──────────────────────────────────────────────────
             bool resizing = false;
             Point resizeOrigin = default;
-            double startW = 350, startH = 300;
+            double startW = 0, startH = 0;
 
             grip.PointerPressed += (_, e) =>
             {

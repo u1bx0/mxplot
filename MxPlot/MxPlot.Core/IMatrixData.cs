@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 
 namespace MxPlot.Core
 {
@@ -537,6 +538,23 @@ namespace MxPlot.Core
         /// use the <c>Duplicate&lt;T&gt;</c> extension method instead.
         /// </remarks>
         IMatrixData Clone(bool forceInMemory);
+
+        /// <summary>
+        /// Creates a deep copy of this matrix data, with progress reporting and cancellation support.
+        /// Same contract as <see cref="Clone(bool)"/> otherwise -- prefer this overload when cloning a
+        /// large or Virtual-backed dataset, where the copy can take a noticeable amount of time (e.g.
+        /// UI code driving a Cancel button), and the bare <see cref="Clone(bool)"/> / <see
+        /// cref="ICloneable.Clone()"/> for everywhere else, where the implicit "this is cheap" cloning
+        /// convention still holds.
+        /// </summary>
+        /// <param name="forceInMemory">Same meaning as <see cref="Clone(bool)"/>.</param>
+        /// <param name="progress">
+        /// Optional progress reporter. Reports <c>-N</c> once (<c>N</c> = <see cref="FrameCount"/>),
+        /// then <c>0 ... N-1</c> as frames are copied.
+        /// </param>
+        /// <param name="cancellationToken">Checked between frames.</param>
+        /// <returns>Same as <see cref="Clone(bool)"/>.</returns>
+        IMatrixData Clone(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default);
 
     }
 

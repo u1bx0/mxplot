@@ -43,7 +43,7 @@ namespace MxPlot.Core
         /// </summary>
         /// <param name="axisName">The name of the axis to locate. The comparison is case-insensitive.</param>
         /// <returns>true if an axis with the specified name exists in the collection; otherwise, false.</returns>
-        public bool Contains(string axisName) => _axisList.Exists(a => string.Equals(a.Name, axisName, StringComparison.OrdinalIgnoreCase));
+        public bool Contains(string axisName) => _axisList.FindAxis(axisName) != null;
 
         /// <summary>
         /// Determines whether the collection contains the specified axis.
@@ -78,7 +78,7 @@ namespace MxPlot.Core
         /// </summary>
         /// <param name="name"></param>
         /// <returns></returns>
-        public Axis? this[string name] => _axisList.Find(a => string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase));
+        public Axis? this[string name] => _axisList.FindAxis(name);
 
         
 
@@ -637,7 +637,7 @@ namespace MxPlot.Core
         /// The first variable corresponds to <c>Axes[0]</c> (innermost / fastest-varying),
         /// the second to <c>Axes[1]</c>, and so on.
         /// <code>
-        /// // Given: md.DefineDimensions(new ColorChannel(...), Axis.Z(...), Axis.Time(...))
+        /// // Given: md.DefineDimensions(new ColorAxis(...), Axis.Z(...), Axis.Time(...))
         /// //   Axes[0] = C  (stride 1, fastest)
         /// //   Axes[1] = Z
         /// //   Axes[2] = T  (stride C×Z, slowest)

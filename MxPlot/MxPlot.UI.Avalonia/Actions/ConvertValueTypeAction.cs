@@ -27,6 +27,7 @@ namespace MxPlot.UI.Avalonia.Actions
     {
         private readonly double _lutMin;
         private readonly double _lutMax;
+        private readonly bool _isLinkWindow;
 
         public event EventHandler<IMatrixData?>? Completed;
         public event EventHandler? Cancelled;
@@ -34,10 +35,15 @@ namespace MxPlot.UI.Avalonia.Actions
         public event EventHandler? ConvertingStarted;
         public event EventHandler<ConvertValueTypeResult>? ConvertCompleted;
 
-        internal ConvertValueTypeAction(double lutMin, double lutMax)
+        /// <param name="isLinkWindow">
+        /// Whether the owning window is itself being kept live by a Log Transform / Spatial
+        /// Filter sync — disables the dialog's "Replace current data" option when true.
+        /// </param>
+        internal ConvertValueTypeAction(double lutMin, double lutMax, bool isLinkWindow = false)
         {
             _lutMin = lutMin;
             _lutMax = lutMax;
+            _isLinkWindow = isLinkWindow;
         }
 
         public void Invoke(PlotterActionContext ctx) => RunAsync(ctx);
@@ -52,7 +58,7 @@ namespace MxPlot.UI.Avalonia.Actions
             var owner = TopLevel.GetTopLevel(ctx.HostVisual) as Window;
             if (owner == null) { Cancelled?.Invoke(this, EventArgs.Empty); return; }
 
-            var dlg = new ConvertValueTypeDialog(data.ValueTypeName, _lutMin, _lutMax, srcData: data);
+            var dlg = new ConvertValueTypeDialog(data.ValueTypeName, _lutMin, _lutMax, srcData: data, isLinkWindow: _isLinkWindow);
             var result = await dlg.ShowCenteredOnAsync(owner, ctx.HostVisual);
 
             if (result == null) { Cancelled?.Invoke(this, EventArgs.Empty); return; }

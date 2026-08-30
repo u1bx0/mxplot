@@ -1,65 +1,84 @@
-﻿# MxPlot.UI.Avalonia.Video
+# MxPlot.UI.Avalonia.Video
 
-**AVI video export plugin for MxPlot**
+**Video export plugins for MxPlot, and a small framework for writing more**
 
 [![NuGet](https://img.shields.io/nuget/v/MxPlot.UI.Avalonia.Video?include_prerelease&style=flat-square)](https://www.nuget.org/packages/MxPlot.UI.Avalonia.Video)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**MxPlot.UI.Avalonia.Video** provides an AVI video export plugin for the MxPlot Avalonia UI.
-It also serves as a reference implementation of `IRenderExportPlugin`.
+**MxPlot.UI.Avalonia.Video** provides frame-sequence video export plugins for the MxPlot Avalonia UI
+(`AviExporter`, `Mp4Exporter`), plus `VideoExporterBase`/`IVideoFrameWriter` -- the reusable base
+those two are themselves built on -- for adding further formats without reimplementing the settings
+dialog or frame-rendering loop.
 
-## Features
+## Included exporters
 
-- **AVI export**: Exports rendered frame sequences (LUT and overlays applied) as uncompressed 24-bit AVI video.
-- **Hyperstack support**: Lets the user choose which axis (Channel, Z, Time, …) to iterate when exporting multi-dimensional data.
-- **Correct DIB row padding**: Each BGR24 row is padded to a 4-byte boundary as required by the AVI/DIB spec.  
-  Without this, widths not divisible by 4 produce error `0xC00D36B1` (`MF_E_UNSUPPORTED_FORMAT`) in Windows Media Foundation (Media Player, PowerPoint, etc.).
-- **Reference plugin implementation**: `AviExporter` is a minimal, well-commented example of how to implement `IRenderExportPlugin`.
+- **`AviExporter`** — uncompressed 24-bit BGR AVI via [SharpAvi](https://github.com/baSSiLL/SharpAvi).
+  Plays natively on Windows (Media Foundation / Video for Windows). No external dependency.
+  **Correct DIB row padding**: each BGR24 row is padded to a 4-byte boundary as required by the
+  AVI/DIB spec -- without this, widths not divisible by 4 produce error `0xC00D36B1`
+  (`MF_E_UNSUPPORTED_FORMAT`) in Windows Media Foundation (Media Player, PowerPoint, etc.).
+- **`Mp4Exporter`** — H.264 MP4 by piping raw frames into an external `ffmpeg` process. Plays
+  natively on Windows *and* macOS (QuickTime included), unlike uncompressed AVI. Requires `ffmpeg`
+  on `PATH`; check `Mp4Exporter.IsFfmpegAvailable()` before registering it, so the export menu never
+  advertises a format that would just fail on a machine without ffmpeg installed:
+  ```csharp
+  MatrixPlotterPluginRegistry.AddExportPlugin(new AviExporter());
+  if (Mp4Exporter.IsFfmpegAvailable())
+      MatrixPlotterPluginRegistry.AddExportPlugin(new Mp4Exporter());
+  ```
 
-## Plugin overview
+Both share **hyperstack support** (choosing which axis — Channel, Z, Time, … — to iterate when
+exporting multi-dimensional data) via the same `VideoExportDialog`.
 
-Plugins implement `IRenderExportPlugin` and are registered at application startup:
+## Writing a new format: `VideoExporterBase` + `IVideoFrameWriter`
+
+Every frame-sequence video export needs the same settings (animation axis, interval/fps, output
+size, overlay toggle) and the same render-frame-then-write loop; only *how a frame gets written* to
+the target container/codec actually differs. `VideoExporterBase` (implements `IRenderExportPlugin`)
+owns the former; you only supply the latter via `IVideoFrameWriter`:
 
 ```csharp
-MatrixPlotterPluginRegistry.AddExportPlugin(new AviExporter());
-```
-
-The interface has two responsibilities:
-
-1. **Metadata** — labels, file type name, file glob, and whether the plugin requires multi-frame data (`RequiresStack`).
-2. **`ExportAsync`** — shows a settings dialog, then loops over frames and writes them using `IRenderHost.RenderFrameAsync`.
-
-`IRenderHost.RenderFrameAsync` is **thread-safe**; it may be called directly from a background `Task`.
-All UI-thread marshalling is handled internally by the host.
-
-```csharp
-await Task.Run(async () =>
+public sealed class MyFormatExporter : VideoExporterBase
 {
-    for (int i = 0; i < frameCount; i++)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        byte[] bgra = await host.RenderFrameAsync(frameIndex, size, withOverlay);
-        // write bgra bytes to the output format …
-        progress?.Report((i + 1) * 100 / frameCount);
-    }
-});
+    public override string Label => "MyFormat…";
+    public override string Hint => "Exports the frames as MyFormat";
+    public override string FileTypeName => "MyFormat Video";
+    public override string FilePattern => "*.myf";
+
+    protected override string FormatLabel => "MyFormat";       // used in the dialog's title
+    protected override bool SizeEstimateIsExact => false;      // false for anything compressed
+
+    protected override IVideoFrameWriter CreateWriter(string path, int width, int height, decimal fps)
+        => new MyFormatFrameWriter(path, width, height, fps);
+}
+
+public sealed class MyFormatFrameWriter : IVideoFrameWriter
+{
+    public void WriteFrame(byte[] bgra, int width, int height) { /* bgra is top-down BGRA32 */ }
+    public void Finish() { /* called once, success path only, before Dispose */ }
+    public void Dispose() { /* release resources regardless of outcome */ }
+}
 ```
 
-## DIB padding note
-
-SharpAVI does **not** insert DIB row padding automatically.  
-For AVI output, each BGR24 row must be padded to a multiple of 4 bytes:
+Register it the same way as the built-in exporters:
 
 ```csharp
-int rowStride = (width * 3 + 3) & ~3;
+MatrixPlotterPluginRegistry.AddExportPlugin(new MyFormatExporter());
 ```
 
-Failure to do so causes playback errors in Windows Media Foundation when `width % 4 != 0`.
+See `AviExporter`/`AviFrameWriter` (SharpAvi, in-process) and `Mp4Exporter`/`FfmpegFrameWriter`
+(external subprocess) for two working reference implementations with different shapes.
+
+`IRenderHost.RenderFrameAsync` (what `VideoExporterBase`'s frame loop calls on your behalf) is
+**thread-safe** and always returns top-down BGRA32; all UI-thread marshalling is handled internally
+by the host, so an `IVideoFrameWriter` only needs to worry about its own format's pixel layout (row
+order, padding, channel order) when converting from that.
 
 ## Dependencies
 
-- [SharpAvi](https://github.com/baSSiLL/SharpAvi) — MIT license
+- [SharpAvi](https://github.com/baSSiLL/SharpAvi) — MIT license (used by `AviExporter` only)
+- `ffmpeg` — external, user-installed, **not bundled**; only needed to use `Mp4Exporter`
 
 ## License
 

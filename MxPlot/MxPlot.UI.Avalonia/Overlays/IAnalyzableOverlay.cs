@@ -50,9 +50,19 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         /// <summary>
         /// Cached statistics computed by the host (<c>MatrixPlotter</c>).
-        /// Null when not yet computed or when <see cref="ShowStatistics"/> is false.
+        /// Null when not yet computed, when <see cref="ShowStatistics"/> is false, or when
+        /// <see cref="CachedStatisticsLabel"/> is set instead (Composite/ColorCoded rendering).
         /// </summary>
         RegionStatistics? CachedStatistics { get; set; }
+
+        /// <summary>
+        /// Pre-formatted statistics label overriding <see cref="CachedStatistics"/>'s single-value
+        /// label. Set by the host when Composite/ColorCoded rendering is active: the ROI's
+        /// underlying data is then multiple channels, and a single Min/Max/Avg (from whichever one
+        /// frame index happened to be current) would silently misrepresent what's actually on
+        /// screen. Null falls back to <see cref="CachedStatistics"/>'s ordinary single-frame label.
+        /// </summary>
+        string? CachedStatisticsLabel { get; set; }
 
         /// <summary>
         /// Whether this overlay is currently designated as the ROI for value-range computation.

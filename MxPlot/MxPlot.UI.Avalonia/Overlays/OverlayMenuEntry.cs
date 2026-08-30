@@ -18,13 +18,27 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// <summary>Menu item label.</summary>
         public string Header { get; }
 
-        /// <summary>Optional vector icon geometry displayed in the menu icon slot.</summary>
-        public Geometry? Icon { get; }
+        /// <summary>
+        /// Optional vector icon geometry displayed in the menu icon slot. Settable so a toggle-style
+        /// entry (e.g. "Show Statistics") can keep a fixed <see cref="Header"/> and instead reflect
+        /// on/off state via the icon -- e.g. <c>MenuIcons.CheckboxChecked</c>/<c>CheckboxUnchecked</c>
+        /// -- without <see cref="IsChecked"/>'s Radio-style indicator (see its remarks) or a
+        /// width-shifting dynamic label.
+        /// </summary>
+        public Geometry? Icon { get; set; }
 
         /// <summary>Optional tooltip text shown on hover.</summary>
         public string? Tooltip { get; }
 
-        /// <summary>When true the item shows a radio/check indicator.</summary>
+        /// <summary>
+        /// When true the item shows a radio/check indicator. The host (<c>MxView.BuildMenuItem</c>)
+        /// only sets <c>ToggleType</c> when this is <c>true</c>, so an unchecked entry shows no
+        /// indicator at all and a checked one shows a Radio-style dot in its own indicator column --
+        /// suited to a genuine mutually-exclusive group (e.g. the pixel-readout's
+        /// Complex-value-mode submenu), but an awkward, width-shifting look for a single independent
+        /// on/off toggle. Prefer a state-reflecting <see cref="Icon"/> (see its remarks) for that
+        /// case instead.
+        /// </summary>
         public bool IsChecked { get; set; }
 
         /// <summary>

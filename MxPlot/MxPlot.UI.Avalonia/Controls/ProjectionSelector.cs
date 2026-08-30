@@ -45,6 +45,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly ViewRow _yzRow;
 
         private bool _suppressEvents;
+        private bool _compositeActive;
 
         // ── Public API ────────────────────────────────────────────────────────
 
@@ -55,34 +56,111 @@ namespace MxPlot.UI.Avalonia.Controls
         public event EventHandler<(ProjectionPlane Plane, bool IsEnabled, ProjectionMode Mode)>? SelectionChanged;
 
         /// <summary>
-        /// Fired when the "Create a new data with projection" button on the XY row is clicked.
-        /// The handler receives the current projection mode for the XY plane.
+        /// Fired when a row's "create data" button is clicked. The handler receives the plane to
+        /// bake and that row's currently selected mode as the starting point.
         /// </summary>
-        public event EventHandler<ProjectionMode>? OpenAsNewDataRequested;
+        public event EventHandler<(ProjectionPlane Plane, ProjectionMode Mode)>? CreateProjectedDataRequested;
 
         /// <summary>
-        /// Shows or hides the "Create new data" button on the XY row based on whether
-        /// the source data is a hyperstack (AxisCount &gt;= 2).
-        /// Call this whenever the data source changes.
+        /// Shows or hides the per-row "create data" buttons.
         /// </summary>
-        public void UpdateHyperstackState(bool isHyperstack)
+        /// <param name="canProject">
+        /// Whether an orthogonal axis is currently active. Projecting a single-axis volume down to
+        /// one frame is still a useful operation, so this is deliberately not gated on hyperstacks.
+        /// </param>
+        public void UpdateProjectedDataAvailability(bool canProject)
         {
-            if (_xyRow.OpenButton != null)
-            {
-                _xyRow.OpenButton.IsVisible = isHyperstack;
-            }
+            _xyRow.CreateButton.IsVisible = canProject;
+            _xzRow.CreateButton.IsVisible = canProject;
+            _yzRow.CreateButton.IsVisible = canProject;
         }
 
         /// <summary>Whether projection is enabled for the given <paramref name="plane"/>.</summary>
         public bool IsProjectionEnabled(ProjectionPlane plane) => GetRow(plane).CheckBox.IsChecked == true;
 
-        /// <summary>The projection mode selected for the given <paramref name="plane"/>.</summary>
+        /// <summary>
+        /// The projection mode selected for the given <paramref name="plane"/> -- the "which
+        /// extremum/how do slices combine" half of the selection. For XY's Color(Max)/Color(Min)
+        /// items (indices 3/4), this still returns Maximum/Minimum respectively: colouring is an
+        /// orthogonal concern layered on top, reported separately by <see cref="IsColorCoded"/>,
+        /// not a new <see cref="ProjectionMode"/> value (see Tests.Documents/Working/ColorCoded/
+        /// ColorCoded_View_InitialDesign.md section 3.3.3 for why Core's enum stays untouched).
+        /// </summary>
         public ProjectionMode GetMode(ProjectionPlane plane) => GetRow(plane).ComboBox.SelectedIndex switch
         {
             1 => ProjectionMode.Minimum,
             2 => ProjectionMode.Average,
-            _ => ProjectionMode.Maximum,
+            4 => ProjectionMode.Minimum,   // Color (Min), XY row only
+            _ => ProjectionMode.Maximum,   // 0 = Maximum, 3 = Color (Max), or any other row
         };
+
+        /// <summary>
+        /// Whether the given plane's current selection is a ColorCoded (depth-colour) mode rather
+        /// than a plain intensity one. Always <c>false</c> for XZ/YZ, which don't offer it -- see
+        /// section 3.3.1's decision to keep ColorCoded to the XY/MainView case only.
+        /// </summary>
+        public bool IsColorCoded(ProjectionPlane plane) =>
+            plane == ProjectionPlane.XY && GetRow(plane).ComboBox.SelectedIndex >= 3;
+
+        /// <summary>
+        /// Toggles the checkbox (and the combo's enabled/opacity look) without touching
+        /// <c>SelectedIndex</c>. Use this instead of <see cref="SetState"/> when the intent is just
+        /// "turn the projection off/on, remembering whatever was selected" -- <see cref="SetState"/>
+        /// always re-derives <c>SelectedIndex</c> from a <see cref="ProjectionMode"/>, which for XY
+        /// cannot represent Color(Max)/Color(Min) (indices 3/4) and would silently reset back to a
+        /// plain mode. Closing the ColorCoded projection window is exactly this case.
+        /// </summary>
+        public void SetEnabled(ProjectionPlane plane, bool enabled)
+        {
+            _suppressEvents = true;
+            try
+            {
+                var row = GetRow(plane);
+                row.CheckBox.IsChecked = enabled;
+                row.ComboBox.IsEnabled = enabled;
+                row.ComboBox.Opacity = enabled ? 1.0 : 0.4;
+                row.CreateButton.IsEnabled = enabled;
+            }
+            finally { _suppressEvents = false; }
+        }
+
+        /// <summary>
+        /// Restricts the XY row's combo to Maximum/Minimum/Average while Composite mode is active.
+        /// Composite and ColorCoded are mutually exclusive -- depth-colouring is defined in terms of
+        /// a single winning axis index per pixel, which has no coherent meaning once the same pixel
+        /// is already a blend of several Composite channels (see
+        /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md). Rather than let the
+        /// user pick Color(Max)/(Min) and then reject or crash on it, the option is simply not
+        /// offered while Composite is on. If the row was already showing Color(Max)/(Min) when
+        /// Composite activates, falls back to Maximum and fires <see cref="SelectionChanged"/> like
+        /// any other user-driven mode change, so <c>OrthogonalViewController</c>'s normal handling
+        /// picks it up and recomputes a plain projection -- no special-casing needed there beyond
+        /// its own independent guard in <c>ComputeXYProjectionAsync</c>.
+        /// </summary>
+        public void SetCompositeActive(bool active)
+        {
+            if (_compositeActive == active) return;
+            _compositeActive = active;
+
+            var combo = _xyRow.ComboBox;
+            int oldIndex = combo.SelectedIndex;
+            bool wasColorCoded = active && oldIndex >= 3;
+
+            _suppressEvents = true;
+            try
+            {
+                combo.ItemsSource = active
+                    ? new[] { "Maximum", "Minimum", "Average" }
+                    : new[] { "Maximum", "Minimum", "Average", "Color (Max)", "Color (Min)" };
+                // Composite -> restricted list: fall back to Maximum if the old selection no longer
+                // exists (it was Color(Max)/(Min)); indices 0-2 are otherwise unaffected either way.
+                combo.SelectedIndex = wasColorCoded ? 0 : oldIndex;
+            }
+            finally { _suppressEvents = false; }
+
+            if (wasColorCoded && _xyRow.CheckBox.IsChecked == true)
+                SelectionChanged?.Invoke(this, (ProjectionPlane.XY, true, GetMode(ProjectionPlane.XY)));
+        }
 
         /// <summary>Programmatically set the state for a specific view.</summary>
         public void SetState(ProjectionPlane plane, bool enabled, ProjectionMode mode)
@@ -100,11 +178,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 };
                 row.ComboBox.IsEnabled = enabled;
                 row.ComboBox.Opacity = enabled ? 1.0 : 0.4;
-                if (row.OpenButton != null)
-                {
-                    row.OpenButton.IsEnabled = enabled;
-                    row.OpenButton.Opacity = enabled ? 1.0 : 0.4;
-                }
+                row.CreateButton.IsEnabled = enabled;
             }
             finally { _suppressEvents = false; }
         }
@@ -125,7 +199,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
         public ProjectionSelector()
         {
-            _xyRow = CreateViewRow("X-Y (Z Projection)", ProjectionPlane.XY);
+            // Only XY offers Color(Max)/Color(Min) -- ColorCoded is scoped to the MainView/XY
+            // case (section 3.3.1); XZ/YZ keep the plain 3-item Maximum/Minimum/Average list.
+            _xyRow = CreateViewRow("X-Y (Z Projection)", ProjectionPlane.XY, includeColorCoded: true);
             _xzRow = CreateViewRow("X-Z (Y Projection)", ProjectionPlane.XZ);
             _yzRow = CreateViewRow("Z-Y (X Projection)", ProjectionPlane.YZ);
 
@@ -143,7 +219,41 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── Helpers ───────────────────────────────────────────────────────────
 
-        private ViewRow CreateViewRow(string header, ProjectionPlane plane)
+        /// <summary>
+        /// Builds the compact "create data" button that sits at the right end of a plane row.
+        /// Starts disabled — <see cref="CreateViewRow"/> wires its <c>IsEnabled</c> to the row's own
+        /// preview checkbox, since the dialog no longer carries an independent mode selector: the
+        /// mode (and, for ColorCoded, Start/End/LUT/Invert) it bakes is now always whatever is
+        /// currently live-previewed, so baking only makes sense once that preview is actually on.
+        /// </summary>
+        private Button CreateProjectedDataButton(ProjectionPlane plane)
+        {
+            var button = new Button
+            {
+                Content = new PathIcon
+                {
+                    Data = MenuIcons.CreateNewData,
+                    Width = 12,
+                    Height = 12,
+                },
+                Padding = new Thickness(3),
+                MinWidth = 0,
+                MinHeight = 0,
+                Width = 22,
+                Height = 22,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 0, 0),
+                IsVisible = false,
+                IsEnabled = false,
+            };
+            ToolTip.SetTip(button,
+                "Create a new dataset from this projection, so it can be navigated, saved and exported like ordinary data");
+            button.Click += (_, _) =>
+                CreateProjectedDataRequested?.Invoke(this, (plane, GetMode(plane)));
+            return button;
+        }
+
+        private ViewRow CreateViewRow(string header, ProjectionPlane plane, bool includeColorCoded = false)
         {
             var label = new TextBlock
             {
@@ -173,7 +283,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var comboBox = new ComboBox
             {
-                ItemsSource = new[] { "Maximum", "Minimum", "Average" },
+                ItemsSource = includeColorCoded
+                    ? new[] { "Maximum", "Minimum", "Average", "Color (Max)", "Color (Min)" }
+                    : new[] { "Maximum", "Minimum", "Average" },
                 SelectedIndex = 0,
                 FontSize = 11,
                 MinHeight = 0,
@@ -185,38 +297,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 Opacity = 0.4,
             };
 
-            Button? openButton = null;
-            if (plane == ProjectionPlane.XY)
-            {
-                var icon = new PathIcon
-                {
-                    Data = MenuIcons.CreateNewData,
-                    Width = 12,
-                    Height = 12,
-                };
-                /*
-                // The "Create new data with projection" button is currently not implemented, so we'll hide it for now. But the code is left here for easy re-enabling in the future.
-                openButton = new Button 
-                {
-                    Content = icon,
-                    Padding = new Thickness(3),
-                    MinWidth = 0,
-                    MinHeight = 0,
-                    Width = 22,
-                    Height = 22,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(4, 0, 0, 0),
-                    IsEnabled = false,
-                    IsVisible = false,
-                    Opacity = 0.4,
-                };
-                ToolTip.SetTip(openButton, "Create a new dataset with projection");
-                openButton.Click += (_, _) =>
-                {
-                    OpenAsNewDataRequested?.Invoke(this, GetMode(ProjectionPlane.XY));
-                };
-                */
-            }
+            var createButton = CreateProjectedDataButton(plane);
 
             checkBox.IsCheckedChanged += (_, _) =>
             {
@@ -224,11 +305,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 bool enabled = checkBox.IsChecked == true;
                 comboBox.IsEnabled = enabled;
                 comboBox.Opacity = enabled ? 1.0 : 0.4;
-                if (openButton != null)
-                {
-                    openButton.IsEnabled = enabled;
-                    openButton.Opacity = enabled ? 1.0 : 0.4;
-                }
+                createButton.IsEnabled = enabled;
                 SelectionChanged?.Invoke(this, (plane, enabled, GetMode(plane)));
             };
 
@@ -245,14 +322,13 @@ namespace MxPlot.UI.Avalonia.Controls
             };
             controlRow.Children.Add(checkBoxWrapper);
             controlRow.Children.Add(comboBox);
-            if (openButton != null)
-                controlRow.Children.Add(openButton);
+            controlRow.Children.Add(createButton);
 
             var panel = new StackPanel { Spacing = 0 };
             panel.Children.Add(label);
             panel.Children.Add(controlRow);
 
-            return new ViewRow(panel, label, checkBox, comboBox, openButton);
+            return new ViewRow(panel, label, checkBox, comboBox, createButton);
         }
 
         private ViewRow GetRow(ProjectionPlane plane) => plane switch
@@ -263,6 +339,6 @@ namespace MxPlot.UI.Avalonia.Controls
             _ => throw new ArgumentOutOfRangeException(nameof(plane)),
         };
 
-        private sealed record ViewRow(StackPanel Panel, TextBlock Header, CheckBox CheckBox, ComboBox ComboBox, Button? OpenButton);
+        private sealed record ViewRow(StackPanel Panel, TextBlock Header, CheckBox CheckBox, ComboBox ComboBox, Button CreateButton);
     }
 }

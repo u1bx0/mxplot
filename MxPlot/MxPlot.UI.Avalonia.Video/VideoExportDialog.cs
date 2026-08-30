@@ -1,4 +1,4 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Layout;
@@ -11,7 +11,14 @@ using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Video
 {
-    internal sealed class AviExportDialog : Window
+    /// <summary>
+    /// Settings dialog shared by every <see cref="VideoExporterBase"/>-derived exporter: animation
+    /// axis, interval/fps, output size (aspect-locked), and an overlay toggle. Format-specific
+    /// output logic lives in each exporter's <see cref="IVideoFrameWriter"/>, not here -- this
+    /// dialog only collects the settings every frame-sequence video export needs regardless of
+    /// container/codec.
+    /// </summary>
+    public sealed class VideoExportDialog : Window
     {
         public bool Confirmed { get; private set; }
         public Axis SelectedAxis { get; private set; } = null!;
@@ -24,6 +31,7 @@ namespace MxPlot.UI.Avalonia.Video
 
         private readonly IReadOnlyList<Axis> _axes;
         private readonly double _aspect;
+        private readonly bool _sizeEstimateIsExact;
 
         private readonly TextBlock _stepText;
         private readonly TextBlock _positionText;
@@ -37,13 +45,35 @@ namespace MxPlot.UI.Avalonia.Video
 
         private bool _syncSize;
 
-        public AviExportDialog(IRenderHost host, string filePath)
+        /// <param name="host">Supplies the axes, current render size, and overlay state to seed the dialog from.</param>
+        /// <param name="filePath">Destination path, shown (file name only) for confirmation.</param>
+        /// <param name="formatLabel">
+        /// Short format name for the window title, e.g. <c>"AVI"</c> or <c>"MP4"</c> -- produces
+        /// "Export &lt;view&gt; as &lt;formatLabel&gt;".
+        /// </param>
+        /// <param name="sizeEstimateIsExact">
+        /// Whether the live "Total: ... / ~N MB" summary's byte estimate (computed from raw
+        /// uncompressed BGR24 frame size) is meaningful for this format. <see langword="true"/> for
+        /// an uncompressed container (AVI); pass <see langword="false"/> for anything encoder-
+        /// compressed (H.264, etc.), where the raw estimate would be many times the real output size
+        /// and is omitted rather than shown as a misleading number.
+        /// </param>
+        public VideoExportDialog(IRenderHost host, string filePath, string formatLabel, bool sizeEstimateIsExact = true)
         {
-            // Filter out the excluded axis (ortho depth axis for side views)
+            _sizeEstimateIsExact = sizeEstimateIsExact;
+
+            // Drop the axes the view already consumes: a side view's ortho depth axis, and the
+            // Channel axis while Composite blends every channel into each frame.
             var allAxes = host.Data.Dimensions.Axes;
-            _axes = string.IsNullOrEmpty(host.ExcludedAxisName)
+            var excluded = host.ExcludedAxisNames;
+            _axes = excluded == null || excluded.Count == 0
                 ? allAxes
-                : allAxes.Where(a => !a.Name.Equals(host.ExcludedAxisName, StringComparison.OrdinalIgnoreCase)).ToList();
+                : allAxes.Where(a => !excluded.Contains(a.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+
+            if (_axes.Count == 0)
+                throw new InvalidOperationException(
+                    "No axis is available to animate: every axis of this view is already consumed " +
+                    "(the ortho slice axis, or the Channel axis while Composite rendering is active).");
 
             var renderSize = host.CurrentRenderSize;
             _aspect = renderSize.Height > 0 ? renderSize.Width / renderSize.Height : 1.0;
@@ -51,8 +81,8 @@ namespace MxPlot.UI.Avalonia.Video
             int initH = SnapEven((int)Math.Round(renderSize.Height));
 
             string dialogTitle = host.ViewLabel != null
-                ? $"Export {host.ViewLabel} as AVI"
-                : "Export as AVI";
+                ? $"Export {host.ViewLabel} as {formatLabel}"
+                : $"Export as {formatLabel}";
             Title = dialogTitle;
             SizeToContent = SizeToContent.Height;
             Width = 380;
@@ -170,7 +200,7 @@ namespace MxPlot.UI.Avalonia.Video
             var sizeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
             sizeRow.Children.Add(new TextBlock { Text = "Size", FontSize = FS, Width = 56, VerticalAlignment = VerticalAlignment.Center });
             sizeRow.Children.Add(_widthNud);
-            sizeRow.Children.Add(new TextBlock { Text = "\u00d7", FontSize = FS, VerticalAlignment = VerticalAlignment.Center });
+            sizeRow.Children.Add(new TextBlock { Text = "×", FontSize = FS, VerticalAlignment = VerticalAlignment.Center });
             sizeRow.Children.Add(_heightNud);
             sizeRow.Children.Add(new TextBlock { Text = "(even, aspect locked)", FontSize = FS - 1, Opacity = 0.45, VerticalAlignment = VerticalAlignment.Center });
 
@@ -217,7 +247,7 @@ namespace MxPlot.UI.Avalonia.Video
             {
                 var others = _axes
                     .Where(a => a != axis)
-                    .Select(a => $"{a.Name} = {a.Index + 1} / {a.Count}");
+                    .Select(a => $"{a.Name} = i:{a.Index} [{a.Count}]");
                 _positionText.Text = "Position: " + string.Join(", ", others);
                 _positionText.IsVisible = true;
             }
@@ -236,17 +266,29 @@ namespace MxPlot.UI.Avalonia.Video
             var axis = _axes[axisIdx];
             double ms = Math.Max(1, (double)(_intervalNud.Value ?? 100));
             double fps = 1000.0 / ms;
-            _fpsText.Text = $"\u2192 {fps:G4} fps";
+            _fpsText.Text = $"→ {fps:G4} fps";
 
             int frames = axis.Count;
             double totalSec = ms * frames / 1000.0;
             int w = SnapEven((int)(_widthNud.Value ?? 2));
             int h = SnapEven((int)(_heightNud.Value ?? 2));
-            long bytes = (long)w * h * 3 * frames;
-            string sizeStr = bytes >= 1024 * 1024
-                ? $"~{bytes / (1024.0 * 1024):F1} MB"
-                : $"~{bytes / 1024.0:F0} KB";
-            _summaryText.Text = $"Total: {totalSec:G4} s  /  {sizeStr}  ({frames} frames)";
+
+            if (_sizeEstimateIsExact)
+            {
+                // Raw uncompressed BGR24 size -- exact for an uncompressed container (AVI).
+                long bytes = (long)w * h * 3 * frames;
+                string sizeStr = bytes >= 1024 * 1024
+                    ? $"~{bytes / (1024.0 * 1024):F1} MB"
+                    : $"~{bytes / 1024.0:F0} KB";
+                _summaryText.Text = $"Total: {totalSec:G4} s  /  {sizeStr}  ({frames} frames)";
+            }
+            else
+            {
+                // An encoder-compressed format's real output size depends on content and is not
+                // worth guessing at from raw frame size alone -- showing the uncompressed byte count
+                // here would read as the expected file size and be off by many times over.
+                _summaryText.Text = $"Total: {totalSec:G4} s  ({frames} frames)";
+            }
 
             _exportBtn.IsEnabled = ms > 0 && w >= 2 && h >= 2;
         }

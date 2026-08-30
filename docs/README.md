@@ -1,6 +1,6 @@
 ﻿# MxPlot Documentation
 
-**Last Updated**: 2026-05-29
+**Last Updated**: 2026-08-20
 
 - Detailed guides and technical references for the MxPlot library stack.
 - Content may be updated as the library evolves
@@ -41,10 +41,13 @@
 ## MxPlot.UI.Avalonia — UI Components
 
 - **[MxPlot.UI.Avalonia Overview](./MxPlotUIAvalonia_Overview.md)**  
-  Overview of the Avalonia UI layer: `MatrixPlotter`, `MxView`, `MxPlotHost`, and the plugin / action model.
+  Overview of the Avalonia UI layer: `MatrixPlotter`, `MxView`, `MxPlotHostApplication`, and the plugin / action model.
 
 - **[MatrixPlotter Basic Usage Guide](./MatrixPlotter_Usage_Guide.md)**  
-  How to open a `MatrixPlotter` window, refresh data, link plotters, and integrate with non-Avalonia hosts.
+  How to open a `MatrixPlotter` window and drive it from code: host setup for Avalonia / WinForms / WPF / console apps, refreshing and replacing data, the three external-control entry points (Facade properties, ViewModel, `MainView`), frame and orthogonal-view control, linked plotters, events, and export.
+
+- **[MatrixPlotter Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md)**  
+  Multi-channel composite display: entry points, `BlendRecipe` per-channel settings, blend modes, Global vs Channel-wise value ranges, RGB auto-composite and grayscale conversion, and how Composite interacts with Extract / projections / persistence.
 
 - **[MxView Coordinate Systems Guide](./MxView_CoordinateSystems_Guide.md)**  
   Explains the three coordinate layers used by `MxView` (Screen, World/bitmap-pixel, Data/physical), their axis conventions, and how to convert between them using `ScreenToData` / `DataToScreen`. Covers overlay coordinate conventions and `ViewTransform` handling.
@@ -54,6 +57,9 @@
 
 - **[WinForms / WPF Integration Guide](./MatrixPlotter_NonAvalonia_Integration_Guide.md)** ([日本語](./MatrixPlotter_NonAvalonia_Integration_Guide_ja.md))  
   Step-by-step guide for hosting `MatrixPlotter` inside a WinForms or WPF application. Covers `AppBuilder` setup, data refresh API, thread safety, and high-frequency update patterns.
+
+- **Scripting with `MxPlotScriptHost`** — see [MatrixPlotter Basic Usage Guide § Scripting with MxPlotScriptHost](./MatrixPlotter_Usage_Guide.md)  
+  Open `MatrixPlotter` windows from .NET 10 file-based apps (`dotnet run app.cs`), console tools, or notebook cells — for UI-less hosts that have no message loop of their own, as opposed to the WinForms/WPF guide above.
 
 ---
 

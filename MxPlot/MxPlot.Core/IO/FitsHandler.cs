@@ -416,7 +416,7 @@ namespace MxPlot.Core.IO
             if (info.TagsByIndex.Count > 0)
             {
                 if (info.Type == "CHANNEL")
-                    return BuildColorChannel(info, name);
+                    return BuildColorAxis(info, name);
                 var ta = new TaggedAxis(info.TagsByIndex.Values.ToArray(), name);
                 if (!string.IsNullOrEmpty(info.Unit)) ta.Unit = info.Unit;
                 return ta;
@@ -427,10 +427,10 @@ namespace MxPlot.Core.IO
             return ax;
         }
 
-        private static ColorChannel BuildColorChannel(AxisInfoRecord info, string name)
+        private static ColorAxis BuildColorAxis(AxisInfoRecord info, string name)
         {
             var tags = info.TagsByIndex.Values.ToArray();
-            var cc = new ColorChannel(tags);
+            var cc = new ColorAxis(tags);
             cc.Name = name;
             if (!string.IsNullOrEmpty(info.Unit)) cc.Unit = info.Unit;
             if (info.ColorsByIndex.Count == tags.Length)
@@ -457,7 +457,7 @@ namespace MxPlot.Core.IO
         /// <summary>"LINEAR" (default), "TAGGED", "CHANNEL", or "FOV".</summary>
         public string Type = "LINEAR";
 
-        // TaggedAxis / ColorChannel
+        // TaggedAxis / ColorAxis
         public SortedDictionary<int, string> TagsByIndex = new();
         public SortedDictionary<int, int> ColorsByIndex = new();
         public SortedDictionary<int, double> WvByIndex = new();
@@ -636,7 +636,7 @@ namespace MxPlot.Core.IO
                     WriteHierarch($"{pfx} O {k} Z", FmtDblC(o.Z));
                 }
             }
-            else if (axis is ColorChannel cc)
+            else if (axis is ColorAxis cc)
             {
                 WriteHierarch($"{pfx} TYPE", "'CHANNEL'");
                 for (int k = 0; k < cc.Tags.Count; k++)

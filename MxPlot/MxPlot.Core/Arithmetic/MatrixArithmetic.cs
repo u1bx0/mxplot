@@ -195,7 +195,7 @@ namespace MxPlot.Core.Arithmetic
                             $"B[{i}] ({axesB[i].Name}): {axesB[i].Count}");
 
                     // Optional: Check axis names for better error messages
-                    if (axesA[i].Name != axesB[i].Name)
+                    if (!string.Equals(axesA[i].Name, axesB[i].Name, StringComparison.OrdinalIgnoreCase))
                     {
                         // Warning: Different axis names but same structure
                         System.Diagnostics.Debug.WriteLine(

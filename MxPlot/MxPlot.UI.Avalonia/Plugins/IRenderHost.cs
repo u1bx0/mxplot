@@ -1,4 +1,5 @@
 ﻿using MxPlot.Core;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 
 namespace MxPlot.UI.Avalonia.Plugins
@@ -21,11 +22,17 @@ namespace MxPlot.UI.Avalonia.Plugins
         string? ViewLabel => null;
 
         /// <summary>
-        /// When non-<c>null</c>, the axis with this name should be excluded from the
-        /// selectable axes in export dialogs. Used for side views to exclude the ortho-depth axis
-        /// (e.g. the Y-axis when exporting the X-Z view, since it is the slice dimension).
+        /// Names of axes that must not be offered as the animation axis in export dialogs,
+        /// because this view already consumes them.
         /// </summary>
-        string? ExcludedAxisName => null;
+        /// <remarks>
+        /// Two things land here: a side view's ortho-depth axis (the Y axis when exporting the
+        /// X-Z view, since it is the slice dimension), and the Channel axis while Composite
+        /// rendering is active (every channel is blended into each frame, so stepping along it
+        /// would produce identical frames). A view can consume both at once, which is why this
+        /// is a list rather than a single name.
+        /// </remarks>
+        IReadOnlyList<string>? ExcludedAxisNames => null;
 
         /// <summary>
         /// The natural (1:1 zoom) render size of the current view in pixels.

@@ -1,10 +1,15 @@
 ﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Shapes;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using System;
+using System.IO;
+using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Helpers
 {
@@ -18,14 +23,22 @@ namespace MxPlot.UI.Avalonia.Helpers
         // Default palette: prioritizes colors commonly used in composite imaging
         private static readonly Color[] _colorPalette =
         [
-            Colors.White,                  Color.FromRgb(255,   0,   0),  // White, Red
-            Color.FromRgb(  0, 255,   0),  Color.FromRgb(  0,   0, 255),  // Green, Blue
-            Colors.Yellow,                 Colors.Magenta,                 // Yellow, Magenta
-            Colors.Cyan,                   Color.FromRgb(255, 165,   0),  // Cyan, Orange
-            Color.FromRgb(255, 192, 203),  Color.FromRgb(128,   0, 128),  // Pink, Purple
-            Color.FromRgb(128, 128, 128),  Color.FromRgb(192, 192, 192),  // Gray, Light gray
-            Colors.Black,                  Color.FromRgb(139,  69,  19),  // Black, Brown
-            Color.FromRgb(255, 215,   0),  Color.FromRgb(  0, 255, 255),  // Gold, Aqua
+           Colors.White,                      // 1
+            Color.FromRgb(255,   0,   0),      // 2 Red
+            Color.FromRgb(  0, 255,   0),      // 3 Green
+            Color.FromRgb(  0,   0, 255),      // 4 Blue
+            Color.FromRgb(  0, 255, 255),      // 5 Cyan
+            Colors.Yellow,                     // 6 Yellow
+            Colors.Magenta,                    // 7 Magenta
+            Color.FromRgb(255, 128,   0),      // 8 Orange (TRITC / AF555)
+            Color.FromRgb(255, 192, 203),      // 9 Pink (AF568 / AF594 pseudo)
+            Color.FromRgb(128,   0, 128),      // 10 Purple (Cy5 / AF647 pseudo)
+            Color.FromRgb(128, 128, 128),      // 11 Gray (mask / ROI)
+            Color.FromRgb(192, 192, 192),      // 12 Light gray (background)
+            Color.FromRgb(160,   0, 160),      // 13 Deep magenta (Cy5.5 / AF680 pseudo)
+            Color.FromRgb(255, 215,   0),      // 14 Gold (YFP alternative)
+            Color.FromRgb(139,  69,  19),      // 15 Brown (low‑freq but distinct)
+            Color.FromRgb(  0, 128, 255),      // 16 Azure (CFP alternative)
         ];
 
         // ── Separators ────────────────────────────────────────────────
@@ -44,7 +57,15 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// <summary>Builds [PathIcon + TextBlock] content when an icon is provided.</summary>
         private static object MakeContent(string text, Geometry? icon, double fontSize, double iconSize = 14)
         {
-            if (icon == null) return text;
+            // No icon: still wrap in a TextBlock so fontSize is honoured. Returning the bare
+            // string would let the Button inherit the ambient (larger) font size instead.
+            if (icon == null)
+                return new TextBlock
+                {
+                    Text = text,
+                    FontSize = fontSize,
+                    VerticalAlignment = VerticalAlignment.Center,
+                };
             var pathIcon = new PathIcon { Data = icon, Width = iconSize, Height = iconSize };
             var brush = MenuIcons.DefaultBrush(icon);
             if (brush != null) pathIcon.Foreground = brush;
@@ -52,6 +73,7 @@ namespace MxPlot.UI.Avalonia.Helpers
             {
                 Orientation = Orientation.Horizontal,
                 Spacing = 6,
+                Margin = new Thickness(6, 0, 0, 0),
                 Children = {
                     pathIcon,
                     new TextBlock {
@@ -66,7 +88,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// Creates a flat, full-width menu item button with the <c>menuitem</c> style class.
         /// </summary>
         internal static Button MakeMenuItem(string text, Action onClick,
-            Geometry? icon = null, Thickness? padding = null, double fontSize = 12)
+            Geometry? icon = null, Thickness? padding = null, double fontSize = 12, double itemHeight = 20)
         {
             var btn = new Button
             {
@@ -74,6 +96,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Left,
                 Padding = padding ?? new Thickness(10, 5),
+                Height = itemHeight,
             };
             btn.Classes.Add("menuitem");
             btn.Click += (_, _) => onClick();
@@ -84,7 +107,8 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// Creates an indented child menu item button (extra left indent, optional tooltip).
         /// </summary>
         internal static Button MakeChildMenuItem(string text, Action onClick,
-            string? hint = null, Geometry? icon = null, double fontSize = 12, bool enabled = true)
+            string? hint = null, Geometry? icon = null, double fontSize = 12, double itemHeight = 20,
+            bool enabled = true)
         {
             var btn = new Button
             {
@@ -95,6 +119,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 Padding = new Thickness(26, 4),
                 Margin = new Thickness(10, 3),
                 IsEnabled = enabled,
+                Height = itemHeight,
             };
             btn.Classes.Add("menuitem");
             btn.Click += (_, _) => onClick();
@@ -105,7 +130,8 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// <summary>
         /// Creates an indented toggle button menu item with optional tooltip.
         /// </summary>
-        internal static ToggleButton MakeToggleMenuItem(string text, string? hint = null, double fontSize = 12)
+        internal static ToggleButton MakeToggleMenuItem(string text, string? hint = null,
+            double fontSize = 12, double itemHeight = 20)
         {
             var btn = new ToggleButton
             {
@@ -115,6 +141,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 HorizontalContentAlignment = HorizontalAlignment.Left,
                 Padding = new Thickness(26, 4),
                 Margin = new Thickness(10, 3),
+                Height = itemHeight,
             };
             btn.Classes.Add("menuitem");
             if (hint != null) ToolTip.SetTip(btn, hint);
@@ -171,6 +198,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// </summary>
         internal static Control MakeMenuGroup(string header, Control[] items,
             Geometry? icon = null, double headerFontSize = 12, double arrowFontSize = 10,
+            double itemHeight = 20,
             bool initiallyExpanded = true, double indent = 0,
             FontWeight headerFontWeight = default)
         {
@@ -196,6 +224,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 {
                     Orientation = Orientation.Horizontal,
                     Spacing = 6,
+                    Height = itemHeight,
                     Children =
                     {
                         hdrIcon,
@@ -216,6 +245,8 @@ namespace MxPlot.UI.Avalonia.Helpers
                     VerticalAlignment = VerticalAlignment.Center,
                 };
             hdrContent.Children.Add(headerContent);
+            hdrContent.Margin = new Thickness(6, 0, 0, 0);
+
             var hdrBtn = new Button
             {
                 Content = hdrContent,
@@ -368,6 +399,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                 BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            swatch.Classes.Add("colorswatch");
             var flyout = new Flyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
 
             Color custom = initial;
@@ -494,6 +526,7 @@ namespace MxPlot.UI.Avalonia.Helpers
                     Padding = new Thickness(0),
                     BorderThickness = new Thickness(0.5),
                 };
+                btn.Classes.Add("colorswatch");
                 string tip = showAlpha
                     ? $"R={cap.R}, G={cap.G}, B={cap.B} [A={cap.A}]"
                     : $"R={cap.R}, G={cap.G}, B={cap.B}";
@@ -590,6 +623,126 @@ namespace MxPlot.UI.Avalonia.Helpers
 
             swatch.Click += (_, _) => FlyoutBase.ShowAttachedFlyout(swatch);
             return swatch;
+        }
+
+        // ---- Composite icon --------------------------------------------------
+
+        /// <summary>
+        /// The three lobe colours shared by <see cref="MakeCompositeIcon"/> (the AxisTracker
+        /// toggle button) and <see cref="CreateCompositeWindowIcon"/> (the window titlebar icon),
+        /// so the two stay visually identical.
+        /// </summary>
+        /// <remarks>
+        /// Pure R/G/B, matching <c>ColorAxis.CreateRgb()</c>'s primaries.
+        /// </remarks>
+        private static readonly Color[] CompositeIconColors = [Colors.Red, Colors.Lime, Colors.Blue];
+
+        /// <summary>Lobe geometry shared by <see cref="RenderCompositeIconBitmap"/>.</summary>
+        private static (double Diameter, (double Left, double Top)[] Positions) CompositeIconLobes(double size)
+        {
+            double d = size * 0.62;               // lobe diameter
+            double cx = (size - d) / 2.0;         // horizontal centre for the top lobe
+            double dx = size * 0.19;              // horizontal spread of the lower pair
+            double dy = size * 0.30;              // vertical offset of the lower pair
+
+            // Three circles on the vertices of a triangle, sized so the pairwise overlaps meet in
+            // the centre - the classic additive-colour Venn figure.
+            return (d, [(cx, 0), (cx - dx, dy), (cx + dx, dy)]);
+        }
+
+        /// <summary>
+        /// Rasterizes the three-overlapping-circles mark used for Composite (multi-channel blend)
+        /// mode, mixing the lobes with the same per-channel additive sum
+        /// <see cref="Rendering.CompositeBitmapWriter"/> uses for <see cref="Rendering.BlendMode.Additive"/>
+        /// (each channel is the clamped sum of every lobe covering that pixel).
+        /// </summary>
+        /// <remarks>
+        /// This is deliberately pixel math, not alpha-blended <see cref="Ellipse"/> shapes: alpha
+        /// blending darkens/mutes overlaps depending on paint order, whereas true additive mixing
+        /// is what makes Composite mode meaningful — R+G gives yellow, G+B gives cyan, R+B gives
+        /// magenta/pink, and all three together give white at the centre, exactly as they would
+        /// on real composited data. Lobe edges are antialiased over roughly one pixel; outside all
+        /// three lobes the pixel is fully transparent, so the icon drops cleanly onto any
+        /// background (button chrome, titlebar, light or dark theme).
+        /// </remarks>
+        /// <param name="size">Side length of the square icon, in pixels.</param>
+        private static unsafe WriteableBitmap RenderCompositeIconBitmap(int size)
+        {
+            var (d, positions) = CompositeIconLobes(size);
+            double radius = d / 2.0;
+            var centers = positions.Select(p => (Cx: p.Left + radius, Cy: p.Top + radius)).ToArray();
+
+            var bmp = new WriteableBitmap(new PixelSize(size, size), new Vector(96, 96),
+                                          global::Avalonia.Platform.PixelFormat.Bgra8888,
+                                          global::Avalonia.Platform.AlphaFormat.Premul);
+            using var fb = bmp.Lock();
+            int stride = fb.RowBytes / 4;
+            int* basePtr = (int*)fb.Address;
+
+            for (int y = 0; y < size; y++)
+            {
+                int* row = basePtr + y * stride;
+                for (int x = 0; x < size; x++)
+                {
+                    int sr = 0, sg = 0, sb = 0;
+                    double coverage = 0;
+                    for (int i = 0; i < centers.Length; i++)
+                    {
+                        double dx = x + 0.5 - centers[i].Cx;
+                        double dy = y + 0.5 - centers[i].Cy;
+                        double dist = Math.Sqrt(dx * dx + dy * dy);
+                        // 1px-wide antialiased edge: 1.0 well inside the circle, 0.0 well outside.
+                        double c = Math.Clamp(radius - dist + 0.5, 0.0, 1.0);
+                        if (c <= 0) continue;
+
+                        var color = CompositeIconColors[i];
+                        sr += (int)(color.R * c);
+                        sg += (int)(color.G * c);
+                        sb += (int)(color.B * c);
+                        if (c > coverage) coverage = c;
+                    }
+
+                    if (coverage <= 0) { row[x] = 0; continue; }
+
+                    sr = Math.Min(sr, 255);
+                    sg = Math.Min(sg, 255);
+                    sb = Math.Min(sb, 255);
+                    int a = (int)(coverage * 255);
+                    // Premultiplied alpha: scale RGB by (a / 255) so partially-covered edge pixels
+                    // don't come out over-bright when composited onto the background.
+                    row[x] = (a << 24) | ((sr * a / 255) << 16) | ((sg * a / 255) << 8) | (sb * a / 255);
+                }
+            }
+            return bmp;
+        }
+
+        /// <summary>Wraps <see cref="RenderCompositeIconBitmap"/> for use as a toolbar/button icon.</summary>
+        /// <param name="size">Overall square size in DIPs. Defaults to 14.</param>
+        internal static Control MakeCompositeIcon(double size = 14)
+        {
+            int px = Math.Max(1, (int)Math.Round(size));
+            return new Image
+            {
+                Source = RenderCompositeIconBitmap(px),
+                Width = size,
+                Height = size,
+                Stretch = Stretch.Fill,
+            };
+        }
+
+        /// <summary>
+        /// Wraps <see cref="RenderCompositeIconBitmap"/> as a <see cref="WindowIcon"/>, for use as
+        /// the titlebar icon while a window is in Composite mode (the LUT-mode titlebar icon is a
+        /// rendered LUT gradient - see <c>LutSelector.CreateIcon</c> - so Composite gets an equally
+        /// mode-specific icon rather than staying on whatever LUT icon was selected beforehand).
+        /// </summary>
+        internal static WindowIcon CreateCompositeWindowIcon(int size = 32)
+        {
+            using var bmp = RenderCompositeIconBitmap(size);
+            using var ms = new MemoryStream();
+            bmp.Save(ms);
+            ms.Position = 0;
+            return new WindowIcon(ms);
         }
     }
 }

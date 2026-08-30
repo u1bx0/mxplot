@@ -27,7 +27,12 @@ namespace MxPlot.UI.Avalonia.Views
         private static ComplexValueMode _lastMode = ComplexValueMode.Magnitude;
         private static bool _lastApplyLog10 = false;
 
-        internal ConvertComplexDialog(IMatrixData? srcData = null)
+        /// <param name="isLinkWindow">
+        /// Whether the owning window is itself being kept live by a Log Transform / Spatial
+        /// Filter sync — if so, "Replace current data" is disabled, since that window's content
+        /// is auto-recomputed from its source and would just be overwritten again on the next update.
+        /// </param>
+        internal ConvertComplexDialog(IMatrixData? srcData = null, bool isLinkWindow = false)
         {
             _srcData = srcData;
 
@@ -64,6 +69,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             _replaceCheck = ControlFactory.MakeCheckBox("Replace current data (all frames)", fontSize: 11,
                 hint: "If checked, replaces the current data in this window. If unchecked (default), result opens in a new window.");
+            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(_replaceCheck, isLinkWindow);
 
             _sizeText = new TextBlock
             {

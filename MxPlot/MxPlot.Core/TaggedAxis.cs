@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.Json.Serialization;
 
@@ -9,7 +10,7 @@ namespace MxPlot.Core
     /// Represents an axis defined by a set of tags, enabling tag-based indexing and lookup.
     /// </summary>
     /// <remarks>
-    /// This class serves as the base for tag-oriented axes such as <see cref="ColorChannel"/>.
+    /// This class serves as the base for tag-oriented axes such as <see cref="ColorAxis"/>.
     /// A defensive copy of the provided tag array is created to protect internal state.
     /// </remarks>
     public class TaggedAxis : Axis
@@ -22,7 +23,7 @@ namespace MxPlot.Core
         public event EventHandler? TagNameChanged;
 
         /// <summary>
-        /// JSON deserialization constructor. Protected so that <see cref="ColorChannel"/> can chain to it.
+        /// JSON deserialization constructor. Protected so that <see cref="ColorAxis"/> can chain to it.
         /// Only <c>tags</c> is required — <c>Count</c>, <c>Min</c>, <c>Max</c> are derived,
         /// and <c>Name</c>, <c>Unit</c>, <c>IsIndexBased</c> are restored via their setters.
         /// </summary>
@@ -90,7 +91,18 @@ namespace MxPlot.Core
             TagNameChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        public override TaggedAxis Clone() => new TaggedAxis(_tags, Name);
+        public override TaggedAxis Clone() => new TaggedAxis(_tags, Name) { Unit = Unit };
+
+        /// <summary>Narrows the tag list to <c>[start, start + count)</c> instead of dropping it.</summary>
+        public override TaggedAxis Slice(int start, int count)
+        {
+            if (start < 0 || count <= 0 || start + count > Count)
+                throw new ArgumentOutOfRangeException(nameof(start),
+                    $"[{start}, {start + count}) is out of range for an axis of Count={Count}.");
+
+            var slicedTags = _tags.Skip(start).Take(count).ToArray();
+            return new TaggedAxis(slicedTags, Name) { Unit = Unit };
+        }
 
         /// <summary>
         /// Creates a <see cref="TaggedAxis"/> with the default axis name "Tag".

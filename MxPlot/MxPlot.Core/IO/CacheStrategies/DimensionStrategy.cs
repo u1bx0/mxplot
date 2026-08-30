@@ -11,7 +11,11 @@ namespace MxPlot.Core.IO.CacheStrategies
         private readonly DimensionStructure _dim;
 
         private int _targetAxisIndex = -1;
-        private readonly int _channelAxisIndex = -1;
+        // The axis whose values are combined/overlaid together in Composite mode. Historically
+        // this was hardcoded to an axis literally named "Channel", but Composite mode itself was
+        // generalized to work with any axis -- so this must be settable to whatever axis is
+        // actually configured, not just "Channel" by name.
+        private int _compositeAxisIndex = -1;
         private HashSet<int> _targetChannels = new();
 
         public enum CacheMode { SinglePlane, Volume }
@@ -46,25 +50,61 @@ namespace MxPlot.Core.IO.CacheStrategies
 
       
 
+        /// <summary>
+        /// The axis used for Composite-mode overlay (all its values are preloaded/protected
+        /// together, alongside <see cref="TargetAxis"/>, instead of just the current one).
+        /// </summary>
+        public Axis? CompositeAxis
+        {
+            get => _compositeAxisIndex >= 0 ? _dim[_compositeAxisIndex] : null;
+            set
+            {
+                int index = (value != null) ? _dim.GetAxisOrder(value) : -1;
+                if (_compositeAxisIndex != index)
+                {
+                    _compositeAxisIndex = index;
+                    OnStrategyChanged();
+                }
+            }
+        }
+
         private int _lastCurrentIndex = 0;
+
+        // Memoizes GetPreloadIndices' Volume-mode target set (see the comment inside
+        // GetPreloadIndices for why this is valid and why it matters). Invalidated in
+        // OnStrategyChanged, since that already fires whenever TargetAxis, CompositeAxis, Mode,
+        // or the target-channel filter change -- every input this memo depends on besides the
+        // per-call axis position itself.
+        private int[]? _cachedVolumeContext;
+        private List<int>? _cachedVolumeTargets;
 
         public event EventHandler? StrategyChanged;
 
         /// <summary>
-        /// Initializes the strategy with a <see cref="DimensionStructure"/> and the axis
-        /// to use as the primary scroll / volume target.
+        /// Initializes the strategy with a <see cref="DimensionStructure"/>, the axis to use as
+        /// the primary scroll / volume target, and (optionally) the axis used for Composite-mode
+        /// overlay.
         /// </summary>
-        public DimensionStrategy(DimensionStructure dimStruct, Axis target)
+        /// <param name="compositeAxis">
+        /// The Composite-mode axis. When <see langword="null"/> (default), falls back to an axis
+        /// literally named "Channel" if one exists, for backward compatibility with data that
+        /// still uses that convention -- pass this explicitly whenever Composite mode is actually
+        /// configured on a different axis.
+        /// </param>
+        public DimensionStrategy(DimensionStructure dimStruct, Axis target, Axis? compositeAxis = null)
         {
             _dim = dimStruct;
 
             _targetAxisIndex = dimStruct.GetAxisOrder(target);
-            _channelAxisIndex = dimStruct.Contains("Channel") ? dimStruct.GetAxisOrder("Channel") : -1;
             TargetAxis = target;
+
+            CompositeAxis = compositeAxis ?? (dimStruct.Contains("Channel") ? dimStruct["Channel"] : null);
         }
 
         private void OnStrategyChanged()
         {
+            _cachedVolumeContext = null;
+            _cachedVolumeTargets = null;
             StrategyChanged?.Invoke(this, EventArgs.Empty);
         }
 
@@ -74,7 +114,7 @@ namespace MxPlot.Core.IO.CacheStrategies
         /// </summary>
         private IEnumerable<int> GetEffectiveChannels()
         {
-            if (_channelAxisIndex < 0)
+            if (_compositeAxisIndex < 0)
             {
                 yield return 0; // no channel axis present; treat as a single implicit channel
                 yield break;
@@ -87,9 +127,33 @@ namespace MxPlot.Core.IO.CacheStrategies
             else
             {
                 // No filter specified — include all channels.
-                int count = _dim.Axes[_channelAxisIndex].Count;
+                int count = _dim.Axes[_compositeAxisIndex].Count;
                 for (int c = 0; c < count; c++) yield return c;
             }
+        }
+
+        /// <summary>
+        /// Enumerates every frame index in the current Volume-mode working set: every value of
+        /// <see cref="TargetAxis"/>, times every value of <see cref="CompositeAxis"/> (if any),
+        /// with every other axis fixed at <paramref name="currentIndex"/>'s position -- INCLUDING
+        /// <paramref name="currentIndex"/> itself, unlike <see cref="GetPreloadIndices"/> (which
+        /// omits it deliberately, since that method answers "what else needs prefetching" rather
+        /// than "what is the whole set"). Intended for diagnostics (e.g. reporting how much of the
+        /// working set a cache currently holds), not for driving eviction/prefetch decisions.
+        /// Empty when <see cref="Mode"/> isn't <see cref="CacheMode.Volume"/>, or <see cref="TargetAxis"/>
+        /// is unset.
+        /// </summary>
+        public IEnumerable<int> GetVolumeWorkingSet(int currentIndex)
+        {
+            if (Mode != CacheMode.Volume || _targetAxisIndex < 0) yield break;
+            if (_dim.Axes.Count == 0) yield break;
+
+            int[] currentPos = _dim.GetAxisIndices(currentIndex);
+            int targetLength = _dim.Axes[_targetAxisIndex].Count;
+
+            for (int t = 0; t < targetLength; t++)
+                foreach (int c in GetEffectiveChannels())
+                    yield return GetFrameIndex(currentPos, _targetAxisIndex, t, c);
         }
 
         /// <summary>
@@ -117,17 +181,32 @@ namespace MxPlot.Core.IO.CacheStrategies
             {
                 // --- Volume mode: preload the entire target axis for all effective channels ---
                 if (_targetAxisIndex < 0) yield break;
-                int targetLength = _dim.Axes[_targetAxisIndex].Count;
 
-                for (int t = 0; t < targetLength; t++)
+                // The target set here never depends on TargetAxis's own current value -- every
+                // value of TargetAxis is always included regardless of which one "currentIndex"
+                // happens to sit on -- only on the OTHER axes' positions (e.g. which Time point).
+                // So every call within one full sweep along TargetAxis (e.g. one orthogonal
+                // slice-build pass, which touches every frame along it in turn) shares the exact
+                // same target set. Recomputing the full TargetAxis x CompositeAxis enumeration
+                // (up to targetLength * channelCount GetFrameIndex calls) on every single one of
+                // those calls was, measured empirically, the dominant remaining per-access cost
+                // in VirtualFrames after its own lock/LRU overhead was fixed -- for a fully
+                // "warmed" cache this meant every touch still redid the same expensive work for
+                // no benefit. Memoize it, keyed by everything except TargetAxis's own value.
+                if (_cachedVolumeContext == null || !ContextMatchesExceptTargetAxis(currentPos, _cachedVolumeContext))
                 {
-                    foreach (int c in GetEffectiveChannels())
-                    {
-                        // Delegate to the non-yield helper so stackalloc can be used inside.
-                        int targetIndex = GetFrameIndex(currentPos, _targetAxisIndex, t, c);
-                        if (targetIndex != currentIndex) yield return targetIndex;
-                    }
+                    int targetLength = _dim.Axes[_targetAxisIndex].Count;
+                    var targets = new List<int>(targetLength * Math.Max(1, _targetChannels.Count > 0 ? _targetChannels.Count : 1));
+                    for (int t = 0; t < targetLength; t++)
+                        foreach (int c in GetEffectiveChannels())
+                            targets.Add(GetFrameIndex(currentPos, _targetAxisIndex, t, c));
+
+                    _cachedVolumeContext = currentPos; // currentPos is a fresh array from GetAxisIndices above; safe to retain
+                    _cachedVolumeTargets = targets;
                 }
+
+                foreach (int targetIndex in _cachedVolumeTargets!)
+                    if (targetIndex != currentIndex) yield return targetIndex;
             }
             else
             {
@@ -176,11 +255,26 @@ namespace MxPlot.Core.IO.CacheStrategies
             basePos.CopyTo(pos);
 
             if (targetAxisIdx >= 0) pos[targetAxisIdx] = targetVal;
-            if (_channelAxisIndex >= 0) pos[_channelAxisIndex] = channelVal;
+            if (_compositeAxisIndex >= 0) pos[_compositeAxisIndex] = channelVal;
 
             return _dim.GetFrameIndexAt(pos);
         }
-              
+
+        /// <summary>
+        /// True when <paramref name="a"/> and <paramref name="b"/> agree on every axis except
+        /// <see cref="_targetAxisIndex"/> -- the equality that makes Volume mode's memoized
+        /// preload target set (see <see cref="GetPreloadIndices"/>) still valid to reuse.
+        /// </summary>
+        private bool ContextMatchesExceptTargetAxis(int[] a, int[] b)
+        {
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (i == _targetAxisIndex) continue;
+                if (a[i] != b[i]) return false;
+            }
+            return true;
+        }
+
 
         public bool IsHighPriority(int index)
         {
@@ -194,9 +288,9 @@ namespace MxPlot.Core.IO.CacheStrategies
             _dim.CopyAxisIndicesTo(evalPos, index);
 
             // Frames outside the target channel set are not high-priority.
-            if (_channelAxisIndex >= 0)
+            if (_compositeAxisIndex >= 0)
             {
-                int evalC = evalPos[_channelAxisIndex];
+                int evalC = evalPos[_compositeAxisIndex];
                 if (_targetChannels.Count > 0 && !_targetChannels.Contains(evalC))
                     return true;
             }
@@ -204,7 +298,7 @@ namespace MxPlot.Core.IO.CacheStrategies
             // --- Verify that all axes other than TargetAxis and ChannelAxis (the "context" axes) match. ---
             for (int i = 0; i < _dim.Axes.Count; i++)
             {
-                if (i == _channelAxisIndex) continue; // channel differences are acceptable
+                if (i == _compositeAxisIndex) continue; // channel differences are acceptable
 
                 if (Mode == CacheMode.Volume && i == _targetAxisIndex)
                     continue; // in Volume mode, variation along the target axis (Z, T, etc.) is expected

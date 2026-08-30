@@ -1,9 +1,12 @@
 ﻿using BitMiracle.LibTiff.Classic;
 using MxPlot.Core;
+using MxPlot.Core.IO;
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -25,7 +28,7 @@ public static class ImageJTiffHandler
     /// <exception cref="NotSupportedException">サポートされていないデータ型</exception>
     /// <exception cref="FileNotFoundException">ファイルが見つからない</exception>
     /// <exception cref="IOException">TIFF読み込みエラー</exception>
-    public static MatrixData<T> Load<T>(string filename, IProgress<int>? progress = null, CancellationToken ct = default, int maxParallelDegree = -1)
+    public static MatrixData<T> Load<T>(string filename, IProgress<int>? progress = null, CancellationToken ct = default, int maxParallelDegree = -1, LoadingMode mode = LoadingMode.InMemory)
         where T : unmanaged
     {
         ValidateDataType<T>();
@@ -37,7 +40,7 @@ public static class ImageJTiffHandler
         if (tiff == null)
             throw new IOException($"Failed to open TIFF file: {filename}");
 
-        return LoadInternal<T>(tiff, filename, maxParallelDegree, progress, ct);
+        return LoadInternal<T>(tiff, filename, maxParallelDegree, progress, mode, ct);
     }
 
     /// <summary>
@@ -101,7 +104,7 @@ public static class ImageJTiffHandler
 
     #region Load Implementation
 
-    private static MatrixData<T> LoadInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int maxParallelDegree, IProgress<int>? progress, CancellationToken ct = default)
+    private static MatrixData<T> LoadInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int maxParallelDegree, IProgress<int>? progress, LoadingMode mode, CancellationToken ct = default)
         where T : unmanaged
     {
         // 1. Validate pixel type (read from frame 0, the initial directory)
@@ -118,11 +121,32 @@ public static class ImageJTiffHandler
         // 3. ImageJ metadata (from frame 0)
         var ijMetadata = ReadImageJMetadata(tiff);
 
+        // 3b. ImageJ "packed" hyperstack quirk: ImageJ itself writes large uncompressed
+        // stacks as a single IFD (with a single strip) whose ImageDescription declares
+        // channels*slices*frames planes, and simply appends the remaining planes as raw,
+        // contiguous, fixed-stride pixel data right after that IFD's strip -- with no
+        // per-plane IFD/strip metadata at all. Detected whenever the declared plane count
+        // exceeds the actual IFD count.
+        int declaredFrameCount = ijMetadata != null ? ijMetadata.Channels * ijMetadata.Slices * ijMetadata.Frames : 0;
+        bool isPacked = directoryCount == 1 && declaredFrameCount > 1;
+        int frameCount = isPacked ? declaredFrameCount : directoryCount;
+
         // 4. Resolution (from frame 0)
         var (xResolution, yResolution) = ReadResolution(tiff);
 
-        // 5. Create MatrixData
-        var data = new MatrixData<T>(width, height, directoryCount);
+        // 5. Create MatrixData. Virtual (MMF-backed) loading is only offered for the packed
+        // layout, where the fixed-stride offset formula is already known up front with no IFD
+        // walk needed -- the general multi-IFD case isn't attempted yet (real-world multi-page
+        // ImageJ TIFFs tend to be compressed anyway, which the canVirtual gate below excludes).
+        int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
+        bool isCompressed = compression != (int)Compression.NONE;
+        LoadingMode resolvedMode = isPacked
+            ? VirtualPolicy.Resolve(mode, new FileInfo(filename).Length, frameCount, canVirtual: !isCompressed)
+            : LoadingMode.InMemory;
+
+        MatrixData<T> data = resolvedMode == LoadingMode.Virtual
+            ? LoadPackedFramesVirtual<T>(tiff, filename, width, height, frameCount)
+            : new MatrixData<T>(width, height, frameCount);
 
         // 6. Scale
         if (ijMetadata != null)
@@ -145,35 +169,48 @@ public static class ImageJTiffHandler
         //     is visible in the metadata panel but excluded from re-export.
         StoreImageDescription(tiff, data);
 
-        // 8. Compression detection: parallel is effective only for CPU-bound codecs
-        int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
-        bool isCpuBound = compression == (int)Compression.LZW
-                       || compression == (int)Compression.DEFLATE
-                       || compression == (int)Compression.ADOBE_DEFLATE;
-        bool useParallel = isCpuBound && (maxParallelDegree < 0 || maxParallelDegree > 1) && directoryCount > 1;
-
-        // 9. Load all frames
-        if (useParallel)
+        // 8/9. Load all frames (Virtual data was already fully constructed in step 5 above --
+        // nothing left to read into it here, by design; that's the point of Virtual loading).
+        if (resolvedMode == LoadingMode.Virtual)
         {
-            Debug.WriteLine($"Using parallel loading with {maxParallelDegree} threads for {directoryCount} frames (compression={compression}).");
-            // Parallel: ReadFrameDataStripped concurrently, then SetArray sequentially
-            LoadFramesParallel<T>(filename, data, width, height, directoryCount, maxParallelDegree, progress, ct);
+            Debug.WriteLine($"Using ImageJ packed single-IFD Virtual (MMF) loading for {frameCount} frames.");
+        }
+        else if (isPacked)
+        {
+            Debug.WriteLine($"Using ImageJ packed single-IFD loading for {frameCount} frames.");
+            LoadPackedFrames<T>(tiff, filename, data, width, height, frameCount, progress, ct);
         }
         else
         {
-            Debug.WriteLine($"Using sequential loading for {directoryCount} frames (compression={compression}).");
-            // Sequential: O(N) IFD traversal via SetDirectory(0) + ReadDirectory() increments
-            progress?.Report(-directoryCount);
-            tiff.SetDirectory(0);
-            for (int i = 0; i < directoryCount; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                T[] frameData = ReadFrameDataStripped<T>(tiff, width, height);
-                data.SetArray(frameData, i);
-                progress?.Report(i);
+            // parallel is effective only for CPU-bound codecs
+            bool isCpuBound = compression == (int)Compression.LZW
+                           || compression == (int)Compression.DEFLATE
+                           || compression == (int)Compression.ADOBE_DEFLATE;
+            bool useParallel = isCpuBound && (maxParallelDegree < 0 || maxParallelDegree > 1) && directoryCount > 1;
 
-                if (i < directoryCount - 1 && !tiff.ReadDirectory())
-                    throw new InvalidDataException($"Could not advance to directory {i + 1}");
+            if (useParallel)
+            {
+                Debug.WriteLine($"Using parallel loading with {maxParallelDegree} threads for {directoryCount} frames (compression={compression}).");
+                // Parallel: ReadFrameDataStripped concurrently, then SetArray sequentially
+                LoadFramesParallel<T>(filename, data, width, height, directoryCount, maxParallelDegree, progress, ct);
+            }
+            else
+            {
+                Debug.WriteLine($"Using sequential loading for {directoryCount} frames (compression={compression}).");
+                // Sequential: O(N) IFD traversal via SetDirectory(0) + ReadDirectory() increments
+                progress?.Report(-directoryCount);
+                tiff.SetDirectory(0);
+                for (int i = 0; i < directoryCount; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    T[] frameData = ReadFrameDataStripped<T>(tiff, width, height);
+                    data.SetArray(frameData, i);
+                    data.GetValueRange(i); // recalc min/max for this frame (FastMinMaxFinder, cache-hot right after the copy)
+                    progress?.Report(i);
+
+                    if (i < directoryCount - 1 && !tiff.ReadDirectory())
+                        throw new InvalidDataException($"Could not advance to directory {i + 1}");
+                }
             }
         }
 
@@ -181,8 +218,217 @@ public static class ImageJTiffHandler
         if (ijMetadata != null && ijMetadata.Hyperstack)
             SetDimensionsFromImageJ(data, ijMetadata);
 
-        progress?.Report(directoryCount);
+        progress?.Report(frameCount);
         return data;
+    }
+
+    /// <summary>
+    /// Reads frames for the ImageJ "packed" single-IFD layout: the IFD's own strip holds
+    /// only the first plane, and the remaining planes are raw, uncompressed, fixed-stride
+    /// pixel data appended directly after it in the file. LibTiff has no notion of this
+    /// (an IFD/strip only ever describes one plane), so this bypasses LibTiff's strip API
+    /// entirely and reads the pixel bytes directly via a plain <see cref="FileStream"/>.
+    /// </summary>
+    private static void LoadPackedFrames<T>(
+        BitMiracle.LibTiff.Classic.Tiff tiff, string filename, MatrixData<T> data,
+        int width, int height, int frameCount, IProgress<int>? progress, CancellationToken ct)
+        where T : unmanaged
+    {
+        var (baseOffset, frameSizeBytes) = ValidatePackedLayout(tiff, filename, width, height, frameCount);
+
+        int scanlineSize    = tiff.ScanlineSize();
+        int filePixelStride = scanlineSize / width;
+        bool bigEndian       = tiff.IsBigEndian();
+
+        progress?.Report(-frameCount);
+
+        using var stream = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20);
+        stream.Seek(baseOffset, SeekOrigin.Begin);
+
+        var buffer = new byte[frameSizeBytes];
+        for (int i = 0; i < frameCount; i++)
+        {
+            ct.ThrowIfCancellationRequested();
+            ReadExact(stream, buffer, (int)frameSizeBytes);
+
+            // Write straight into MatrixData's own pre-allocated frame buffer (GetArray also
+            // invalidates that frame's cached min/max, same as SetArray would) -- there is no
+            // separate frame array to copy in afterwards.
+            T[] dst = data.GetArray(i);
+            if (typeof(T) == typeof(byte))
+                CopyPackedFrameBytes(buffer, (byte[])(object)dst, width, height, scanlineSize, filePixelStride);
+            else if (typeof(T) == typeof(ushort))
+                CopyPackedFrameUShort(buffer, (ushort[])(object)dst, width, height, scanlineSize, filePixelStride, bigEndian);
+            else
+                throw new NotSupportedException($"Unsupported type: {typeof(T)}");
+            
+            data.GetValueRange(i); // recalc min/max for this frame
+
+            progress?.Report(i);
+        }
+    }
+
+    /// <summary>
+    /// Validates that the first IFD's strips form a contiguous, uncompressed run covering exactly
+    /// one frame, and that the file holds enough trailing raw bytes for <paramref name="frameCount"/>
+    /// packed planes. Shared by <see cref="LoadPackedFrames{T}"/> (InMemory) and
+    /// <see cref="LoadPackedFramesVirtual{T}"/> -- both build their fixed-stride offsets from the
+    /// same two numbers, just via a plain <see cref="FileStream"/> vs an MMF-backed
+    /// <see cref="VirtualStrippedFrames{T}"/>.
+    /// </summary>
+    /// <returns>The file offset of frame 0's first byte, and the byte size of one frame.</returns>
+    private static (long baseOffset, long frameSizeBytes) ValidatePackedLayout(
+        BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int width, int height, int frameCount)
+    {
+        int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
+        if (compression != (int)Compression.NONE)
+            throw new NotSupportedException(
+                "This file uses ImageJ's single-IFD packed-hyperstack layout (the IFD's ImageDescription " +
+                "declares more planes than there are IFDs), which requires uncompressed, fixed-stride pixel " +
+                $"data to locate each plane. Found compression={compression}.");
+
+        // The first IFD's own frame may itself be split into many strips (e.g. RowsPerStrip
+        // far smaller than ImageLength) -- that is ordinary TIFF strip chunking and unrelated
+        // to the packed-plane quirk. What matters is that those strips lay out the frame as a
+        // single contiguous, uncompressed run of bytes, so it can be read with the same fixed
+        // stride as every packed plane after it.
+        var stripOffsets = tiff.GetField(TiffTag.STRIPOFFSETS);
+        var stripByteCounts = tiff.GetField(TiffTag.STRIPBYTECOUNTS);
+        if (stripOffsets == null || stripOffsets.Length == 0 || stripByteCounts == null || stripByteCounts.Length == 0)
+            throw new InvalidDataException("Missing StripOffsets/StripByteCounts tag.");
+
+        // FieldValue wraps the whole tag value here (a ulong[] once a strip count > 1 forces an
+        // out-of-line array), so it must be unwrapped via TolongArray() -- ToLong() only works
+        // for single-strip files and throws an InvalidCastException otherwise.
+        long[] offsets = stripOffsets[0].TolongArray();
+        long[] byteCounts = stripByteCounts[0].TolongArray();
+        long baseOffset = offsets[0];
+
+        int scanlineSize = tiff.ScanlineSize();
+        long frameSizeBytes = (long)scanlineSize * height;
+
+        long firstFrameSpan = offsets[^1] + byteCounts[^1] - offsets[0];
+        if (firstFrameSpan != frameSizeBytes)
+            throw new NotSupportedException(
+                "ImageJ single-IFD packed-hyperstack layout requires the first IFD's strips to be a " +
+                $"contiguous, uncompressed run covering exactly one frame; found a {firstFrameSpan}-byte " +
+                $"span for a {frameSizeBytes}-byte frame.");
+
+        long available = new FileInfo(filename).Length - baseOffset;
+        if (available < frameSizeBytes * frameCount)
+            throw new InvalidDataException(
+                $"ImageJ metadata declares {frameCount} planes, but the file only holds enough raw pixel " +
+                $"data for {available / frameSizeBytes} plane(s) after the first IFD's strip.");
+
+        return (baseOffset, frameSizeBytes);
+    }
+
+    /// <summary>
+    /// Virtual (MMF-backed) counterpart of <see cref="LoadPackedFrames{T}"/>: since every packed
+    /// plane sits at a fixed stride from <c>baseOffset</c>, the whole offset table can be computed
+    /// up front with no IFD walk or pixel read at all.
+    /// </summary>
+    private static MatrixData<T> LoadPackedFramesVirtual<T>(
+        BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int width, int height, int frameCount)
+        where T : unmanaged
+    {
+        var (baseOffset, frameSizeBytes) = ValidatePackedLayout(tiff, filename, width, height, frameCount);
+
+        var offsets = new long[frameCount][];
+        var byteCounts = new long[frameCount][];
+        for (int i = 0; i < frameCount; i++)
+        {
+            offsets[i] = new[] { baseOffset + i * frameSizeBytes };
+            byteCounts[i] = new[] { frameSizeBytes };
+        }
+
+        var vsf = new VirtualStrippedFrames<T>(
+            filename, width, height, offsets, byteCounts, isYFlipped: true, isBigEndian: tiff.IsBigEndian());
+        return MatrixData<T>.CreateAsVirtualFrames(width, height, vsf);
+    }
+
+    /// <summary>
+    /// Applies the TIFF (top-left origin) -> MatrixData (bottom-left origin) Y-flip while copying
+    /// one packed byte plane, row by row in parallel (rows are independent, so this is safe).
+    /// </summary>
+    private static void CopyPackedFrameBytes(byte[] raw, byte[] dst, int width, int height, int scanlineSize, int filePixelStride)
+    {
+        if (filePixelStride == 1)
+        {
+            Parallel.For(0, height, row =>
+            {
+                int dstRow = height - 1 - row;
+                Array.Copy(raw, row * scanlineSize, dst, dstRow * width, width);
+            });
+        }
+        else
+        {
+            Parallel.For(0, height, row =>
+            {
+                int dstRow  = height - 1 - row;
+                int srcBase = row * scanlineSize;
+                int dstBase = dstRow * width;
+                for (int col = 0; col < width; col++)
+                    dst[dstBase + col] = raw[srcBase + col * filePixelStride];
+            });
+        }
+    }
+
+    /// <summary>
+    /// Same as <see cref="CopyPackedFrameBytes"/> but for 16-bit samples. When the file's samples
+    /// are tightly packed (<paramref name="filePixelStride"/> == 2) and already in host byte order,
+    /// each row is a straight memory copy; otherwise each sample is decoded via <see cref="BinaryPrimitives"/>.
+    /// </summary>
+    private static void CopyPackedFrameUShort(byte[] raw, ushort[] dst, int width, int height, int scanlineSize, int filePixelStride, bool bigEndian)
+    {
+        if (filePixelStride == 2 && bigEndian == !BitConverter.IsLittleEndian)
+        {
+            Parallel.For(0, height, row =>
+            {
+                int dstRow = height - 1 - row;
+                var srcSpan = raw.AsSpan(row * scanlineSize, width * 2);
+                var dstSpan = MemoryMarshal.Cast<ushort, byte>(dst.AsSpan(dstRow * width, width));
+                srcSpan.CopyTo(dstSpan);
+            });
+        }
+        else if (bigEndian)
+        {
+            Parallel.For(0, height, row =>
+            {
+                int dstRow  = height - 1 - row;
+                int srcBase = row * scanlineSize;
+                int dstBase = dstRow * width;
+                for (int col = 0; col < width; col++)
+                    dst[dstBase + col] = BinaryPrimitives.ReadUInt16BigEndian(raw.AsSpan(srcBase + col * filePixelStride, 2));
+            });
+        }
+        else
+        {
+            Parallel.For(0, height, row =>
+            {
+                int dstRow  = height - 1 - row;
+                int srcBase = row * scanlineSize;
+                int dstBase = dstRow * width;
+                for (int col = 0; col < width; col++)
+                    dst[dstBase + col] = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(srcBase + col * filePixelStride, 2));
+            });
+        }
+    }
+
+    /// <summary>
+    /// Reads exactly <paramref name="count"/> bytes into <paramref name="buffer"/>, looping
+    /// as needed since <see cref="Stream.Read(byte[], int, int)"/> may return short reads.
+    /// </summary>
+    private static void ReadExact(Stream stream, byte[] buffer, int count)
+    {
+        int offset = 0;
+        while (offset < count)
+        {
+            int read = stream.Read(buffer, offset, count - offset);
+            if (read <= 0)
+                throw new EndOfStreamException("Unexpected end of file while reading a packed ImageJ hyperstack plane.");
+            offset += read;
+        }
     }
 
     private static ImageJMetadata? ReadImageJMetadata(BitMiracle.LibTiff.Classic.Tiff tiff)
@@ -344,7 +590,10 @@ public static class ImageJTiffHandler
 
         // Write decoded frames sequentially to avoid shared-state races in SetArray
         for (int f = 0; f < frameCount; f++)
+        {
             data.SetArray(frames[f], f);
+            data.GetValueRange(f); // recalc min/max for this frame (FastMinMaxFinder, cache-hot right after the copy)
+        }
     }
 
     private static void SetDimensionsFromImageJ(IMatrixData data, ImageJMetadata metadata)

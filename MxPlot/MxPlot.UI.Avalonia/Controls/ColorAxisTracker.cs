@@ -11,7 +11,7 @@ using System.Collections.Generic;
 namespace MxPlot.UI.Avalonia.Controls
 {
     /// <summary>
-    /// A compact horizontal tracker for a <see cref="ColorChannel"/> axis.
+    /// A compact horizontal tracker for a <see cref="ColorAxis"/> axis.
     /// Used instead of <see cref="AxisTracker"/> when the axis supports per-channel color assignment.
     /// <para>
     /// Layout: <c>[Name] [C Mode] [🎨 Config] [  Tag  |  Tag  |  Tag  ]</c>
@@ -25,6 +25,21 @@ namespace MxPlot.UI.Avalonia.Controls
     ///   <item><b>Channel Indicator:</b> horizontal chip strip — each chip shows the tag text
     ///         with its background set to the channel's assigned ARGB color.</item>
     /// </list>
+    /// <para>
+    /// <b>Status: not wired up.</b> This control was written while the multi-channel display
+    /// design was still unsettled and was never finished: it raises <see cref="ConfigRequested"/>,
+    /// <see cref="ModeChanged"/> and <see cref="TagToggled"/> but implements no behaviour behind
+    /// them, and it cannot rename a tag despite subscribing to
+    /// <see cref="TaggedAxis.TagNameChanged"/>.
+    /// </para>
+    /// <para>
+    /// Composite mode superseded every one of its features: the composite/single toggle became the
+    /// Composite entry button on <see cref="AxisTracker"/>, the config button became the composite
+    /// settings panel, and the coloured tag chips became <see cref="BlendRecipeBar"/> rows, which
+    /// additionally carry range, gain and click-to-rename. <c>MatrixPlotter</c> therefore no longer
+    /// references this type at all. It is kept only as a record of the earlier design; anything
+    /// built on top of it should extend <see cref="BlendRecipeBar"/> instead.
+    /// </para>
     /// </summary>
     public class ColorAxisTracker : UserControl
     {
@@ -35,7 +50,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double ComponentHeight = 20;
         private const double ChipFontSize = 10;
 
-        // ── Default palette (used when ColorChannel.HasAssignedColors is false) ─
+        // ── Default palette (used when ColorAxis.HasAssignedColors is false) ─
         private static readonly Color[] DefaultPalette =
         [
             Color.FromRgb(0x44, 0x88, 0xFF),   // Blue   (DAPI)
@@ -49,7 +64,7 @@ namespace MxPlot.UI.Avalonia.Controls
         ];
 
         // ── Model ─────────────────────────────────────────────────────────────
-        private readonly ColorChannel _channel;
+        private readonly ColorAxis _channel;
 
         // ── Controls ──────────────────────────────────────────────────────────
         private readonly TextBlock _nameLabel;
@@ -62,8 +77,8 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── Public API ────────────────────────────────────────────────────────
 
-        /// <summary>The underlying <see cref="ColorChannel"/> axis.</summary>
-        public ColorChannel Channel => _channel;
+        /// <summary>The underlying <see cref="ColorAxis"/> axis.</summary>
+        public ColorAxis Channel => _channel;
 
         /// <summary>Whether the tracker is in composite display mode (all channels overlaid).</summary>
         public bool IsComposite => _modeToggle.IsChecked == true;
@@ -87,12 +102,12 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         public event EventHandler<(int Index, bool Enabled)>? TagToggled;
 
-        /// <summary>Returns the current enabled state of each tag chip (index-aligned with <see cref="ColorChannel.Tags"/>).</summary>
+        /// <summary>Returns the current enabled state of each tag chip (index-aligned with <see cref="ColorAxis.Tags"/>).</summary>
         public IReadOnlyList<bool> TagEnabled => _tagEnabled;
 
         // ── Constructor ───────────────────────────────────────────────────────
 
-        public ColorAxisTracker(ColorChannel channel)
+        public ColorAxisTracker(ColorAxis channel)
         {
             _channel = channel ?? throw new ArgumentNullException(nameof(channel));
 
@@ -185,8 +200,8 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Chip construction ─────────────────────────────────────────────────
 
         /// <summary>
-        /// Rebuilds the tag chip strip from <see cref="ColorChannel.Tags"/>
-        /// and <see cref="ColorChannel.AssignedColors"/>.
+        /// Rebuilds the tag chip strip from <see cref="ColorAxis.Tags"/>
+        /// and <see cref="ColorAxis.AssignedColors"/>.
         /// Existing toggle states are preserved across rebuilds where possible.
         /// </summary>
         private void RebuildChips()

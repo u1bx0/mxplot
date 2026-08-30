@@ -290,8 +290,10 @@
 						<MenuItem Header="Open File…"  Click="HamburgerOpenFile_Click" />
 						<Separator/>
 						<MenuItem Header="Tools">
-							<MenuItem Header="Create a linear scale…" Click="ToolsGenerateLinearScale_Click"
+							<MenuItem Header="Create a Linear Scale…" Click="ToolsGenerateLinearScale_Click"
 									  ToolTip.Tip="Creates a linear scale data."/>
+							<MenuItem Header="Create Dummy for Color-Coded Scale…" Click="ToolsGenerateColorCodedScaleData_Click"
+									  ToolTip.Tip="Creates a dummy dataset for testing color-coded scale." />	
 							<MenuItem Header="Sample 2D data…" Click="ToolsGenerate2DTestData_Click"
 									  ToolTip.Tip="Creates a sample 2D dataset and opens it."/>
 							<MenuItem Header="Sample Julia Set…" Click="ToolsGenerateJulia_Click"
@@ -388,7 +390,7 @@
 							   FontWeight="SemiBold"
 							   HorizontalAlignment="Center"
 							   Opacity="0.75"/>
-					<TextBlock Text="or open a file from the menu (&#x2630; )"
+					<TextBlock Text="or open a file from the menu ( &#x2630; )"
 							   FontSize="12"
 							   HorizontalAlignment="Center"
 							   Opacity="0.75"/>

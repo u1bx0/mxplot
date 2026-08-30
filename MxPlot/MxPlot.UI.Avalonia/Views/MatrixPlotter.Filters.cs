@@ -1,6 +1,8 @@
 ﻿using MxPlot.Core;
 using MxPlot.Core.Processing;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -33,13 +35,6 @@ namespace MxPlot.UI.Avalonia.Views
 
         private CancellationTokenSource? _filterCts;
 
-        // Fields populated in the result window when SyncSource = true
-        private MatrixPlotter? _filterSyncSourceWindow;
-        private IFilterKernel? _filterSyncKernel;
-        private EventHandler? _filterSyncRefreshedHandler;
-        private EventHandler? _filterSyncActiveIndexHandler;
-        private CancellationTokenSource? _filterSyncCts;
-
         // ── Entry point ───────────────────────────────────────────────────────
 
         private Task InvokeMedianFilterAsync()
@@ -69,19 +64,24 @@ namespace MxPlot.UI.Avalonia.Views
             bool isMultiFrame = _currentData.FrameCount > 1;
             bool singleFrame = !isMultiFrame || p.ThisFrameOnly;
             int frameIdx = _currentData.ActiveIndex;
+            // Composite + This Frame Only: process every channel at the current position
+            // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
+            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
 
             string kernelLabel = KernelLabel(p.Kernel);
-            string detailSuffix = singleFrame ? $" (frame {frameIdx})" : "";
+            string detailSuffix = compositeCube != null
+                ? $" ([{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}])"
+                : singleFrame ? $" (frame {frameIdx})" : "";
 
             IMatrixData result;
 
             if (isMultiFrame && !singleFrame)
             {
                 // All frames — stepped progress with cancellation
-                var progress = BeginProgress($"Applying {kernelLabel}…", blockInput: true);
                 _filterCts?.Dispose();
                 _filterCts = new CancellationTokenSource();
                 var ct = _filterCts.Token;
+                var progress = BeginProgress($"Applying {kernelLabel}…", blockInput: true, _filterCts);
                 try
                 {
                     result = await Task.Run(() =>
@@ -93,18 +93,20 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                // Single frame (or ThisFrameOnly) — marquee progress
+                // Single frame (or ThisFrameOnly, or Composite channel-cube) — marquee progress
                 BeginProgress($"Applying {kernelLabel}…", blockInput: true);
                 try
                 {
-                    result = singleFrame && isMultiFrame
-                        ? await Task.Run(() =>
-                        {
-                            var single = _currentData.Apply(new SliceAtOperation(frameIdx));
-                            return single.Apply(new SpatialFilterOperation(p.Kernel));
-                        })
-                        : await Task.Run(() =>
-                            _currentData.Apply(new SpatialFilterOperation(p.Kernel)));
+                    result = compositeCube != null
+                        ? await Task.Run(() => compositeCube.Value.Cube.Apply(new SpatialFilterOperation(p.Kernel)))
+                        : singleFrame && isMultiFrame
+                            ? await Task.Run(() =>
+                            {
+                                var single = _currentData.Apply(new SliceAtOperation(frameIdx));
+                                return single.Apply(new SpatialFilterOperation(p.Kernel));
+                            })
+                            : await Task.Run(() =>
+                                _currentData.Apply(new SpatialFilterOperation(p.Kernel)));
                 }
                 catch (Exception ex) { await ShowMessageDialogAsync("Filter Failed", ex.Message); return; }
                 finally { EndProgress(); }
@@ -119,12 +121,14 @@ namespace MxPlot.UI.Avalonia.Views
             if (p.SyncSource && singleFrame)
             {
                 resultPlotter = CreateLinked(result, _view.Lut, resultTitle, linkRefresh: false);
+                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
                 resultPlotter.Show();
-                resultPlotter.StartFilterSync(this, p.Kernel);
+                StartFilterSync(resultPlotter, this, p.Kernel);
             }
             else
             {
                 resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
+                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
                 resultPlotter.Show();
             }
         }
@@ -132,92 +136,30 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Sync source data ──────────────────────────────────────────────────
 
         /// <summary>
-        /// Attaches live-update sync to this (result) window.
-        /// Subscribes to <paramref name="sourceWindow"/>.Refreshed (data-content changes)
-        /// and to the source MatrixData.ActiveIndexChanged (frame-slider navigation).
-        /// Closes this window when the source closes.
+        /// Keeps <paramref name="follower"/> showing <paramref name="kernel"/> applied to whatever
+        /// <paramref name="source"/> currently displays.
         /// </summary>
-        internal void StartFilterSync(MatrixPlotter sourceWindow, IFilterKernel kernel)
+        private static void StartFilterSync(MatrixPlotter follower, MatrixPlotter source, IFilterKernel kernel)
         {
-            StopFilterSync();
-
-            _filterSyncSourceWindow = sourceWindow;
-            _filterSyncKernel = kernel;
-
-            _filterSyncRefreshedHandler = (_, _) => _ = FireSyncUpdateAsync();
-            sourceWindow.Refreshed += _filterSyncRefreshedHandler;
-
-            // Also track frame-slider navigation on multi-frame source data
-            if (sourceWindow.MatrixData is { FrameCount: > 1 } md)
+            _ = new LinkedView(follower, source, (src, ct) =>
             {
-                _filterSyncActiveIndexHandler = (_, _) => _ = FireSyncUpdateAsync();
-                md.ActiveIndexChanged += _filterSyncActiveIndexHandler;
-            }
+                var sourceData = src.MatrixData;
+                if (sourceData == null) return Task.FromResult<LinkedViewUpdate?>(null);
 
-            // Close result when source closes
-            sourceWindow.Closed += OnFilterSyncSourceClosed;
-            Closed += OnFilterSyncWindowClosed;
-        }
+                // Composite-aware: while the source is in Composite mode, take the whole
+                // Channel-axis cube instead of a single-frame slice, so the follower keeps
+                // blending every channel rather than collapsing to channel 0.
+                var compositeCube = src.TryExtractCompositeFrameCube(sourceData);
+                IMatrixData opSource = compositeCube?.Cube
+                    ?? sourceData.Apply(new SliceAtOperation(sourceData.ActiveIndex));
 
-        private async Task FireSyncUpdateAsync()
-        {
-            // Cancel any previous in-flight computation so only the latest frame wins
-            _filterSyncCts?.Cancel();
-            _filterSyncCts?.Dispose();
-            _filterSyncCts = new CancellationTokenSource();
-            var ct = _filterSyncCts.Token;
-
-            var sourceData = _filterSyncSourceWindow?.MatrixData;
-            if (sourceData == null || _filterSyncKernel == null) return;
-            int frameIdx = sourceData.ActiveIndex;
-
-            IMatrixData updated;
-            try
-            {
-                updated = await Task.Run(() =>
+                return Task.Run<LinkedViewUpdate?>(() =>
                 {
-                    var single = sourceData.Apply(new SliceAtOperation(frameIdx));
-                    return single.Apply(new SpatialFilterOperation(_filterSyncKernel, CancellationToken: ct));
+                    var updated = opSource.Apply(new SpatialFilterOperation(kernel, CancellationToken: ct));
+                    updated.CopyPropertiesFrom(sourceData, copyScale: true, copyDimensions: false);
+                    return new LinkedViewUpdate(updated, compositeCube?.ChannelAxisName);
                 }, ct);
-            }
-            catch (OperationCanceledException) { return; }
-            catch { return; }
-
-            if (ct.IsCancellationRequested) return;
-
-            updated.CopyPropertiesFrom(sourceData, copyScale: true, copyDimensions: false);
-            SetMatrixData(updated);
-        }
-
-        private void StopFilterSync()
-        {
-            _filterSyncCts?.Cancel();
-            _filterSyncCts?.Dispose();
-            _filterSyncCts = null;
-
-            if (_filterSyncSourceWindow != null)
-            {
-                if (_filterSyncRefreshedHandler != null)
-                    _filterSyncSourceWindow.Refreshed -= _filterSyncRefreshedHandler;
-
-                if (_filterSyncActiveIndexHandler != null && _filterSyncSourceWindow.MatrixData != null)
-                    _filterSyncSourceWindow.MatrixData.ActiveIndexChanged -= _filterSyncActiveIndexHandler;
-
-                _filterSyncSourceWindow.Closed -= OnFilterSyncSourceClosed;
-            }
-
-            _filterSyncSourceWindow = null;
-            _filterSyncKernel = null;
-            _filterSyncRefreshedHandler = null;
-            _filterSyncActiveIndexHandler = null;
-        }
-
-        private void OnFilterSyncSourceClosed(object? sender, EventArgs e) => Close();
-
-        private void OnFilterSyncWindowClosed(object? sender, EventArgs e)
-        {
-            StopFilterSync();
-            Closed -= OnFilterSyncWindowClosed;
+            });
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────

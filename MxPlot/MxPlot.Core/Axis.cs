@@ -18,7 +18,7 @@ namespace MxPlot.Core
     [JsonDerivedType(typeof(Axis), "base")]
     [JsonDerivedType(typeof(FovAxis), "fov")]
     [JsonDerivedType(typeof(TaggedAxis), "tagged")]
-    [JsonDerivedType(typeof(ColorChannel), "colored")]
+    [JsonDerivedType(typeof(ColorAxis), "colored")]
     public class Axis : ICloneable
     {
 
@@ -270,32 +270,30 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// DeepCopy of axis[] without its index (position)
-        ///
+        /// DeepCopy of axis[] without its index (position).
         /// </summary>
+        /// <remarks>
+        /// Goes through each axis's own (virtual, covariant-return) <see cref="Clone"/> override
+        /// rather than re-implementing per-type construction here, so a <see cref="TaggedAxis"/> or
+        /// <see cref="ColorAxis"/> keeps its tags/colours/wavelengths through every path that
+        /// routes through this method - <c>Duplicate()</c>/<c>Clone()</c>, <c>CopyPropertiesFrom</c>,
+        /// and the dimensional operators. This used to hand-roll per-type construction instead,
+        /// special-casing only <see cref="FovAxis"/> and falling back to a plain <see cref="Axis"/>
+        /// for everything else - silently downgrading a promoted Channel axis back to untagged on
+        /// every duplicate, which then made the next Composite-mode entry think the axis needed
+        /// re-promoting (see <c>PromoteChannelAxisIfNeeded</c> in MxPlot.UI.Avalonia), tearing down
+        /// and rebuilding orthogonal views that had no reason to reset.
+        /// </remarks>
         /// <param name="axes"></param>
         /// <returns></returns>
         public static Axis[] CreateFrom(Axis[] axes)
         {
+            // Clone() is guaranteed to copy configuration (incl. Unit) but never the current
+            // Index - see its doc comment - so nothing further is needed here to honor
+            // "without its index".
             Axis[] ret = new Axis[axes.Length];
-            if (ret.Length == 0)
-                return ret;
-
-            int i = 0;
-            foreach (Axis axis in axes)
-            {
-                if (axis is FovAxis fov)
-                {
-                    var grid = fov.TileLayout;
-                    ret[i] = new FovAxis(fov.Origins.ToList(), grid.X, grid.Y, grid.Z);
-                }
-                else
-                {
-                    ret[i] = new Axis(axis.Count, axis.Min, axis.Max, axis.Name);
-                }
-                ret[i].Unit = axis.Unit;
-                i++;
-            }
+            for (int i = 0; i < axes.Length; i++)
+                ret[i] = axes[i].Clone();
             return ret;
         }
 
@@ -392,6 +390,14 @@ namespace MxPlot.Core
         }
         public override string ToString() => Name;
 
+        /// <summary>
+        /// Deep-copies this axis's configuration (count/range, name, unit, index-based flag), but
+        /// not its current <see cref="Index"/> - callers that want the position too must set it on
+        /// the result themselves. Overrides (<see cref="TaggedAxis"/>, <see cref="ColorAxis"/>,
+        /// <see cref="FovAxis"/>) must preserve this: <see cref="CreateFrom"/> and
+        /// <see cref="DimensionStructure.CreateAxesWithout"/> both clone axes wholesale and rely on
+        /// every subtype resetting <c>Index</c> the same way.
+        /// </summary>
         public virtual Axis Clone()
         {
             var axis = new Axis(this.Count, this.Min, this.Max, this.Name, this.Unit, this.IsIndexBased);
@@ -401,6 +407,36 @@ namespace MxPlot.Core
         object ICloneable.Clone()
         {
             return this.Clone();
+        }
+
+        /// <summary>
+        /// Returns a new axis covering the sub-range <c>[start, start + count)</c> of this axis's
+        /// positions - the axis-level counterpart of taking a contiguous slice of frames along it
+        /// (see <c>DimensionalOperator.Substack</c>). Min/Max narrow to match; <see cref="Index"/>
+        /// resets, same as <see cref="Clone"/>.
+        /// </summary>
+        /// <remarks>
+        /// The base implementation degrades to a plain <see cref="Axis"/>. <see cref="TaggedAxis"/>
+        /// and <see cref="ColorAxis"/> override this to narrow their per-position identity (tags,
+        /// colours, wavelengths) to the same sub-range instead of dropping it. <see cref="FovAxis"/>
+        /// deliberately does not override it: an arbitrary contiguous index range is not generally a
+        /// valid tile rectangle, so slicing a FOV axis needs its own dedicated operation (future
+        /// work) - degrading to a plain axis is the intended fallback here in the meantime, and
+        /// callers that care (e.g. the Substack UI) warn before taking it.
+        /// </remarks>
+        public virtual Axis Slice(int start, int count)
+        {
+            if (start < 0 || count <= 0 || start + count > Count)
+                throw new ArgumentOutOfRangeException(nameof(start),
+                    $"[{start}, {start + count}) is out of range for an axis of Count={Count}.");
+
+            double newMin = Min, newMax = Max;
+            if (Step != 0)
+            {
+                newMin = Min + start * Step;
+                newMax = newMin + (count - 1) * Step;
+            }
+            return new Axis(count, newMin, newMax, Name, Unit, IsIndexBased);
         }
     }
 

@@ -5,6 +5,7 @@ using System.Linq;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace MxPlot.Core
 {
@@ -83,6 +84,30 @@ namespace MxPlot.Core
             where T : IMatrixData
         {
             return (T)target.Clone(forceInMemory);
+        }
+
+        /// <summary>
+        /// Same as <see cref="Duplicate{T}(T, bool)"/>, with progress reporting and cancellation
+        /// support -- see <see cref="IMatrixData.Clone(bool, IProgress{int}, CancellationToken)"/>.
+        /// Prefer this overload for large or Virtual-backed datasets, where the copy can take a
+        /// noticeable amount of time (e.g. UI code driving a Cancel button); the bare
+        /// <see cref="Duplicate{T}(T, bool)"/> keeps the implicit "this is cheap" cloning convention
+        /// for everywhere else.
+        /// </summary>
+        /// <param name="target">The matrix data instance to duplicate.</param>
+        /// <param name="forceInMemory">Same meaning as <see cref="Duplicate{T}(T, bool)"/>.</param>
+        /// <param name="progress">Optional progress reporter; reports -N once (N = FrameCount), then 0..N-1 as frames are copied.</param>
+        /// <param name="cancellationToken">Checked between frames.</param>
+        /// <example>
+        /// <code>
+        /// var progress = plotter.BeginProgress("Duplicating…", blockInput: true, cts);
+        /// var copy = await Task.Run(() => data.Duplicate(forceInMemory: false, progress, cts.Token));
+        /// </code>
+        /// </example>
+        public static T Duplicate<T>(this T target, bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)
+            where T : IMatrixData
+        {
+            return (T)target.Clone(forceInMemory, progress, cancellationToken);
         }
 
         /// <summary>

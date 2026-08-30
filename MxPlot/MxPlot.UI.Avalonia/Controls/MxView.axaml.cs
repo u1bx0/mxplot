@@ -16,6 +16,7 @@ using MxPlot.UI.Avalonia.Rendering;
 using MxPlot.UI.Avalonia.Views;
 using System.IO;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
@@ -59,6 +60,10 @@ namespace MxPlot.UI.Avalonia.Controls
             AvaloniaProperty.Register<MxView, int[]?>(
                 nameof(CompositeFrameIndices));
 
+        public static readonly StyledProperty<ColorCodedRenderInfo?> ColorCodedInfoProperty =
+            AvaloniaProperty.Register<MxView, ColorCodedRenderInfo?>(
+                nameof(ColorCodedInfo));
+
         public bool IsFixedRange { get => GetValue(IsFixedRangeProperty); set => SetValue(IsFixedRangeProperty, value); }
         public double FixedMin { get => GetValue(FixedMinProperty); set => SetValue(FixedMinProperty, value); }
         public double FixedMax { get => GetValue(FixedMaxProperty); set => SetValue(FixedMaxProperty, value); }
@@ -85,6 +90,11 @@ namespace MxPlot.UI.Avalonia.Controls
             get => GetValue(CompositeFrameIndicesProperty);
             set => SetValue(CompositeFrameIndicesProperty, value);
         }
+        public ColorCodedRenderInfo? ColorCodedInfo
+        {
+            get => GetValue(ColorCodedInfoProperty);
+            set => SetValue(ColorCodedInfoProperty, value);
+        }
 
         /// <summary>
         /// Gets or sets the display mode for Complex-valued matrix data.
@@ -110,6 +120,44 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </para>
         /// </summary>
         public event EventHandler<IMatrixData?>? MatrixDataChanged;
+
+        /// <summary>
+        /// Raised on the UI thread whenever one of a curated set of rendering-affecting
+        /// properties changes: <see cref="Lut"/>, <see cref="IsFixedRange"/>,
+        /// <see cref="FixedMin"/>, <see cref="FixedMax"/>, <see cref="FrameIndex"/>,
+        /// <see cref="IsInvertedColor"/>, <see cref="LutDepth"/>
+        /// (see <see cref="s_renderingProperties"/>).
+        /// <para>
+        /// <see cref="MatrixPlotter"/> subscribes to this so that setting e.g.
+        /// <c>plotter.MainView.Lut = value</c> directly is reflected back into
+        /// <see cref="MatrixPlotter.ViewModel"/> and UI chrome, the same way
+        /// <see cref="MatrixDataChanged"/> already does for <see cref="MatrixData"/>.
+        /// </para>
+        /// </summary>
+        public event EventHandler<AvaloniaPropertyChangedEventArgs>? RenderingPropertyChanged;
+
+        /// <summary>
+        /// The subset of <see cref="AvaloniaProperty"/> declarations that raise
+        /// <see cref="RenderingPropertyChanged"/> from <see cref="OnPropertyChanged"/>.
+        /// Add a property here (O(1) cost) to extend external-control sync to it.
+        /// <para>
+        /// Populated in the static constructor rather than inline: this field is declared
+        /// before <see cref="LutProperty"/> in source order, and C# initializes static fields
+        /// top-to-bottom, so an inline initializer here would capture <c>null</c> for
+        /// <see cref="LutProperty"/>. A static constructor always runs after every static
+        /// field initializer in the type, regardless of declaration order.
+        /// </para>
+        /// </summary>
+        private static readonly HashSet<AvaloniaProperty> s_renderingProperties;
+
+        static MxView()
+        {
+            s_renderingProperties = new HashSet<AvaloniaProperty>
+            {
+                LutProperty, IsFixedRangeProperty, FixedMinProperty, FixedMaxProperty, FrameIndexProperty,
+                IsInvertedColorProperty, LutDepthProperty,
+            };
+        }
 
         /// <summary>Raised after content is successfully copied to the clipboard via Ctrl+C.</summary>
         public event EventHandler<string>? CopiedToClipboard;
@@ -307,13 +355,13 @@ namespace MxPlot.UI.Avalonia.Controls
         public event EventHandler? ScrollStateChanged;
 
         /// <summary>
-        /// Fired whenever the view's display state changes in a way that may affect overlay button
+        /// Fired whenever the viewport changes in a way that may affect overlay button
         /// visibility: zoom/pan/resize (<see cref="ScrollStateChanged"/>), bitmap rebuild
         /// (<see cref="BitmapRefreshed"/>), or scrollbar visibility change after cross-view sync
         /// (<see cref="ApplyZoomAndTrans"/>). <see cref="OrthogonalPanel"/> subscribes to this
         /// single event instead of maintaining three separate subscriptions per view.
         /// </summary>
-        internal event EventHandler? ViewDisplayStateChanged;
+        internal event EventHandler? ViewportChanged;
 
         // ── Busy indicator ────────────────────────────────────────────────────
 
@@ -555,9 +603,9 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 SyncScrollBars();
                 ScrollStateChanged?.Invoke(this, EventArgs.Empty);
-                ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
+                ViewportChanged?.Invoke(this, EventArgs.Empty);
             };
-            _surface.BitmapRefreshed += (_, _) => ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
+            _surface.BitmapRefreshed += (_, _) => ViewportChanged?.Invoke(this, EventArgs.Empty);
             _surface.AutoRangeComputed += (_, args) => AutoRangeComputed?.Invoke(this, args);
 
             // Scrollbar → surface
@@ -609,6 +657,10 @@ namespace MxPlot.UI.Avalonia.Controls
             else if (change.Property == CompositeRecipesProperty) _surface.CompositeRecipes = CompositeRecipes;
             else if (change.Property == CompositeBlendModeProperty) _surface.CompositeBlendMode = CompositeBlendMode;
             else if (change.Property == CompositeFrameIndicesProperty) _surface.CompositeFrameIndices = CompositeFrameIndices;
+            else if (change.Property == ColorCodedInfoProperty) _surface.ColorCodedInfo = ColorCodedInfo;
+
+            if (s_renderingProperties.Contains(change.Property))
+                RenderingPropertyChanged?.Invoke(this, change);
         }
 
         // ── Scrollbar synchronisation ─────────────────────────────────────────
@@ -652,7 +704,7 @@ namespace MxPlot.UI.Avalonia.Controls
             }
             finally { _syncingScrollBars = false; }
             if (_hScrollBar.IsVisible != prevShowH || _vScrollBar.IsVisible != prevShowV)
-                ViewDisplayStateChanged?.Invoke(this, EventArgs.Empty);
+                ViewportChanged?.Invoke(this, EventArgs.Empty);
         }
 
         // ── Public helpers ────────────────────────────────────────────────────
@@ -667,10 +719,27 @@ namespace MxPlot.UI.Avalonia.Controls
         internal void InvalidateSurface() => _surface.InvalidateVisual();
 
         /// <summary>
+        /// Fired at the top of <see cref="Refresh"/>, before the bitmap is rebuilt. Distinct from
+        /// <see cref="BitmapRefreshed"/> (which also fires for routine property-driven repaints such
+        /// as a LUT or range change): this event fires only when <see cref="Refresh"/> itself — the
+        /// public "pixel values changed externally" entry point — is called. <see cref="MxView"/> has
+        /// no way to know why <see cref="Refresh"/> was called (only that it was), so this signals
+        /// exactly that and nothing more; an owner that embeds <see cref="MxView"/> as an internal
+        /// component (e.g. <see cref="MxPlot.UI.Avalonia.Views.MatrixPlotter"/>) can subscribe to
+        /// react even when <see cref="Refresh"/> is invoked directly on this control rather than
+        /// through the owner.
+        /// </summary>
+        public event EventHandler? RefreshRequested;
+
+        /// <summary>
         /// Rebuilds the bitmap from the current <see cref="MatrixData"/> pixel values and redraws.
         /// Call this after modifying data values in-place (e.g. after writing new samples into the array).
         /// </summary>
-        public void Refresh() => _surface.RebuildAndInvalidate();
+        public void Refresh()
+        {
+            RefreshRequested?.Invoke(this, EventArgs.Empty);
+            _surface.RebuildAndInvalidate();
+        }
 
         /// <summary>
         /// Applies zoom and translation directly for cross-view sync.
@@ -965,7 +1034,18 @@ namespace MxPlot.UI.Avalonia.Controls
             overlayMenu.Items.Add(MakeItem("Add Rectangle", () => OverlayManager.StartCreating(new RectObject()), MenuIcons.Plus));
             overlayMenu.Items.Add(MakeItem("Add Oval", () => OverlayManager.StartCreating(new OvalObject()), MenuIcons.Plus));
             overlayMenu.Items.Add(MakeItem("Add Target", () => OverlayManager.StartCreating(new TargetingObject()), MenuIcons.Plus));
-            overlayMenu.Items.Add(MakeItem("Add Text", () => OverlayManager.StartCreating(new TextObject()), MenuIcons.Plus));
+            overlayMenu.Items.Add(MakeItem("Add Text", () =>
+            {
+                // TextObject.FontSize is in data-pixel units (ScaleFontWithZoom ties it to the
+                // image, not the screen), so a fixed default reads as tiny on a large image and
+                // oversized on a small one. Scale the initial size to the image instead -- 8% of
+                // the shorter dimension (rounded to a whole pixel), floored so a very small image
+                // doesn't get illegible text.
+                var text = new TextObject { ShowBorder = false };
+                if (MatrixData is { } md)
+                    text.FontSize = Math.Max(6.0, Math.Round(0.08 * Math.Min(md.XCount, md.YCount)));
+                OverlayManager.StartCreating(text);
+            }, MenuIcons.Plus));
             overlayMenu.Items.Add(MakeItem("Select Area", () => OverlayManager.StartCreating(new SelectionRect()), MenuIcons.SelectRect));
             overlayMenu.Items.Add(new Separator());
             overlayMenu.Items.Add(MakeItem("Paste", () => OverlayManager.PasteOverlays(), MenuIcons.Paste));

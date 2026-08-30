@@ -162,9 +162,9 @@ public class ImageJMetadata
                     case "channels": metadata.Channels = int.Parse(value); break;
                     case "slices": metadata.Slices = int.Parse(value); break;
                     case "frames": metadata.Frames = int.Parse(value); break;
-                    case "unit": metadata.Unit = value; break;
-                    case "yunit": metadata.YUnit = value; break;
-                    case "zunit": metadata.ZUnit = value; break;
+                    case "unit": metadata.Unit = UnescapeJavaUnicode(value); break;
+                    case "yunit": metadata.YUnit = UnescapeJavaUnicode(value); break;
+                    case "zunit": metadata.ZUnit = UnescapeJavaUnicode(value); break;
                     case "xorigin": metadata.XOrigin = double.Parse(value); break;
                     case "yorigin": metadata.YOrigin = double.Parse(value); break;
                     case "zorigin": metadata.ZOrigin = double.Parse(value); break;
@@ -175,5 +175,32 @@ public class ImageJMetadata
         }
         
         return metadata;
+    }
+
+    /// <summary>
+    /// Decodes Java <c>Properties</c>-style <c>\uXXXX</c> escapes (the "native2ascii" convention
+    /// ImageJ uses when serializing non-ASCII characters into the ASCII-only TIFF ImageDescription
+    /// tag -- e.g. the micro sign in "unit=micron" is written as the literal 6 characters
+    /// <c>µ</c>, not as an encoded byte sequence). Left untouched if no such escape is present.
+    /// </summary>
+    private static string UnescapeJavaUnicode(string value)
+    {
+        if (!value.Contains("\\u")) return value;
+
+        var sb = new StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            if (value[i] == '\\' && i + 5 < value.Length && value[i + 1] == 'u'
+                && ushort.TryParse(value.AsSpan(i + 2, 4), System.Globalization.NumberStyles.HexNumber, null, out ushort code))
+            {
+                sb.Append((char)code);
+                i += 5;
+            }
+            else
+            {
+                sb.Append(value[i]);
+            }
+        }
+        return sb.ToString();
     }
 }

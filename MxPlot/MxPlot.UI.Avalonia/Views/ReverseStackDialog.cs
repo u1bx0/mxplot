@@ -18,13 +18,13 @@ namespace MxPlot.UI.Avalonia.Views
             string? AxisName,
             bool ReplaceData);
 
-        internal static Task<ReverseStackParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes)
+        internal static Task<ReverseStackParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false)
         {
-            var dlg = new ReverseStackDialog(axes);
+            var dlg = new ReverseStackDialog(axes, isLinkWindow);
             return dlg.ShowDialog<ReverseStackParameters?>(owner);
         }
 
-        private ReverseStackDialog(IReadOnlyList<Axis> axes) : base("Reverse Stack")
+        private ReverseStackDialog(IReadOnlyList<Axis> axes, bool isLinkWindow) : base("Reverse Stack", isLinkWindow: isLinkWindow)
         {
             const double LW = 80;
 

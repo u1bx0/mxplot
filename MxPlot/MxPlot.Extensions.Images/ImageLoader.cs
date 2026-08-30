@@ -28,6 +28,27 @@ namespace MxPlot.Extensions.Images
         /// Loads an image from the specified path and decomposes it into separate channels using SkiaSharp.
         /// </summary>
         public static DecomposedData LoadAsDecomposedData(string path, bool toGrayscale = false, bool flipY = true)
+            => Decompose(path, toGrayscale ? BitmapReadMode.GrayScale : BitmapReadMode.RGBDecomposed, flipY);
+
+        /// <summary>
+        /// Returns <c>true</c> when every pixel satisfies R == G == B, i.e. the image carries no
+        /// colour information regardless of the format it was encoded in.
+        /// </summary>
+        /// <remarks>
+        /// SkiaSharp 3.x exposes no encoded-colour-type information, so the decoded pixels are the
+        /// only reliable source. A colour image bails out on its first coloured pixel, which is
+        /// almost always immediate; only a genuinely gray image pays for a full pass, and that is a
+        /// single cheap scan over memory that has just been written.
+        /// </remarks>
+        private static bool IsMonochrome(ReadOnlySpan<SKColor> pixels)
+        {
+            foreach (var c in pixels)
+                if (c.Red != c.Green || c.Green != c.Blue)
+                    return false;
+            return true;
+        }
+
+        private static DecomposedData Decompose(string path, BitmapReadMode mode, bool flipY = true)
         {
             if (!File.Exists(path))
                 throw new FileNotFoundException($"No such file: {path}");
@@ -46,6 +67,13 @@ namespace MxPlot.Extensions.Images
             // SkiaSharpのピクセルデータに直接アクセス (ReadOnlySpan)
             // デフォルトでは SKColorType.Rgba8888 または Bgra8888
             ReadOnlySpan<SKColor> pixels = bitmap.Pixels;
+
+            bool toGrayscale = mode switch
+            {
+                BitmapReadMode.GrayScale => true,
+                BitmapReadMode.RGBDecomposed => false,
+                _ => IsMonochrome(pixels),
+            };
 
             if (toGrayscale)
             {
@@ -84,7 +112,20 @@ namespace MxPlot.Extensions.Images
             }
         }
 
-        public static MatrixData<T> LoadImage<T>(string path, bool toGrayscale = false, double normalizationDivisor = 1.0) where T: unmanaged
+        public static MatrixData<T> LoadImage<T>(string path, bool toGrayscale = false, double normalizationDivisor = 1.0) where T : unmanaged
+            => LoadImage<T>(path,
+                            toGrayscale ? BitmapReadMode.GrayScale : BitmapReadMode.RGBDecomposed,
+                            normalizationDivisor);
+
+        /// <summary>
+        /// Loads an image using an explicit <see cref="BitmapReadMode"/>.
+        /// </summary>
+        /// <remarks>
+        /// A three-channel result gets a proper <see cref="ColorAxis"/> axis rather than the
+        /// generic "Frame" axis <see cref="DimensionStructure"/> would otherwise invent, which is
+        /// what lets the viewer recognise it as a colour image.
+        /// </remarks>
+        public static MatrixData<T> LoadImage<T>(string path, BitmapReadMode mode, double normalizationDivisor = 1.0) where T: unmanaged
         {
             if (!(typeof(T) == typeof(byte) || typeof(T) == typeof(float) ||
                     typeof(T) == typeof(double) || typeof(T) == typeof(int) ||
@@ -93,10 +134,11 @@ namespace MxPlot.Extensions.Images
                 throw new NotSupportedException($"{typeof(T).Name} is not supported.");
             }
 
-            var ret = LoadAsDecomposedData(path, toGrayscale);
+            var ret = Decompose(path, mode);
+            MatrixData<T> md;
             if (typeof(T) == typeof(byte) && normalizationDivisor == 1.0) //No conversion needed, just wrap the byte arrays in MatrixData<byte>
             {
-                return (MatrixData<T>)(object)new MatrixData<byte>(ret.Width, ret.Height, ret.Channels);
+                md = (MatrixData<T>)(object)new MatrixData<byte>(ret.Width, ret.Height, ret.Channels);
             }
             else
             {
@@ -130,13 +172,28 @@ namespace MxPlot.Extensions.Images
                         dst.Add(destination);
                     }
                 }
-                return new MatrixData<T>(ret.Width, ret.Height, dst);
+                md = new MatrixData<T>(ret.Width, ret.Height, dst);
             }
+
+            if (ret.ChannelCount == 3)
+                md.DefineDimensions(ColorAxis.CreateRgb());
+
+            return md;
         }
 
         public enum BitmapReadMode
         {
+            /// <summary>
+            /// Decides per image: sources whose pixels are all R == G == B load as a single
+            /// grayscale channel, everything else is decomposed into R/G/B. This is the default —
+            /// it keeps grayscale sources cheap while letting colour images arrive as real channels.
+            /// </summary>
+            Auto,
+
+            /// <summary>Always collapse to one channel using Rec.709 luma.</summary>
             GrayScale,
+
+            /// <summary>Always decompose into three R/G/B channels, even for a gray source.</summary>
             RGBDecomposed
         }
 
@@ -158,9 +215,9 @@ namespace MxPlot.Extensions.Images
             public double NormalizationDivisor { get; set; } = 1.0;
 
             /// <summary>
-            /// Gets or sets the mode used when reading bitmap images. GrayScale mode will convert the image to grayscale, while RGBDecomposed will keep the RGB channels separate. Default is GrayScale.
+            /// Gets or sets the mode used when reading bitmap images. GrayScale mode will convert the image to grayscale, while RGBDecomposed will keep the RGB channels separate. Default is Auto, which picks between the two by inspecting the decoded pixels.
             /// </summary>
-            public BitmapReadMode Mode { get; set; } = BitmapReadMode.GrayScale;
+            public BitmapReadMode Mode { get; set; } = BitmapReadMode.Auto;
 
             public CancellationToken CancellationToken { get; set; }
 
@@ -190,12 +247,12 @@ namespace MxPlot.Extensions.Images
             /// contain any pixel data.</returns>
             public MatrixData<T> Read<T>(string filePath) where T : unmanaged
             {
-                return LoadImage<T>(filePath, Mode == BitmapReadMode.GrayScale, NormalizationDivisor);
+                return LoadImage<T>(filePath, Mode, NormalizationDivisor);
             }
 
             public IMatrixData Read(string path)
             {
-                return LoadImage<byte>(path, Mode == BitmapReadMode.GrayScale, NormalizationDivisor);
+                return LoadImage<byte>(path, Mode, NormalizationDivisor);
             }
         }
     }

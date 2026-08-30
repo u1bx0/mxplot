@@ -193,8 +193,8 @@ namespace MxPlot.UI.Avalonia.Actions
 
                 if (ctx.OrthoPanel != null && ctx.DepthAxisName != null && ctx.Data != null)
                 {
-                    int zCount = ctx.Data.Axes.FirstOrDefault(a => a.Name == ctx.DepthAxisName)?.Count ?? 1;
-                    bool zAxisMatches = ctx.DepthAxisName == _followerZAxisName;
+                    int zCount = ctx.Data.Axes.FindAxis(ctx.DepthAxisName)?.Count ?? 1;
+                    bool zAxisMatches = string.Equals(ctx.DepthAxisName, _followerZAxisName, StringComparison.OrdinalIgnoreCase);
                     int displayStart = zAxisMatches ? _followerZStart : 0;
                     int displayCount = zAxisMatches ? (_followerZCount > 0 ? _followerZCount : zCount) : zCount;
                     BuildSideRoisFollower(ctx.Data, zCount, displayStart, displayCount);
@@ -225,7 +225,7 @@ namespace MxPlot.UI.Avalonia.Actions
 
                 if (ctx.OrthoPanel != null && ctx.DepthAxisName != null && ctx.Data != null)
                 {
-                    int zCount = ctx.Data.Axes.FirstOrDefault(a => a.Name == ctx.DepthAxisName)?.Count ?? 1;
+                    int zCount = ctx.Data.Axes.FindAxis(ctx.DepthAxisName)?.Count ?? 1;
                     BuildSideRois(ctx.Data, zCount);
                     ctx.OrthoPanel.BottomView.OverlayManager.AddObject(_xzRoi!);
                     ctx.OrthoPanel.RightView.OverlayManager.AddObject(_zyRoi!);
@@ -318,7 +318,7 @@ namespace MxPlot.UI.Avalonia.Actions
             // OrthoPanel is now available but side ROIs don't exist yet — create them.
             if (_xzRoi == null && _zyRoi == null && _role == CropRole.Leader)
             {
-                int zCount = data.Axes.FirstOrDefault(a => a.Name == newContext.DepthAxisName)?.Count ?? 1;
+                int zCount = data.Axes.FindAxis(newContext.DepthAxisName)?.Count ?? 1;
                 BuildSideRois(data, zCount);
                 newContext.OrthoPanel.BottomView.OverlayManager.AddObject(_xzRoi!);
                 newContext.OrthoPanel.RightView.OverlayManager.AddObject(_zyRoi!);
@@ -330,8 +330,8 @@ namespace MxPlot.UI.Avalonia.Actions
 
             if (_xzRoi == null && _zyRoi == null && _role == CropRole.Follower)
             {
-                int zCount = data.Axes.FirstOrDefault(a => a.Name == newContext.DepthAxisName)?.Count ?? 1;
-                bool zAxisMatches = newContext.DepthAxisName == _followerZAxisName;
+                int zCount = data.Axes.FindAxis(newContext.DepthAxisName)?.Count ?? 1;
+                bool zAxisMatches = string.Equals(newContext.DepthAxisName, _followerZAxisName, StringComparison.OrdinalIgnoreCase);
                 int displayStart = zAxisMatches ? _followerZStart : 0;
                 int displayCount = zAxisMatches ? (_followerZCount > 0 ? _followerZCount : zCount) : zCount;
                 
@@ -356,7 +356,7 @@ namespace MxPlot.UI.Avalonia.Actions
             _xzRoi.Width = _xyRoi.Width;
             if (_role == CropRole.Follower)
             {
-                bool zAxisMatches = newContext.DepthAxisName == _followerZAxisName;
+                bool zAxisMatches = string.Equals(newContext.DepthAxisName, _followerZAxisName, StringComparison.OrdinalIgnoreCase);
                 if (zAxisMatches && _followerZCount > 0)
                 {
                     int zStart = Math.Clamp(_followerZStart, 0, newZCount - 1);
@@ -1150,7 +1150,7 @@ namespace MxPlot.UI.Avalonia.Actions
             if (_role == CropRole.Follower && effectiveMode != CropMode.XY)
             {
                 bool hasAxis = _followerZAxisName != null
-                    && _ctx?.Data?.Axes.Any(a => a.Name == _followerZAxisName) == true;
+                    && _ctx?.Data?.Axes.FindAxis(_followerZAxisName) != null;
                 if (!hasAxis)
                     effectiveMode = CropMode.XY;
             }
@@ -1836,8 +1836,8 @@ namespace MxPlot.UI.Avalonia.Actions
             _offsetY = actualDataY - leader.Y;
 
             // Store leader Z info for use in ComputeParameters (only when axes match).
-            bool zAxisMatches = _ctx.DepthAxisName != null && _ctx.DepthAxisName == leader.ZAxisName;
-            bool followerHasAxis = leader.ZAxisName != null && _ctx.Data.Axes.Any(a => a.Name == leader.ZAxisName);
+            bool zAxisMatches = _ctx.DepthAxisName != null && string.Equals(_ctx.DepthAxisName, leader.ZAxisName, StringComparison.OrdinalIgnoreCase);
+            bool followerHasAxis = leader.ZAxisName != null && _ctx.Data.Axes.FindAxis(leader.ZAxisName) != null;
 
             if (followerHasAxis)
             {

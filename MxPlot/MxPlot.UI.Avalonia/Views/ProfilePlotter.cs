@@ -952,6 +952,7 @@ namespace MxPlot.UI.Avalonia.Views
                 Padding = new Thickness(0), BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            swatch.Classes.Add("colorswatch");
             void Apply(Color c)
             {
                 swatch.Background = new SolidColorBrush(c);
@@ -1216,6 +1217,7 @@ namespace MxPlot.UI.Avalonia.Views
                 BorderThickness = new Thickness(1),
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            swatch.Classes.Add("colorswatch");
 
             // ── Status bar ────────────────────────────────────────────────────
             var statusBar = new TextBlock
@@ -1251,6 +1253,7 @@ namespace MxPlot.UI.Avalonia.Views
                     Padding = new Thickness(0),
                     BorderThickness = new Thickness(0.5),
                 };
+                btn.Classes.Add("colorswatch");
                 btn.Click += (_, _) => ApplyColor(captured);
                 btn.PointerEntered += (_, _) => statusBar.Text = $"R={captured.R}  G={captured.G}  B={captured.B}";
                 btn.PointerExited += (_, _) => statusBar.Text = "\u2014";

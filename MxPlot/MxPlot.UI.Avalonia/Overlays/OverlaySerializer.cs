@@ -164,6 +164,11 @@ namespace MxPlot.UI.Avalonia.Overlays
             // Analyzable flags
             if (obj is IAnalyzableOverlay ana)
             {
+                // Note: this only restores the per-object flag (drives the "ROI" tag drawn on the
+                // overlay, and -- via BoundingBoxBase.GetContextMenuItems -- the checkbox icon on
+                // "Use ROI for Value Range"); it does not reconnect MatrixPlotter's own
+                // _valueRangeOverlay/_rangeBar ROI-mode wiring, a pre-existing gap in this restore
+                // path unrelated to the menu icon.
                 if (json["isValueRangeRoi"] != null) ana.IsValueRangeRoi = Bool(json, "isValueRangeRoi");
             }
 

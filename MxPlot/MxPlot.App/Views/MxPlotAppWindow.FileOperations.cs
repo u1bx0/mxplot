@@ -106,18 +106,25 @@ namespace MxPlot.App.Views
         }
 
         /// <summary>
-        /// For large files, asks the user to choose between InMemory and Virtual loading.
+        /// Asks the user to choose between InMemory and Virtual loading for large files
+        /// (at/above <see cref="LargeFileThresholdBytes"/>), or for any file when
+        /// <paramref name="forcePrompt"/> is set (Shift held during drag-drop).
+        /// Formats that don't implement <see cref="IVirtualLoadable"/> always load InMemory —
+        /// there is nothing to choose, so the prompt is skipped even when forced.
         /// Returns null if the user cancels.
         /// </summary>
-        internal async Task<LoadingMode?> ResolveLoadingModeAsync(string path)
+        internal async Task<LoadingMode?> ResolveLoadingModeAsync(string path, bool forcePrompt = false)
         {
             var fileInfo = new FileInfo(path);
-            if (!fileInfo.Exists || fileInfo.Length < LargeFileThresholdBytes)
+            if (!fileInfo.Exists)
                 return LoadingMode.Auto;
 
             var reader = FormatRegistry.CreateReader(path);
             if (reader is not IVirtualLoadable)
                 return LoadingMode.InMemory;
+
+            if (!forcePrompt && fileInfo.Length < LargeFileThresholdBytes)
+                return LoadingMode.Auto;
 
             return await WithTopmostSuspended(() =>
                 LoadingModeDialog.ShowAsync(this, Path.GetFileName(path), fileInfo.Length));

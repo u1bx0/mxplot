@@ -1,5 +1,6 @@
 ﻿using MxPlot.Core.IO;
 using MxPlot.Core.Processing;
+using MxPlot.Core.Utils;
 using MxPlot.Utilities;
 using System;
 using System.Collections.Generic;
@@ -11,6 +12,7 @@ using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 
@@ -58,6 +60,11 @@ namespace MxPlot.Core
         private MinMaxFinder? _minMaxFinder = _registeredDefaultFinder;
 
         /// <summary>
+        /// The default interpolator used only for custom struct types. May be null for custom structs until registered.
+        /// </summary>
+        private IBilinearInterpolator<T>? _interpolator = _registeredDefaultInterpolator;
+
+        /// <summary>
         /// Currently active frame index
         /// </summary>
         private int _activeIndex = 0;
@@ -68,6 +75,7 @@ namespace MxPlot.Core
         static MatrixData()
         {
             _registeredDefaultFinder = CreateBuiltInMinMaxFinder();
+            _registeredDefaultInterpolator = CreateBuiltInInterpolator();
         }
 
         /// <summary>
@@ -83,10 +91,17 @@ namespace MxPlot.Core
         private static readonly bool _isSupportedPrimitive =
                 MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
 
-        
+        /// <summary>
+        /// Holds the currently registered default instance of the IBilinearInterpolator for the type T, or null if no default is set.
+        /// </summary>
+        private static IBilinearInterpolator<T>? _registeredDefaultInterpolator;
+
         private static readonly Type _valueType = typeof(T);
 
-        private static readonly string _valueTyepName = default(T) switch
+        /// <summary>
+        /// Gets the name of the value type T.
+        /// </summary>
+        private static readonly string _valueTypeName = default(T) switch
         {
             byte => "byte",
             sbyte => "sbyte",
@@ -106,10 +121,10 @@ namespace MxPlot.Core
         private static readonly int _elementSize = Unsafe.SizeOf<T>();
 
         /// <summary>
-        /// Provider delegate for min and max arraies for the specified array
+        /// Provider delegate for min and max arrays for the specified array
         /// </summary>
-        /// <param name="array"></param>
-        /// <returns></returns>
+        /// <param name="array">The array for which to find the minimum and maximum values.</param>
+        /// <returns>A tuple containing two arrays: the minimum values and the maximum values.</returns>
         public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
 
         // Events
@@ -194,7 +209,7 @@ namespace MxPlot.Core
         /// </summary>
         public Type ValueType => _valueType;
 
-        public string ValueTypeName => _valueTyepName;
+        public string ValueTypeName => _valueTypeName;
 
         public int ElementSize => _elementSize;
 
@@ -239,11 +254,67 @@ namespace MxPlot.Core
         /// </summary>
         /// <remarks>Registering a new default MinMaxFinder will replace any previously registered
         /// instance. This method is typically called during application initialization to configure custom min/max
-        /// logic.</remarks>
+        /// logic for a type unsupported by the built-in implementation (e.g. a custom struct).
+        /// <para>
+        /// Not allowed for the built-in primitive numeric types (<see cref="byte"/>, <see cref="sbyte"/>,
+        /// <see cref="short"/>, <see cref="ushort"/>, <see cref="int"/>, <see cref="uint"/>, <see cref="long"/>,
+        /// <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/>) -- their min/max has one unambiguous
+        /// definition, so overriding it would silently corrupt behavior application-wide. <see cref="Complex"/>
+        /// remains overridable: which of its Magnitude/Real/Imaginary/Phase/Power modes to report is a domain
+        /// choice, not a single correct answer. To restore the built-in <see cref="Complex"/> behavior after
+        /// overriding it, register <see cref="Utils.FastMinMaxFinder.FindComplex"/> again -- its signature already
+        /// matches <see cref="MinMaxFinder"/>.
+        /// </para>
+        /// </remarks>
         /// <param name="finder">The MinMaxFinder instance to register as the default. Cannot be null.</param>
+        /// <exception cref="NotSupportedException">Thrown when <typeparamref name="T"/> is one of the built-in primitive numeric types.</exception>
         public static void RegisterDefaultMinMaxFinder(MinMaxFinder finder)
         {
+            if(finder == null)
+                throw new ArgumentNullException(nameof(finder));
+
+            if (IsBuiltInPrimitiveNumericType())
+                throw new NotSupportedException(
+                    $"Cannot override the default MinMaxFinder for built-in numeric type {typeof(T).Name}; " +
+                    "its min/max has one unambiguous definition. RegisterDefaultMinMaxFinder is for types " +
+                    "the built-in implementation does not cover (custom structs, or Complex's mode selection).");
+
             _registeredDefaultFinder = finder;
+        }
+
+        /// <summary>
+        /// Gets the currently registered default <see cref="MinMaxFinder"/> for this type -- the exact delegate a
+        /// freshly-constructed <see cref="MatrixData{T}"/> would use. Useful for computing per-frame min/max ahead
+        /// of constructing an instance (e.g. while streaming frames into a <c>List&lt;T[]&gt;</c> during file
+        /// loading), so the precomputed values are guaranteed consistent with what the instance would compute itself.
+        /// Null for a custom struct type that has not called <see cref="RegisterDefaultMinMaxFinder"/>.
+        /// </summary>
+        public static MinMaxFinder? DefaultMinMaxFinder => _registeredDefaultFinder;
+
+        private static bool IsBuiltInPrimitiveNumericType()
+        {
+            return typeof(T) == typeof(byte) || typeof(T) == typeof(sbyte)
+                || typeof(T) == typeof(short) || typeof(T) == typeof(ushort)
+                || typeof(T) == typeof(int) || typeof(T) == typeof(uint)
+                || typeof(T) == typeof(long) || typeof(T) == typeof(ulong)
+                || typeof(T) == typeof(float) || typeof(T) == typeof(double);
+        }
+
+        /// <summary>
+        /// Registers the specified <see cref="IBilinearInterpolator{T}"/> instance as the default implementation
+        /// used for bilinear interpolation.
+        /// This is necessary only for types that are not natively supported by the library.
+        /// For primitive numeric types (e.g., int, float, double) and <see cref="System.Numerics.Complex"/>,
+        /// the library provides built-in interpolation logic.
+        /// If no interpolator is provided for a custom type, <c>GetValue(..., interpolate: true)</c>
+        /// falls back to nearest-neighbor behavior.
+        /// </summary>
+        /// <param name="interpolator">The IBilinearInterpolator instance to register as the default. Cannot be null.</param>
+        public static void RegisterDefaultInterpolator(IBilinearInterpolator<T> interpolator)
+        {
+            if (interpolator == null) 
+                throw new ArgumentNullException(nameof(interpolator));
+            _registeredDefaultInterpolator = interpolator;
         }
 
         /// <summary>
@@ -515,7 +586,27 @@ namespace MxPlot.Core
             return Clone(forceInMemory);
         }
 
-        private MatrixData<T> CloneInMemory()
+        /// <summary>
+        /// Creates a clone of this <see cref="MatrixData{T}"/>, with progress reporting and
+        /// cancellation support -- see <see cref="IMatrixData.Clone(bool, IProgress{int}, CancellationToken)"/>.
+        /// </summary>
+        /// <param name="forceInMemory">If true, forces the clone to be created in memory even if the source is virtual.</param>
+        /// <param name="progress">Optional progress reporter; reports -N once (N = FrameCount), then 0..N-1 as frames are copied.</param>
+        /// <param name="cancellationToken">Checked between frames.</param>
+        public MatrixData<T> Clone(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (forceInMemory)
+                return CloneInMemory(progress, cancellationToken);
+            return IsVirtual ? CloneAsVirtual(progress, cancellationToken) : CloneInMemory(progress, cancellationToken);
+        }
+
+        IMatrixData IMatrixData.Clone(bool forceInMemory, IProgress<int>? progress, CancellationToken cancellationToken)
+        {
+            return Clone(forceInMemory, progress, cancellationToken);
+        }
+
+        private MatrixData<T> CloneInMemory(IProgress<int>? progress = null, CancellationToken ct = default)
         {
             var clone = new MatrixData<T>(_xcount, _ycount, FrameCount);
             clone.SetXYScale(_xmin, _xmax, _ymin, _ymax);
@@ -527,8 +618,10 @@ namespace MxPlot.Core
                 clone.Metadata[key] = Metadata[key];
             }
 
+            progress?.Report(-FrameCount);
             for (int i = 0; i < FrameCount; i++)
             {
+                ct.ThrowIfCancellationRequested();
                 List<double>? minValueList = null;
                 List<double>? maxValueList = null;
                 if(_valueRangeMap.TryGetValue(GetFrameKey(i), out var range))
@@ -540,22 +633,52 @@ namespace MxPlot.Core
                 var dstArray = new T[srcSpan.Length];
                 srcSpan.CopyTo(dstArray);
                 clone.SetArray(dstArray, i, minValueList?.ToArray(), maxValueList?.ToArray());
+                progress?.Report(i);
             }
 
             return clone;
         }
 
-        private MatrixData<T> CloneAsVirtual()
+        private MatrixData<T> CloneAsVirtual(IProgress<int>? progress = null, CancellationToken ct = default)
         {
             var wvsf = IO.MatrixDataSerializer.CreateTempVessel<T>(_xcount, _ycount, FrameCount);
 
-            for (int i = 0; i < FrameCount; i++)
+            // Frames whose value range is already cached on the source, collected so it can be
+            // propagated to the clone below instead of being silently discarded (which would force
+            // a full rescan on next access even though the source already did that work) -- the
+            // Virtual-output counterpart to what CloneInMemory already does via SetArray's
+            // minValues/maxValues parameters. Collected as (index, list) tuples rather than a full
+            // FrameCount-length pair of lists because typically only a handful of frames are
+            // actually cached (e.g. just the one the user was viewing) -- CreateAsVirtualFrames's
+            // constructor only accepts an all-or-nothing per-frame list (every entry present, same
+            // shape), whereas applying cached entries individually after construction has no such
+            // restriction. No extra scanning: this only reuses ranges the source already computed.
+            List<(int Index, List<double> Min, List<double> Max)>? cachedRanges = null;
+
+            progress?.Report(-FrameCount);
+            try
             {
-                T[] src = GetInternalArray(i, needsInvalidate: false);
-                wvsf.WriteDirectly(i, src);
+                for (int i = 0; i < FrameCount; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    T[] src = GetInternalArray(i, needsInvalidate: false);
+                    wvsf.WriteDirectly(i, src);
+                    if (_valueRangeMap.TryGetValue(GetFrameKey(i), out var range) && range.IsValid)
+                    {
+                        cachedRanges ??= new List<(int, List<double>, List<double>)>();
+                        cachedRanges.Add((i, range.MinValues, range.MaxValues));
+                    }
+                    progress?.Report(i);
+                }
+                wvsf.Flush();
             }
-            wvsf.Flush();
-            
+            catch
+            {
+                // Cancelled or failed mid-write -- don't leak the (possibly multi-GB) temp file.
+                wvsf.Dispose();
+                throw;
+            }
+
             var clone = CreateAsVirtualFrames(_xcount, _ycount, wvsf);
             clone.SetXYScale(_xmin, _xmax, _ymin, _ymax);
             clone.XUnit = XUnit;
@@ -563,6 +686,15 @@ namespace MxPlot.Core
             clone.DefineDimensions(Axis.CreateFrom(Dimensions.Axes.ToArray()));
             foreach (var key in Metadata.Keys)
                 clone.Metadata[key] = Metadata[key];
+
+            if (cachedRanges != null)
+            {
+                foreach (var (index, min, max) in cachedRanges)
+                {
+                    if (clone._valueRangeMap.TryGetValue(clone.GetFrameKey(index), out var cloneRange))
+                        cloneRange.Set(min, max);
+                }
+            }
 
             return clone;
         }
@@ -708,6 +840,17 @@ namespace MxPlot.Core
             _minMaxFinder = customFinder;
         }
 
+        /// <summary>
+        /// Undoes a prior <see cref="SetMinMaxFinder"/> override on this instance, reverting it to the
+        /// currently registered default (<see cref="DefaultMinMaxFinder"/>) -- the same finder a freshly
+        /// constructed <see cref="MatrixData{T}"/> would use. There is no other way to undo
+        /// <see cref="SetMinMaxFinder"/> in place short of constructing a new instance.
+        /// </summary>
+        public void ResetMinMaxFinder()
+        {
+            _minMaxFinder = _registeredDefaultFinder;
+        }
+
         private static MinMaxFinder? CreateBuiltInMinMaxFinder()
         {
             switch (default(T))
@@ -783,8 +926,18 @@ namespace MxPlot.Core
                     return null;
             }
         }
-   
-    
+
+        private static IBilinearInterpolator<T>? CreateBuiltInInterpolator()
+        {
+            if (typeof(T) == typeof(Complex))
+            {
+                return (IBilinearInterpolator<T>)(object)new ComplexBilinearInterpolator();
+            }
+
+            return null;
+        }
+
+
     }
 
 }

@@ -1,8 +1,10 @@
 ﻿using Microsoft.CSharp.RuntimeBinder;
+using MxPlot.Core.IO;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
+using System.Threading;
 
 namespace MxPlot.Core.Processing
 {
@@ -55,7 +57,12 @@ namespace MxPlot.Core.Processing
     /// <param name="Index">The zero-based index of the slice.</param>
     /// <param name="AxisName">Optional:  Name for the axis mapping.</param>
     /// <param name="BaseIndices">Optional indices to define the sub-region or base coordinates.</param>
-    public record SliceOperation(ViewFrom Axis, int Index, string AxisName = "", int[]? BaseIndices = null)
+    /// <param name="Dst">
+    /// Optional destination to receive the slice in place; see <see cref="VolumeAccessor{T}.SliceAt"/>.
+    /// </param>
+    /// <param name="DstIndex">Frame index within <paramref name="Dst"/> to write into.</param>
+    public record SliceOperation(ViewFrom Axis, int Index, string AxisName = "", int[]? BaseIndices = null,
+        IMatrixData? Dst = null, int DstIndex = 0)
        : IVolumeOperation<IMatrixData>
     {
         /// <summary>
@@ -66,7 +73,7 @@ namespace MxPlot.Core.Processing
         /// <returns>A 2D <see cref="IMatrixData"/> representing the slice.</returns>
         public IMatrixData Execute<T>(VolumeAccessor<T> accessor)
             where T : unmanaged
-            => accessor.SliceAt(Axis, Index);
+            => accessor.SliceAt(Axis, Index, Dst, DstIndex);
     }
 
     /// <summary>
@@ -110,7 +117,12 @@ namespace MxPlot.Core.Processing
     /// <param name="NewAxis">The target axis to become the primary dimension.</param>
     /// <param name="AxisName">Optional: Name for the axis mapping.</param>
     /// <param name="BaseIndices">Optional indices to define the sub-region.</param>
-    public record RestackOperation(ViewFrom NewAxis, string AxisName = "", int[]? BaseIndices = null)
+    /// <param name="OutputMode">In-memory or memory-mapped output; Auto defers to <see cref="VirtualPolicy"/>.</param>
+    /// <param name="Progress">Optional progress reporter.</param>
+    /// <param name="CancellationToken">Cancels the operation.</param>
+    public record RestackOperation(ViewFrom NewAxis, string AxisName = "", int[]? BaseIndices = null,
+        LoadingMode OutputMode = LoadingMode.Auto, IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default)
        : IVolumeOperation<IMatrixData>
     {
         /// <summary>
@@ -121,7 +133,7 @@ namespace MxPlot.Core.Processing
         /// <returns>A 3D <see cref="IMatrixData"/> with the modified layout.</returns>
         public IMatrixData Execute<T>(VolumeAccessor<T> accessor)
             where T : unmanaged
-            => accessor.Restack(NewAxis);
+            => accessor.Restack(NewAxis, OutputMode, Progress, CancellationToken);
     }
 
     /// <summary>
@@ -159,6 +171,72 @@ namespace MxPlot.Core.Processing
                 throw new NotSupportedException(
                     $"Type '{typeof(T).Name}' does not support Projection operations. " +
                     "Projection requires numeric types (INumber<T>)."
+                );
+            }
+        }
+    }
+
+    /// <summary>
+    /// Represents a "winner-take-all" operation used by ColorCoded depth/time visualisation: for
+    /// each (x, y) pixel, finds the axis index in <c>[Start, End]</c> holding the extreme
+    /// (<see cref="ProjectionMode.Maximum"/> or <see cref="ProjectionMode.Minimum"/>) value, and
+    /// returns both that index and the value found there.<br/>
+    /// <c>e.g. var (idx, val) = src.Apply(new ExtremumIndexOperation(ProjectionMode.Maximum, 0, 40));</c>
+    /// </summary>
+    /// <remarks>
+    /// Deliberately separate from <see cref="ProjectionOperation"/> rather than an extension of it:
+    /// unlike a plain projection, which reduces to a single value, this needs to report *which*
+    /// slice won so a caller can look up a depth colour for it. Restricted to Maximum/Minimum --
+    /// <see cref="ProjectionMode.Average"/> has no single winning index to report. See
+    /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.3, which
+    /// also documents the deliberate Core/UI split: this operation only extracts index and value
+    /// (no colour, no LUT) -- turning them into a coloured image is the UI/Rendering layer's job.
+    /// </remarks>
+    /// <param name="Mode">Must be <see cref="ProjectionMode.Maximum"/> or <see cref="ProjectionMode.Minimum"/>.</param>
+    /// <param name="Start">First axis index (inclusive) to consider.</param>
+    /// <param name="End">Last axis index (inclusive) to consider.</param>
+    /// <param name="AxisName">Optional: Name for the axis mapping.</param>
+    /// <param name="BaseIndices">Optional indices to define the sub-region.</param>
+    public record ExtremumIndexOperation(ProjectionMode Mode, int Start, int End, string AxisName = "", int[]? BaseIndices = null)
+       : IVolumeOperation<(IMatrixData WinnerIndex, IMatrixData WinnerValue)>
+    {
+        /// <summary>
+        /// Executes the extremum-index operation using dynamic dispatch for numeric type support.
+        /// </summary>
+        /// <typeparam name="T">The unmanaged data type.</typeparam>
+        /// <param name="accessor">The typed accessor to scan.</param>
+        /// <returns>
+        /// <c>WinnerIndex</c>: a <c>MatrixData&lt;int&gt;</c> of the winning axis index per pixel.
+        /// <c>WinnerValue</c>: a <c>MatrixData&lt;T&gt;</c> of the value found at that index, same type as the source.
+        /// </returns>
+        /// <exception cref="NotSupportedException">Thrown if T is not a numeric type.</exception>
+        public (IMatrixData WinnerIndex, IMatrixData WinnerValue) Execute<T>(VolumeAccessor<T> accessor) where T : unmanaged
+        {
+            if (Mode != ProjectionMode.Maximum && Mode != ProjectionMode.Minimum)
+                throw new ArgumentException(
+                    $"ExtremumIndexOperation requires Maximum or Minimum, not {Mode} (Average has no single winning index).",
+                    nameof(Mode));
+
+            dynamic vol = accessor;
+
+            try
+            {
+                // The DLR's dynamic binder can convert each tuple element individually (a plain
+                // reference-type widening, MatrixData<T> -> IMatrixData) but not the value tuple as
+                // a whole -- (MatrixData<int>, MatrixData<T>) has no implicit dynamic conversion to
+                // (IMatrixData, IMatrixData) even though every element does. Reading .Item1/.Item2
+                // off the dynamic result (not the named WinnerIndex/WinnerValue -- tuple element
+                // names are compile-time metadata the dynamic binder does not see) sidesteps that.
+                dynamic result = VolumeAccessorExtensions.CreateExtremumIndex(vol, Mode, Start, End);
+                IMatrixData winnerIndex = result.Item1;
+                IMatrixData winnerValue = result.Item2;
+                return (winnerIndex, winnerValue);
+            }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+            {
+                throw new NotSupportedException(
+                    $"Type '{typeof(T).Name}' does not support ExtremumIndex operations. " +
+                    "ExtremumIndex requires numeric types (INumber<T>)."
                 );
             }
         }

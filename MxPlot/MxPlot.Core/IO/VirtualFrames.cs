@@ -4,10 +4,12 @@
 
 using MxPlot.Core.IO.CacheStrategies;
 using System;
+using System.Buffers.Binary;
 using System.Collections;
 using System.Diagnostics;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 
@@ -30,6 +32,98 @@ namespace MxPlot.Core.IO
 
         /// <summary>Captures a diagnostic snapshot of the current cache state.</summary>
         CacheSnapshot GetCacheStatus();
+
+        /// <summary>
+        /// Sets <see cref="CacheCapacity"/> to <paramref name="newCapacity"/> and, unlike assigning
+        /// the property directly, proactively evicts down to it immediately instead of waiting for
+        /// future cache-miss traffic to do it lazily. Use this to actually release memory after a
+        /// temporary elevated-budget mode (e.g. orthogonal/Volume-mode viewing) ends.
+        /// </summary>
+        void TrimCacheTo(int newCapacity);
+    }
+
+    /// <summary>
+    /// Centralizes the heuristics <see cref="VirtualFrames{T}"/> uses to size its LRU frame
+    /// cache from available memory and per-frame byte size, instead of a flat percentage of the
+    /// frame count that knows nothing about either.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="MemoryBudgetFraction"/> is deliberately conservative (not 1.0): opening several
+    /// large virtual datasets one after another is a realistic workflow, and each dataset only
+    /// queries "available" memory at its own construction/growth time. Capping the fraction any
+    /// one dataset can claim leaves headroom for datasets opened later (which will in turn see a
+    /// smaller "available" figure, since the earlier ones' caches already exist) -- a cheap,
+    /// self-limiting approximation, not a true cross-instance budget coordinator.
+    /// </para>
+    /// <para>
+    /// Growing a <see cref="VirtualFrames{T}.CacheCapacity"/> at runtime takes effect immediately
+    /// and safely (the eviction check re-reads it on every insert). Shrinking it does not by
+    /// itself proactively trim anything already cached -- callers that want memory back must call
+    /// <see cref="VirtualFrames{T}.TrimCacheTo"/> explicitly (see its own remarks for why).
+    /// </para>
+    /// </remarks>
+    public static class VirtualCachePolicy
+    {
+        /// <summary>
+        /// Fraction of <see cref="GC.GetGCMemoryInfo"/>'s <c>TotalAvailableMemoryBytes</c> that a
+        /// single <see cref="VirtualFrames{T}"/> instance may claim for its baseline frame cache
+        /// (i.e. outside of a temporary, higher-budget mode like <see cref="VolumeModeMemoryBudgetFraction"/>).
+        /// </summary>
+        public static double MemoryBudgetFraction { get; set; } = 0.25;
+
+        /// <summary>
+        /// Fraction of available memory allowed for a temporary, deliberately-elevated budget --
+        /// e.g. while <c>DimensionStrategy</c> is in Volume mode for an active orthogonal view,
+        /// whose access pattern (every frame along the sliced axis, touched on every crosshair
+        /// move) thrashes badly even a few frames short of fully fitting the cache (a cyclic full
+        /// scan against LRU eviction degrades sharply, not gracefully, once undersized). Higher
+        /// than <see cref="MemoryBudgetFraction"/> because this elevated budget is meant to be
+        /// temporary and is expected to be released (via <see cref="VirtualFrames{T}.TrimCacheTo"/>)
+        /// once the caller-specific mode that requested it ends.
+        /// </summary>
+        public static double VolumeModeMemoryBudgetFraction { get; set; } = 0.5;
+
+        /// <summary>Absolute floor on any computed capacity, in frames.</summary>
+        public static int MinCapacity { get; set; } = 16;
+
+        /// <summary>
+        /// Absolute ceiling on any computed capacity, in frames -- independent of how much memory
+        /// the budget would otherwise allow, since holding very large frame counts has real
+        /// per-frame bookkeeping overhead (LRU list nodes, dictionary entries) beyond raw bytes.
+        /// </summary>
+        public static int MaxCapacity { get; set; } = 8192;
+
+        /// <summary>
+        /// Computes a cache capacity (in frames) for <paramref name="idealFrameCount"/> frames of
+        /// <paramref name="frameSizeBytes"/> each, clamped to what <see cref="MemoryBudgetFraction"/>
+        /// of currently available memory allows (and to <see cref="MinCapacity"/>/<see cref="MaxCapacity"/>).
+        /// </summary>
+        /// <param name="frameSizeBytes">Byte size of a single frame.</param>
+        /// <param name="idealFrameCount">
+        /// The frame count that would fully avoid thrashing for the access pattern being sized for
+        /// -- e.g. the total physical frame count for an initial baseline, or
+        /// (target-axis length × composite-axis length) for an orthogonal/Volume-mode working set.
+        /// </param>
+        public static int ComputeCapacity(long frameSizeBytes, int idealFrameCount)
+            => ComputeCapacity(frameSizeBytes, idealFrameCount, MemoryBudgetFraction);
+
+        /// <summary>
+        /// Same as <see cref="ComputeCapacity(long, int)"/> but with an explicit budget fraction
+        /// (e.g. <see cref="VolumeModeMemoryBudgetFraction"/>) instead of <see cref="MemoryBudgetFraction"/>.
+        /// </summary>
+        public static int ComputeCapacity(long frameSizeBytes, int idealFrameCount, double budgetFraction)
+        {
+            if (frameSizeBytes <= 0 || idealFrameCount <= 0)
+                return MinCapacity;
+
+            long availableBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            long budgetBytes = (long)(availableBytes * budgetFraction);
+            long budgetFrames = budgetBytes / frameSizeBytes;
+
+            long recommended = Math.Min(budgetFrames, idealFrameCount);
+            return (int)Math.Clamp(recommended, MinCapacity, MaxCapacity);
+        }
     }
 
     /// <summary>
@@ -68,6 +162,12 @@ namespace MxPlot.Core.IO
         // (for formats whose pixel origin is at the bottom-left instead of the top-left).
         protected readonly bool _isYFlipped;
 
+        // True when the source file's byte order differs from the host's, so raw MMF reads
+        // (which bypass any format library's own decode-time byte-swapping) need an explicit
+        // swap. Computed once from the caller-supplied _isBigEndian against the actual host
+        // order, rather than assuming the host is little-endian.
+        protected readonly bool _needsByteSwap;
+
         /// <summary>
         /// Indicates whether this instance is owned by an external component responsible for managing its disposal.
         /// </summary>
@@ -85,6 +185,19 @@ namespace MxPlot.Core.IO
 
         protected readonly Dictionary<int, T[]> _cache = new();
         protected readonly LinkedList<int> _lruList = new(); // doubly-linked list for LRU eviction ordering (head = most-recently-used)
+
+        // LinkedList<T>.Remove(T value) (as opposed to Remove(LinkedListNode<T> node)) is an O(n)
+        // linear scan from the head to find a matching node -- fine for the eviction-candidate
+        // path (FindEvictionCandidateUnderLock already walks the list and hands back the node it
+        // found, so its Remove(node) calls are already O(1)), but "touch this index as
+        // most-recently-used on every cache hit" used to call the O(n) value-based Remove, and a
+        // cache hit is the single hottest path in the whole class. This dictionary records each
+        // index's current node so that touch (LruTouch below) can do it in O(1) instead: every
+        // AddFirst/AddLast/Clear on _lruList in this file must go through the matching Lru* helper
+        // so this stays in sync with it, or a touch/eviction elsewhere would silently go back to
+        // the O(n) path (or worse, operate on a stale/wrong node).
+        private readonly Dictionary<int, LinkedListNode<int>> _lruNodes = new();
+
         public int CacheCapacity { get; set; } = 16; // maximum number of decoded frames held in the RAM cache at once
 
 
@@ -92,6 +205,12 @@ namespace MxPlot.Core.IO
         private readonly SemaphoreSlim _ioSemaphore = new SemaphoreSlim(1, 1); // serialises disk I/O: at most one read at a time
         private readonly HashSet<int> _preloadingIndices = new HashSet<int>(); // tracks in-flight preloads to prevent duplicate tasks
         private CancellationTokenSource _prefetchCts = new CancellationTokenSource();
+
+        // Bumped on every actual _cache membership change (insert or evict); used by
+        // SchedulePreload's Volume-mode fast path to know whether a previously-confirmed "fully
+        // covered, nothing to preload" result is still valid without re-deriving it.
+        private int _cacheVersion;
+        private int _lastPreloadSatisfiedAtCacheVersion = -1;
 
         public ICacheStrategy CacheStrategy
         {
@@ -130,6 +249,7 @@ namespace MxPlot.Core.IO
                 _prefetchCts.Dispose();
                 _prefetchCts = new CancellationTokenSource();
                 _preloadingIndices.Clear();
+                _lastPreloadSatisfiedAtCacheVersion = -1; // strategy changed; force SchedulePreload to re-derive, not trust a stale "fully covered" result
 
                 if (CacheStrategy == null) return;
 
@@ -147,11 +267,11 @@ namespace MxPlot.Core.IO
                         lowPriority.Add(idx);
                 }
 
-                _lruList.Clear();
+                LruClear();
 
                 // AddLast builds the list so that highPriority items become the head.
-                foreach (var idx in highPriority) _lruList.AddLast(idx);
-                foreach (var idx in lowPriority) _lruList.AddLast(idx);
+                foreach (var idx in highPriority) LruAddLast(idx);
+                foreach (var idx in lowPriority) LruAddLast(idx);
             }
 
             // 3. Kick off prefetch from the last-accessed index under the new strategy.
@@ -243,14 +363,18 @@ namespace MxPlot.Core.IO
         /// <param name="bytesCounts">A jagged array representing the data size (in bytes) for each virtual frame, 
         /// matching the structure of <paramref name="offsets"/>.</param>
         /// <param name="isYFlipped">Indicates whether the Y-axis of the frames should be flipped during access. This is relevant for certain image formats where the origin is at the bottom-left instead of the top-left.</param>
-        /// <param name="access">The access mode for the memory-mapped file. 
-        /// Use <see cref="MemoryMappedFileAccess.Read"/> (default) for read-only access, or 
+        /// <param name="isBigEndian">Whether the source file's multi-byte samples are stored big-endian. Pass the
+        /// actual property of the file (e.g. a TIFF reader's own byte-order flag) -- not a swap decision; the
+        /// class compares it against the host's actual byte order itself. Irrelevant for <see cref="byte"/>/<see
+        /// cref="sbyte"/> frames.</param>
+        /// <param name="access">The access mode for the memory-mapped file.
+        /// Use <see cref="MemoryMappedFileAccess.Read"/> (default) for read-only access, or
         /// <see cref="MemoryMappedFileAccess.ReadWrite"/> to enable write-back functionality to the disk.</param>
         /// <exception cref="FileNotFoundException">Thrown if the specified <paramref name="filePath"/> cannot be found.</exception>
         /// <exception cref="UnauthorizedAccessException">Thrown if the process lacks the required permissions for the requested <paramref name="access"/> mode.</exception>
         /// <exception cref="IOException">Thrown if an I/O error occurs during file opening, or if the file is locked by another process with incompatible sharing modes.</exception>
         public VirtualFrames(string filePath, long[][] offsets, long[][] bytesCounts,
-            bool isYFlipped, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
+            bool isYFlipped, bool isBigEndian, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
         {
             if (!File.Exists(filePath))
                 throw new FileNotFoundException("Target file not found.", filePath);
@@ -259,6 +383,7 @@ namespace MxPlot.Core.IO
             _offsets = offsets;
             _byteCounts = bytesCounts;
             _accessMode = access;
+            _needsByteSwap = isBigEndian != !BitConverter.IsLittleEndian;
 
             /*
             var fileAccess = (access == MemoryMappedFileAccess.ReadWrite) ? FileAccess.ReadWrite : FileAccess.Read;
@@ -295,21 +420,24 @@ namespace MxPlot.Core.IO
                 }
             }
 
-            // Derive an initial CacheCapacity from the number of unique physical frames.
-            // Physical unique frame count (directly proportional to the number of disk reads).
+            // Derive an initial CacheCapacity from available memory and per-frame byte size, aiming
+            // to cache the whole dataset (uniquePhysicalFrames) when that comfortably fits the
+            // memory budget -- after one full read pass (e.g. building an orthogonal slice), every
+            // subsequent access is then served from RAM regardless of access pattern.
             int uniquePhysicalFrames = _offsetToKeyMap.Count;
+            long frameSizeBytes = SumByteCounts(_byteCounts.Length > 0 ? _byteCounts[0] : null);
 
-            // 1. Minimum guard: always hold enough for at least current ± 1 × channel count.
-            int minCapacity = 16;
+            this.CacheCapacity = VirtualCachePolicy.ComputeCapacity(frameSizeBytes, uniquePhysicalFrames);
+            Debug.WriteLine($"[VirtualFrameList] Initialized with CacheCapacity={CacheCapacity} (Unique Physical Frames: {uniquePhysicalFrames}, FrameSizeBytes={frameSizeBytes})");
+        }
 
-            // 2. Recommended: ~10-20% of all physical frames, or enough for one full Z-stack.
-            int recommendedCapacity = Math.Max(minCapacity, uniquePhysicalFrames / 5);
-
-            // 3. Upper bound: prevent unbounded memory growth (cap at 1024 frames).
-            int maxSafeCapacity = 1024;
-
-            this.CacheCapacity = Math.Clamp(recommendedCapacity, minCapacity, maxSafeCapacity);
-            Debug.WriteLine($"[VirtualFrameList] Initialized with CacheCapacity={CacheCapacity} (Unique Physical Frames: {uniquePhysicalFrames})");
+        /// <summary>Total bytes across every strip/tile of one frame (works uniformly for both layouts).</summary>
+        private static long SumByteCounts(long[]? byteCounts)
+        {
+            if (byteCounts == null) return 0;
+            long sum = 0;
+            foreach (var b in byteCounts) sum += b;
+            return sum;
         }
 
         protected void Unmount()
@@ -430,19 +558,37 @@ namespace MxPlot.Core.IO
                 _accessCount++;
 #endif
                 T[]? data;
+                bool hit;
                 lock (_cacheLock)
                 {
-                    if (_cache.TryGetValue(index, out data))
+                    hit = _cache.TryGetValue(index, out data);
+                    if (hit)
                     {
 #if VF_DEBUG
                         _cacheHitCount++;
 #endif
-                        _lruList.Remove(index);
-                        _lruList.AddFirst(index);
-                        // Even on a cache hit, trigger prefetch for neighbouring frames.
-                        SchedulePreload(index);
-                        return data;
+                        // The LRU touch itself must stay under the lock (it mutates shared state),
+                        // but nothing else does -- SchedulePreload is called below, after releasing
+                        // this lock, same as the miss path already does. Calling it from here (while
+                        // still holding _cacheLock, which is reentrant so this never deadlocked) used
+                        // to serialize its own preload-target enumeration -- for DimensionStrategy's
+                        // Volume mode, a walk of the whole target-axis x composite-axis working set,
+                        // done again on every single hit -- behind this one lock, effectively
+                        // single-threading concurrent readers (e.g. VolumeAccessor.SliceOrthogonal's
+                        // Parallel.For) even though the actual cache lookup is nearly instant.
+                        // LruTouch (not the old Remove(index)+AddFirst(index)) is what makes the
+                        // touch itself O(1): LinkedList<T>.Remove(int) is an O(n) linear scan from
+                        // the head to find a matching node, and this is the single hottest path in
+                        // the class -- every cache hit pays for it.
+                        LruTouch(index);
                     }
+                }
+
+                if (hit)
+                {
+                    // Even on a cache hit, trigger prefetch for neighbouring frames.
+                    SchedulePreload(index);
+                    return data!;
                 }
 #if VF_DEBUG
                 _cacheMissCount++;
@@ -488,6 +634,34 @@ namespace MxPlot.Core.IO
         protected abstract T[]? ReadFrameFromSource(int index, CancellationToken ct);
 
         /// <summary>
+        /// Reverses the byte order of every element in <paramref name="data"/> in place. Raw MMF reads copy bytes
+        /// verbatim (no format library involved to normalize them, unlike e.g. LibTiff's scanline/strip decode),
+        /// so derived classes must call this themselves after reading when <see cref="_needsByteSwap"/> is set.
+        /// A no-op for <see cref="byte"/>/<see cref="sbyte"/>, which have no byte order. Uses the vectorized
+        /// <see cref="BinaryPrimitives.ReverseEndianness(ReadOnlySpan{ushort}, Span{ushort})"/>-family overloads
+        /// via a same-size reinterpret cast, not a per-element scalar loop.
+        /// </summary>
+        protected static void SwapEndiannessInPlace(Span<T> data)
+        {
+            if (typeof(T) == typeof(ushort) || typeof(T) == typeof(short))
+            {
+                var s = MemoryMarshal.Cast<T, ushort>(data);
+                BinaryPrimitives.ReverseEndianness(s, s);
+            }
+            else if (typeof(T) == typeof(uint) || typeof(T) == typeof(int) || typeof(T) == typeof(float))
+            {
+                var s = MemoryMarshal.Cast<T, uint>(data);
+                BinaryPrimitives.ReverseEndianness(s, s);
+            }
+            else if (typeof(T) == typeof(ulong) || typeof(T) == typeof(long) || typeof(T) == typeof(double))
+            {
+                var s = MemoryMarshal.Cast<T, ulong>(data);
+                BinaryPrimitives.ReverseEndianness(s, s);
+            }
+            // byte/sbyte: single byte, no byte order -- nothing to do.
+        }
+
+        /// <summary>
         /// Called after a frame has been evicted from the cache, outside <c>_cacheLock</c>.
         /// Override in derived classes to perform post-eviction work such as flushing dirty data.
         /// The base implementation is a no-op.
@@ -524,6 +698,69 @@ namespace MxPlot.Core.IO
         /// <see cref="OnFrameEvicted"/> is called outside the lock to allow derived classes
         /// to perform I/O (e.g., flushing dirty frames) without blocking the cache.
         /// </remarks>
+        // ── _lruList / _lruNodes helpers (must be called under _cacheLock) ──────────────────
+        // All of _lruList's mutation goes through these so _lruNodes never drifts out of sync.
+        // See the field comment on _lruNodes above for why this exists.
+
+        /// <summary>Adds <paramref name="index"/> as most-recently-used (list head) in O(1).</summary>
+        private void LruAddFirst(int index) => _lruNodes[index] = _lruList.AddFirst(index);
+
+        /// <summary>Adds <paramref name="index"/> as least-recently-used (list tail) in O(1).</summary>
+        private void LruAddLast(int index) => _lruNodes[index] = _lruList.AddLast(index);
+
+        /// <summary>
+        /// Moves <paramref name="index"/> to most-recently-used (list head) in O(1) -- the "cache
+        /// hit" touch. Removing then re-adding the SAME <see cref="LinkedListNode{T}"/> object (via
+        /// the node overload of <c>AddFirst</c>) repositions it without allocating a new node or
+        /// needing to update <see cref="_lruNodes"/> at all, since the node reference itself is
+        /// unchanged. A no-op if <paramref name="index"/> isn't currently tracked.
+        /// </summary>
+        private void LruTouch(int index)
+        {
+            if (_lruNodes.TryGetValue(index, out var node))
+            {
+                _lruList.Remove(node);
+                _lruList.AddFirst(node);
+            }
+        }
+
+        /// <summary>Removes a specific, already-known node (e.g. from an eviction-candidate walk) in O(1).</summary>
+        private void LruRemoveNode(LinkedListNode<int> node)
+        {
+            _lruList.Remove(node);
+            _lruNodes.Remove(node.Value);
+        }
+
+        /// <summary>Clears both the LRU list and its node lookup together.</summary>
+        private void LruClear()
+        {
+            _lruList.Clear();
+            _lruNodes.Clear();
+        }
+
+        /// <summary>
+        /// Walks the LRU list from the tail (least-recently-used) to find one evictable candidate.
+        /// Must be called under <c>_cacheLock</c>. Shared by <see cref="UpdateCache"/> (evict as
+        /// needed while inserting) and <see cref="TrimCacheTo"/> (proactive shrink) so both apply
+        /// identical selection rules.
+        /// </summary>
+        private LinkedListNode<int>? FindEvictionCandidateUnderLock()
+        {
+            var node = _lruList.Last;
+            while (node != null)
+            {
+                if (CanEvict(node.Value))
+                {
+                    // Evictable: prefer low-priority frames; fall back to the head as a last resort.
+                    if (CacheStrategy == null || !CacheStrategy.IsHighPriority(node.Value) || node == _lruList.First)
+                        return node;
+                }
+                // Dirty or high-priority frame: skip and try the next newer one.
+                node = node.Previous;
+            }
+            return null;
+        }
+
         private void UpdateCache(int index, T[] data)
         {
             // Collect eviction info inside the lock; call OnFrameEvicted outside to avoid
@@ -536,32 +773,15 @@ namespace MxPlot.Core.IO
 
                 while (_cache.Count >= CacheCapacity && _lruList.Count > 0)
                 {
-                    // Walk the LRU list from the tail (least-recently-used) to find an eviction candidate.
-                    var node = _lruList.Last;
-                    LinkedListNode<int>? candidate = null;
-
-                    while (node != null)
-                    {
-                        if (CanEvict(node.Value))
-                        {
-                            // Evictable: prefer low-priority frames; fall back to the head as a last resort.
-                            if (CacheStrategy == null || !CacheStrategy.IsHighPriority(node.Value) || node == _lruList.First)
-                            {
-                                candidate = node;
-                                break;
-                            }
-                        }
-                        // Dirty or high-priority frame: skip and try the next newer one.
-                        node = node.Previous;
-                    }
-
+                    var candidate = FindEvictionCandidateUnderLock();
                     if (candidate == null) break; // no evictable candidate (e.g., all frames are dirty)
 
                     int evictedIndex = candidate.Value;
                     T[] evictedData = _cache[evictedIndex];
 
                     _cache.Remove(evictedIndex);
-                    _lruList.Remove(candidate);
+                    LruRemoveNode(candidate);
+                    _cacheVersion++;
 
                     // Only collect here; actual I/O happens outside the lock below.
                     pendingEvictions ??= new List<(int, T[])>();
@@ -569,7 +789,8 @@ namespace MxPlot.Core.IO
                 }
 
                 _cache[index] = data;
-                _lruList.AddFirst(index);
+                LruAddFirst(index);
+                _cacheVersion++;
             }
 
             // Call OnFrameEvicted after releasing the lock so derived classes
@@ -579,9 +800,76 @@ namespace MxPlot.Core.IO
                     OnFrameEvicted(ei, ed);
         }
 
+        /// <summary>
+        /// Sets <see cref="CacheCapacity"/> to <paramref name="newCapacity"/> and proactively
+        /// evicts down to it immediately, instead of relying on future cache-miss traffic to do it
+        /// lazily one insertion at a time (which <see cref="UpdateCache"/> alone can starve
+        /// indefinitely if nothing new is requested afterward). Use this to actually release
+        /// memory once a temporary elevated-budget mode ends.
+        /// </summary>
+        /// <remarks>
+        /// If every remaining frame is protected by the active <see cref="CacheStrategy"/> (e.g.
+        /// still in a mode that marks them all high-priority), eviction stops early via the same
+        /// "evict the most-recently-used as a last resort" rule <see cref="UpdateCache"/> uses --
+        /// callers that need a hard guarantee should switch to a non-protective strategy (or clear
+        /// it) before trimming.
+        /// </remarks>
+        public void TrimCacheTo(int newCapacity)
+        {
+            List<(int evictedIndex, T[] evictedData)>? pendingEvictions = null;
+
+            lock (_cacheLock)
+            {
+                CacheCapacity = newCapacity;
+
+                while (_cache.Count > CacheCapacity && _lruList.Count > 0)
+                {
+                    var candidate = FindEvictionCandidateUnderLock();
+                    if (candidate == null) break;
+
+                    int evictedIndex = candidate.Value;
+                    T[] evictedData = _cache[evictedIndex];
+
+                    _cache.Remove(evictedIndex);
+                    LruRemoveNode(candidate);
+                    _cacheVersion++;
+
+                    pendingEvictions ??= new List<(int, T[])>();
+                    pendingEvictions.Add((evictedIndex, evictedData));
+                }
+            }
+
+            if (pendingEvictions != null)
+                foreach (var (ei, ed) in pendingEvictions)
+                    OnFrameEvicted(ei, ed);
+        }
+
         private void SchedulePreload(int currentIndex)
         {
             if (CacheStrategy == null) return;
+
+            // Fast path for DimensionStrategy's Volume mode specifically: its preload target set
+            // does not depend on currentIndex's own position along TargetAxis -- every value of
+            // TargetAxis is always included regardless of which one is "current" (DimensionStrategy
+            // itself already memoizes the enumeration for exactly this reason, see its
+            // GetPreloadIndices). So once every target has been confirmed already cached/in-flight
+            // for the CURRENT _cache contents, nothing changes for a later call with a different
+            // currentIndex either, as long as nothing has actually been inserted into or evicted
+            // from _cache since (tracked by _cacheVersion) and nothing is still in flight. Skipping
+            // straight to return here avoids rebuilding+rescanning the whole target set (up to
+            // targetLength * channelCount entries) on every single call -- measured to be the
+            // dominant remaining per-access cost once VirtualFrames' own lock/LRU overhead was
+            // fixed, since a fully warmed cache would otherwise still redo this every touch. Not
+            // applied to other strategies/modes (e.g. SinglePlane's neighbor set genuinely changes
+            // as currentIndex moves, so those must keep recomputing every call).
+            if (CacheStrategy is DimensionStrategy { Mode: DimensionStrategy.CacheMode.Volume })
+            {
+                lock (_cacheLock)
+                {
+                    if (_preloadingIndices.Count == 0 && _cacheVersion == _lastPreloadSatisfiedAtCacheVersion)
+                        return;
+                }
+            }
 
             // Compute preload targets outside the lock; dimension calculations in the
             // strategy may be non-trivial.
@@ -616,6 +904,12 @@ namespace MxPlot.Core.IO
                     _preloadingIndices.Add(target);
                     _ = PreloadInternalAsync(target, token);
                 }
+
+                // Remember: as of the current _cache contents, this target set is fully covered
+                // and nothing is in flight -- the Volume-mode fast path above can trust that until
+                // _cacheVersion moves (a real insert/evict) or the strategy changes.
+                if (_preloadingIndices.Count == 0)
+                    _lastPreloadSatisfiedAtCacheVersion = _cacheVersion;
             }
         }
 
@@ -738,7 +1032,7 @@ namespace MxPlot.Core.IO
                 {
                     _prefetchCts.Cancel(); // abort any in-flight prefetch tasks
                     _cache.Clear();
-                    _lruList.Clear();
+                    LruClear();
                 }
                 _ioSemaphore.Dispose();
                 _accessor?.Dispose();
@@ -805,8 +1099,8 @@ namespace MxPlot.Core.IO
         protected readonly int _height;
         //private readonly int _frameLength; // element count per frame (Width × Height)
 
-        public VirtualStrippedFrames(string path, int w, int h, long[][] offsets, long[][] byteCounts, bool isYFlipped, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
-            : base(path, offsets, byteCounts, isYFlipped, access)
+        public VirtualStrippedFrames(string path, int w, int h, long[][] offsets, long[][] byteCounts, bool isYFlipped, bool isBigEndian, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
+            : base(path, offsets, byteCounts, isYFlipped, isBigEndian, access)
         {
             _width = w; _height = h;
             //_frameLength = w * h;
@@ -891,6 +1185,8 @@ namespace MxPlot.Core.IO
                     if (pBase != null) handle.ReleasePointer(); // always release, even on early null return
                 }
             }
+            if (_needsByteSwap)
+                SwapEndiannessInPlace(frameData.AsSpan());
 #if VF_DEBUG
     elapsed = sw.ElapsedMilliseconds; totalTime += elapsed;
     sb.AppendLine($"[VirtualStrippedFrameList] Read done in {elapsed} ms. Total={totalTime} ms.");
@@ -907,8 +1203,8 @@ namespace MxPlot.Core.IO
         private readonly int _tileWidth;
         private readonly int _tileLength;
 
-        public VirtualTiledFrames(string path, int imgW, int imgH, int tileW, int tileH, long[][] offsets, long[][] byteCounts, bool isYFlipped)
-            : base(path, offsets, byteCounts, isYFlipped)
+        public VirtualTiledFrames(string path, int imgW, int imgH, int tileW, int tileH, long[][] offsets, long[][] byteCounts, bool isYFlipped, bool isBigEndian)
+            : base(path, offsets, byteCounts, isYFlipped, isBigEndian)
         {
             _imageWidth = imgW;
             _imageHeight = imgH;
@@ -965,6 +1261,9 @@ namespace MxPlot.Core.IO
                 // 1. Read one tile's raw data from the MMF directly into the scratch buffer.
                 int elementCount = (int)(byteCount / sizeOfT);
                 _accessor.ReadArray(offset, tileBuffer, 0, elementCount);
+
+                if (_needsByteSwap)
+                    SwapEndiannessInPlace(tileBuffer.AsSpan(0, elementCount));
 
                 // 2. Compute the tile's grid position (column and row index in the tile grid).
                 int tileCol = tileIndex % tilesAcross;

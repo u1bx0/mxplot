@@ -36,31 +36,10 @@ namespace MxPlot.Core.Processing
             double dx = end.X - start.X;
             double dy = end.Y - start.Y;
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
+            int n = ComputeAdaptiveSampleCount(src, dx, dy, clippedLen);
 
-            // Adaptive step: no pixel skipped along either axis
-            double absXStep = src.XCount > 1 ? Math.Abs(src.XStep) : 0;
-            double absYStep = src.YCount > 1 ? Math.Abs(src.YStep) : 0;
-            double absUx = Math.Abs(dx / clippedLen);
-            double absUy = Math.Abs(dy / clippedLen);
-            const double dirEps = 1e-12;
-
-            double step;
-            bool hasUx = absUx > dirEps && absXStep > 0;
-            bool hasUy = absUy > dirEps && absYStep > 0;
-            if (hasUx && hasUy)
-                step = Math.Min(absXStep / absUx, absYStep / absUy);
-            else if (hasUx)
-                step = absXStep / absUx;
-            else if (hasUy)
-                step = absYStep / absUy;
-            else
-                step = 1.0;
-
-            if (step <= 0 || double.IsNaN(step) || double.IsInfinity(step))
-                step = 1.0;
-
-            int n = clippedLen < step * 0.5 ? 1 : (int)(clippedLen / step) + 1;
-            return SampleLine(src, start, end, clippedLen, n, frameIndex, option);
+            return SampleLine(start, end, clippedLen, n,
+                (x, y) => Sample(src, x, y, frameIndex, option));
         }
 
         /// <summary>
@@ -86,12 +65,133 @@ namespace MxPlot.Core.Processing
             double dy = end.Y - start.Y;
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
 
-            return SampleLine(src, start, end, clippedLen, numPoints, frameIndex, option);
+            return SampleLine(start, end, clippedLen, numPoints,
+                (x, y) => Sample(src, x, y, frameIndex, option));
+        }
+
+        /// <summary>
+        /// Extracts a line profile along the segment from <paramref name="start"/> to <paramref name="end"/>,
+        /// reading samples directly from a strongly-typed <see cref="MatrixData{T}"/>.
+        /// The sampling interval adapts to the line direction so that no pixel is skipped (see the
+        /// <see cref="IMatrixData"/> overload for the exact step formula). If the segment extends
+        /// outside the data bounds, it is clipped to the valid region.
+        /// </summary>
+        /// <typeparam name="T">The element type of <paramref name="src"/>.</typeparam>
+        /// <param name="valueConverter">
+        /// Reduces a sampled <typeparamref name="T"/> value to <c>double</c>.
+        /// Unnecessary (and ignored) when <typeparamref name="T"/> is one of
+        /// <see cref="MatrixData.SupportedPrimitiveTypes"/>. Required for any other <typeparamref name="T"/>
+        /// (e.g. <c>Complex</c>) — throws <see cref="ArgumentNullException"/> if omitted.
+        /// For <see cref="LineProfileOption.Bilinear"/>, interpolation happens in <typeparamref name="T"/>-space
+        /// first (via <see cref="MatrixData{T}.GetValue(double, double, int, bool)"/>), and <paramref name="valueConverter"/>
+        /// is applied to the interpolated result — not to the four corner values independently.
+        /// </param>
+        /// <returns>
+        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Values</c>: sampled data values at each position.
+        /// Both arrays are empty if the segment is entirely outside the data bounds.
+        /// </returns>
+        public static (double[] Pos, double[] Values) GetLineProfile<T>(
+            this MatrixData<T> src,
+            (double X, double Y) start,
+            (double X, double Y) end,
+            int frameIndex = -1,
+            LineProfileOption option = LineProfileOption.NearestNeighbor,
+            Func<T, double>? valueConverter = null)
+            where T : unmanaged
+        {
+            ValidateConverter<T>(valueConverter);
+            if (frameIndex < 0) frameIndex = src.ActiveIndex;
+            if (!ClipSegment(src, ref start, ref end, out _, out _))
+                return Empty();
+
+            double dx = end.X - start.X;
+            double dy = end.Y - start.Y;
+            double clippedLen = Math.Sqrt(dx * dx + dy * dy);
+            int n = ComputeAdaptiveSampleCount(src, dx, dy, clippedLen);
+
+            return SampleLine(start, end, clippedLen, n,
+                (x, y) => SampleTyped(src, x, y, frameIndex, option, valueConverter));
+        }
+
+        /// <summary>
+        /// Extracts a line profile resampled to exactly <paramref name="numPoints"/> equally spaced points,
+        /// reading samples directly from a strongly-typed <see cref="MatrixData{T}"/>.
+        /// If the segment extends outside the data bounds, it is clipped to the valid region.
+        /// </summary>
+        /// <typeparam name="T">The element type of <paramref name="src"/>.</typeparam>
+        /// <param name="numPoints">The number of sample points along the clipped segment. Must be ≥ 1.</param>
+        /// <param name="valueConverter">See the adaptive-step overload for the exact contract.</param>
+        public static (double[] Pos, double[] Values) GetLineProfile<T>(
+            this MatrixData<T> src,
+            (double X, double Y) start,
+            (double X, double Y) end,
+            int numPoints,
+            int frameIndex = -1,
+            LineProfileOption option = LineProfileOption.NearestNeighbor,
+            Func<T, double>? valueConverter = null)
+            where T : unmanaged
+        {
+            if (numPoints < 1)
+                throw new ArgumentOutOfRangeException(nameof(numPoints), "numPoints must be >= 1.");
+            ValidateConverter<T>(valueConverter);
+            if (frameIndex < 0) frameIndex = src.ActiveIndex;
+            if (!ClipSegment(src, ref start, ref end, out _, out _))
+                return Empty();
+
+            double dx = end.X - start.X;
+            double dy = end.Y - start.Y;
+            double clippedLen = Math.Sqrt(dx * dx + dy * dy);
+
+            return SampleLine(start, end, clippedLen, numPoints,
+                (x, y) => SampleTyped(src, x, y, frameIndex, option, valueConverter));
         }
 
         // =============================================================
         // Internal helpers
         // =============================================================
+
+        /// <summary>
+        /// Computes the adaptive sample count for the clipped segment: the sampling interval adapts to
+        /// the line direction so that no pixel is skipped along either axis
+        /// (<c>step = min(|XStep / ux|, |YStep / uy|)</c> where (ux, uy) is the unit direction vector).
+        /// </summary>
+        private static int ComputeAdaptiveSampleCount(IMatrixData src, double dx, double dy, double clippedLen)
+        {
+            double absXStep = src.XCount > 1 ? Math.Abs(src.XStep) : 0;
+            double absYStep = src.YCount > 1 ? Math.Abs(src.YStep) : 0;
+            double absUx = Math.Abs(dx / clippedLen);
+            double absUy = Math.Abs(dy / clippedLen);
+            const double dirEps = 1e-12;
+
+            double step;
+            bool hasUx = absUx > dirEps && absXStep > 0;
+            bool hasUy = absUy > dirEps && absYStep > 0;
+            if (hasUx && hasUy)
+                step = Math.Min(absXStep / absUx, absYStep / absUy);
+            else if (hasUx)
+                step = absXStep / absUx;
+            else if (hasUy)
+                step = absYStep / absUy;
+            else
+                step = 1.0;
+
+            if (step <= 0 || double.IsNaN(step) || double.IsInfinity(step))
+                step = 1.0;
+
+            return clippedLen < step * 0.5 ? 1 : (int)(clippedLen / step) + 1;
+        }
+
+        /// <summary>
+        /// Validates that a converter was supplied whenever <typeparamref name="T"/> is not one of
+        /// <see cref="MatrixData.SupportedPrimitiveTypes"/>.
+        /// </summary>
+        private static void ValidateConverter<T>(Func<T, double>? valueConverter) where T : unmanaged
+        {
+            if (valueConverter is null && !MatrixData.SupportedPrimitiveTypes.Contains(typeof(T)))
+                throw new ArgumentNullException(nameof(valueConverter),
+                    $"valueConverter is required for non-primitive type {typeof(T).Name}.");
+        }
 
         /// <summary>
         /// Clips the segment to the data bounding box using Liang-Barsky.
@@ -131,11 +231,11 @@ namespace MxPlot.Core.Processing
         /// <c>Pos[0]</c> is always 0 (clipped start); <c>Pos[n-1]</c> equals the clipped segment length.
         /// </summary>
         private static (double[] Pos, double[] Values) SampleLine(
-            IMatrixData src,
             (double X, double Y) clippedStart,
             (double X, double Y) clippedEnd,
             double clippedLen,
-            int n, int frameIndex, LineProfileOption option)
+            int n,
+            Func<double, double, double> sampleAt)
         {
             double cdx = clippedEnd.X - clippedStart.X;
             double cdy = clippedEnd.Y - clippedStart.Y;
@@ -150,11 +250,10 @@ namespace MxPlot.Core.Processing
             for (int i = 0; i < n; i++)
             {
                 double d = i * step;
+                double x = clippedStart.X + ux * d;
+                double y = clippedStart.Y + uy * d;
                 pos[i]    = d;
-                values[i] = Sample(src,
-                    clippedStart.X + ux * d,
-                    clippedStart.Y + uy * d,
-                    frameIndex, option);
+                values[i] = sampleAt(x, y);
             }
 
             return (pos, values);
@@ -191,6 +290,43 @@ namespace MxPlot.Core.Processing
             ix = Math.Clamp(ix, 0, src.XCount - 1);
             iy = Math.Clamp(iy, 0, src.YCount - 1);
             return src.GetValueAt(ix, iy, frameIndex);
+        }
+
+        /// <summary>
+        /// Typed counterpart of <see cref="Sample(IMatrixData, double, double, int, LineProfileOption)"/>.
+        /// For primitive <typeparamref name="T"/>, delegates to the same <see cref="IMatrixData"/>-level
+        /// accessors used by the type-erased overloads. For non-primitive <typeparamref name="T"/>
+        /// (e.g. <c>Complex</c>), sampling/interpolation happens in <typeparamref name="T"/>-space via
+        /// <see cref="MatrixData{T}.GetValue(double, double, int, bool)"/> / <see cref="MatrixData{T}.GetValueAtTyped"/>,
+        /// and <paramref name="valueConverter"/> reduces the result to <c>double</c>.
+        /// </summary>
+        private static double SampleTyped<T>(MatrixData<T> src, double x, double y,
+            int frameIndex, LineProfileOption option, Func<T, double>? valueConverter)
+            where T : unmanaged
+        {
+            bool isPrimitive = MatrixData.SupportedPrimitiveTypes.Contains(typeof(T));
+
+            if (option == LineProfileOption.Bilinear)
+            {
+                if (isPrimitive)
+                    return src.GetValueAsDouble(x, y, frameIndex, interpolate: true);
+
+                // Interpolate structurally in T-space first (GetValue falls back to nearest-neighbor
+                // internally when no IBilinearInterpolator<T> is registered for T), then reduce to double.
+                T interpolated = src.GetValue(x, y, frameIndex, interpolate: true);
+                return valueConverter!(interpolated);
+            }
+
+            // NearestNeighbor
+            int ix = (int)Math.Round((x - src.XMin) / src.XStep);
+            int iy = (int)Math.Round((y - src.YMin) / src.YStep);
+            ix = Math.Clamp(ix, 0, src.XCount - 1);
+            iy = Math.Clamp(iy, 0, src.YCount - 1);
+
+            if (isPrimitive)
+                return src.GetValueAt(ix, iy, frameIndex);
+
+            return valueConverter!(src.GetValueAtTyped(ix, iy, frameIndex));
         }
     }
 }

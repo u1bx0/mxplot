@@ -58,6 +58,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         private bool _cachedInverted;
         private int[]? _cachedColorMap;
 
+        // Frame-sized scratch buffer; see EnsureScratch.
+        private int[]? _scratch;
+
         #endregion
 
         #region IBitmapWriter Properties
@@ -207,41 +210,51 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         #region Core Rendering
 
-        private void RenderCore(IMatrixData source, WriteableBitmap target, LutRenderingContext ctx)
+        private unsafe void RenderCore(IMatrixData source, WriteableBitmap target, LutRenderingContext ctx)
         {
-            using var fb = target.Lock();
+            var (viewMin, viewMax) = ctx.GetEffectiveRange();
+            double range = viewMax - viewMin;
+            if (range == 0) range = 1.0;
 
-            unsafe
+            double valueScale = (ctx.LookupTable.Levels - 1) / range;
+            double valueOffset = -viewMin * valueScale;
+            int lutMaxIndex = ctx.LookupTable.Levels - 1;
+
+            int width = source.XCount;
+            int height = source.YCount;
+            var scratch = EnsureScratch(width, height);
+
+            fixed (int* pScratch = scratch)
             {
-                var (viewMin, viewMax) = ctx.GetEffectiveRange();
-                double range = viewMax - viewMin;
-                if (range == 0) range = 1.0;
+                // FlipY is absorbed here, so the blit below is always a plain forward copy.
+                int* targetPtr = FlipY ? pScratch + (height - 1) * width : pScratch;
+                int strideInts = FlipY ? -width : width;
 
-                double valueScale = (ctx.LookupTable.Levels - 1) / range;
-                double valueOffset = -viewMin * valueScale;
-                int lutMaxIndex = ctx.LookupTable.Levels - 1;
-
-                int width = source.XCount;
-                int height = source.YCount;
-                int posStride = fb.RowBytes / 4;
-
-                int* targetPtr;
-                int strideInts;
-                if (FlipY)
-                {
-                    targetPtr = (int*)fb.Address + (height - 1) * posStride;
-                    strideInts = -posStride;
-                }
-                else
-                {
-                    targetPtr = (int*)fb.Address;
-                    strideInts = posStride;
-                }
-
+                // Rendered outside the bitmap lock on purpose — see BitmapBlit.
                 var lutMemory = ctx.LookupTable.AsReadOnlyMemory();
                 _renderLoop(source, ctx.FrameIndex, targetPtr, strideInts, width, height,
                             lutMemory, valueScale, valueOffset, lutMaxIndex);
+
+                using var fb = target.Lock();
+                BitmapBlit.Rows(pScratch, width, height, fb);
             }
+        }
+
+        /// <summary>
+        /// Returns the buffer the render loops write into, growing it when the frame size changes.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not an <see cref="System.Buffers.ArrayPool{T}"/> rental: the shared pool
+        /// does not retain arrays larger than 2^20 elements, so a 4000x3000 frame would allocate
+        /// 48 MB on the large object heap on every single render. One buffer per writer — and
+        /// there is one writer per <c>RenderSurface</c> — is both cheaper and simpler.
+        /// </remarks>
+        private int[] EnsureScratch(int width, int height)
+        {
+            int needed = width * height;
+            if (_scratch == null || _scratch.Length < needed)
+                _scratch = new int[needed];
+            return _scratch;
         }
 
         #endregion

@@ -1,9 +1,13 @@
 ﻿using Avalonia;
 using Avalonia.Threading;
 using MxPlot.Core;
+using MxPlot.Core.Imaging;
 using MxPlot.Core.Processing;
+using MxPlot.Core.Utils;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace MxPlot.UI.Avalonia.Controls
@@ -35,7 +39,7 @@ namespace MxPlot.UI.Avalonia.Controls
     /// Slice updates run on a background thread; a pending-update pattern ensures the
     /// final crosshair position is always rendered even under rapid mouse movement.
     /// </remarks>
-    public sealed class OrthogonalViewController
+    public sealed partial class OrthogonalViewController
     {
         private readonly OrthogonalPanel _panel;
 
@@ -121,19 +125,58 @@ namespace MxPlot.UI.Avalonia.Controls
             => _orthoViewScalePerAxis;
 
         // Stores per-axis orthogonal-view scale settings: axisName → (mode, user-facing ratio)
-        private readonly System.Collections.Generic.Dictionary<string, (OrthoScaleMode Mode, double Ratio)> _orthoViewScalePerAxis = new();
+        private readonly System.Collections.Generic.Dictionary<string, (OrthoScaleMode Mode, double Ratio)> _orthoViewScalePerAxis = new(StringComparer.OrdinalIgnoreCase);
 
         private IMatrixData? _data;
         private string       _axisName = string.Empty;
 
+        // Scoped to this controller's lifetime (== its owning MatrixPlotter window's lifetime --
+        // one controller is created once in InitializeOrthogonalPanel and never recreated). A
+        // background Task.Run (UpdateSlicesAsync, ComputeXYProjectionAsync) started before the
+        // window closes keeps running regardless; cancelling this right when the window closes
+        // (see CancelPendingWork, called from MatrixPlotter.OnClosed) lets each Task's completion
+        // check "does anyone still want this?" once, right before it hands off to
+        // Dispatcher.UIThread.Post, instead of every downstream consumer needing its own
+        // "is my window still alive" check scattered wherever a continuation might eventually touch
+        // window-level state (an actual crash: PositionBesideParent's Screens access threw
+        // ObjectDisposedException after a ComputeXYProjectionAsync scan outlived its parent window).
+        private readonly CancellationTokenSource _lifetimeCts = new();
+
+        /// <summary>
+        /// Cancels this controller's lifetime token, so any background compute already in flight
+        /// (see the token checks in <see cref="UpdateSlicesAsync"/> / <see cref="ComputeXYProjectionAsync"/>)
+        /// discards its result instead of posting it back to a UI thread continuation that would
+        /// touch this controller's (about to be gone) owning window. Call once, from the owning
+        /// <c>MatrixPlotter</c>'s <c>OnClosed</c>.
+        /// </summary>
+        internal void CancelPendingWork() => _lifetimeCts.Cancel();
+
         private bool _isUpdating;
         private bool _hasPending;
-        private int  _pendingIX;
-        private int  _pendingIY;
+        // Accumulated (OR'd) across every request coalesced into one pending re-run while a Task
+        // is in flight -- see UpdateSlicesAsync for why OR-accumulation, not "latest call wins",
+        // is required for correctness here.
+        private bool _pendingXChanged;
+        private bool _pendingYChanged;
         private bool _isSyncing;
         private bool _isExporting;
-        private int  _lastIX = -1;
-        private int  _lastIY = -1;
+        // Current/target crosshair position (data-array indices). Despite the name matching
+        // CurrentIX/CurrentIY below, this is written *before* the async slice rebuild starts, so
+        // during an in-flight update it already holds the next target, not what's currently
+        // rendered -- exactly the semantics CurrentIX/CurrentIY's callers (InvokeExtractFrame) want.
+        private int  _currentIX = -1;
+        private int  _currentIY = -1;
+
+        // Same coalescing shape as _isUpdating/_hasPending above, for ComputeXYProjectionAsync:
+        // without it, dragging the ColorCoded histogram's Start/End bars fires one full
+        // ExtremumIndexOperation-scanning Task.Run per drag tick, all running concurrently and
+        // fighting over CPU cores instead of queueing -- confirmed via trace logging (each scan's
+        // own elapsed time balloons from ~800ms to 7s+ as more pile up). While one is in flight,
+        // later requests just note that a fresh recompute is needed once it finishes; the shared
+        // _xyColorCoded* fields SetColorCodedParams already writes into before calling this method
+        // mean the eventual re-run naturally picks up the latest params with no extra state to carry.
+        private bool _xyComputeInFlight;
+        private bool _xyComputeHasPending;
 
         private EventHandler<int>? _axisIndicatorDraggedHandlerBottom;
         private EventHandler<int>? _axisIndicatorDraggedHandlerRight;
@@ -145,9 +188,61 @@ namespace MxPlot.UI.Avalonia.Controls
         private ProjectionMode? _xzProjectionMode;   // null = slice mode
         private ProjectionMode? _yzProjectionMode;   // null = slice mode
         private ProjectionMode? _xyProjectionMode;   // null = no XY projection
+        // Whether the current XY projection is ColorCoded (Color(Max)/Color(Min)) rather than a
+        // plain intensity projection. _xyProjectionMode still carries which extremum (Maximum/
+        // Minimum) even when this is true -- ColorCoded is an orthogonal "also colour it" flag,
+        // not a separate mode value (see ColorCoded_View_InitialDesign.md section 3.3.3).
+        private bool _xyColorCoded;
+        // Start/End sweep range for the ColorCoded scan. Reset to the full axis whenever XY
+        // ColorCoded is freshly (re-)enabled; from then on driven by the projection child
+        // window's own details panel via SetColorCodedParams (design doc section 3.3.2).
+        private int _xyColorCodedStart;
+        private int _xyColorCodedEnd;
+        // Depth palette (null = default ColorThemes.Spectrum), intensity-range mode (false = Auto,
+        // derived from winnerValue.GetValueRange() every recompute; true = Fixed, pinned to
+        // _xyColorCodedFixedMin/Max), and Invert -- all driven by the child window's header/details
+        // UI the same way Start/End are. See MatrixPlotter.ColorCoded.cs / SetColorCodedParams.
+        private LookupTable? _xyColorCodedDepthLut;
+        private bool _xyColorCodedRangeFixed;
+        private double _xyColorCodedFixedMin;
+        private double _xyColorCodedFixedMax;
+        private bool _xyColorCodedInvert;
+        // The natural (winnerValue.GetValueRange()) range from the most recent recompute -- always
+        // captured regardless of Fixed/Auto, so the child window's Auto-mode display can show it
+        // and its Search buttons have something to search for even while Fixed is selected. Null
+        // until the first ColorCoded recompute completes.
+        private double? _xyColorCodedLastAutoMin;
+        private double? _xyColorCodedLastAutoMax;
+        // The winner-index/depth-palette/resolved-range/invert bundle from the most recent recompute
+        // -- pushed to the projection child window as ColorCodedRenderInfo, which
+        // ColorCodedBitmapWriter combines at render time with the window's own MatrixData (now the
+        // winner *value* matrix directly, an ordinary projection-shaped result) and which the
+        // pointer read-out also uses for the depth position. See ColorCodedRenderInfo's doc comment
+        // for the reasoning behind this split (and why the earlier packed-ARGB baked-pixel design
+        // was abandoned).
+        private ColorCodedRenderInfo? _xyColorCodedLastRenderInfo;
         private IMatrixData?    _xzProjectionCache;
         private IMatrixData?    _yzProjectionCache;
         private IMatrixData?    _xyProjectionCache;
+
+        // Snapshot of every axis's position (Dimensions.GetAxisIndices()) as of the last
+        // RefreshSlices() call that actually went through, used to detect "did anything besides the
+        // frozen/orthogonal axis itself move" -- see RefreshSlices. Null forces the next call to
+        // always run: an all-zero array would be indistinguishable from a real position where every
+        // axis happens to sit at index 0, so "no snapshot yet" needs its own sentinel. Reset in
+        // Activate/Deactivate, since which axis is "the frozen one" (and therefore excluded from the
+        // comparison) changes there.
+        private int[]? _lastNonOrthoAxisPositions;
+
+        /// <summary>
+        /// Incremented whenever a projection cache is invalidated. An async slice/projection run
+        /// captures it at entry and only stores its result if the value is unchanged on completion.
+        /// Without this an in-flight run that had captured a cache entry *before* an invalidation
+        /// writes that stale entry straight back afterwards, resurrecting it - which is exactly what
+        /// happened on a Time change in Composite mode, where SetCompositeState kicks off a run just
+        /// before RefreshSlices clears the caches.
+        /// </summary>
+        private int _cacheEpoch;
 
         /// <summary>
         /// Fired when an XY (Z-direction) projection result is available or cleared.
@@ -156,21 +251,155 @@ namespace MxPlot.UI.Avalonia.Controls
         public event EventHandler<IMatrixData?>? XYProjectionChanged;
 
         /// <summary>
+        /// Fired when a ColorCoded recompute's background <see cref="Task.Run"/> throws, so a
+        /// listener that turned on a "recomputing" indicator around the request (e.g. the projection
+        /// child window's busy overlay over its histogram, see <c>MatrixPlotter.SetColorCodedBusy</c>)
+        /// gets a chance to turn it back off -- <see cref="XYProjectionChanged"/> is not raised on
+        /// this path, so nothing else clears it.
+        /// </summary>
+        internal event Action? ColorCodedComputeFailed;
+
+        // ── Composite state (Channel-axis blending; see MatrixPlotter.Composite.cs) ──
+        private bool _compositeActive;
+        private int _compositeAxisDimIndex = -1;
+        private int _compositeChannelCount;
+        private System.Collections.Generic.IReadOnlyList<Rendering.BlendRecipe>? _compositeRecipes;
+        private Rendering.BlendMode _compositeBlendMode = Rendering.BlendMode.Additive;
+
+        /// <summary>
+        /// Informs the controller whether Composite mode is active for the given Channel-axis
+        /// Dimensions index, and the current recipes/blend mode to use when Composite is on.
+        /// Called by <c>MatrixPlotter.Composite.cs</c> on every Enter/Exit and recipe edit.
+        /// The actual per-channel slice/projection extraction happens in
+        /// <see cref="UpdateSlicesAsync"/> / <see cref="ComputeXYProjectionAsync"/>.
+        /// </summary>
+        internal void SetCompositeState(
+            bool active, int channelAxisDimIndex, int channelCount,
+            System.Collections.Generic.IReadOnlyList<Rendering.BlendRecipe>? recipes,
+            Rendering.BlendMode blendMode)
+        {
+            // Composite and ColorCoded are mutually exclusive (design doc: combining them -- e.g.
+            // depth-colouring each Composite channel separately -- has no clear meaning and isn't a
+            // wanted feature). Restrict the XY combo before anything else below so a nested
+            // SelectionChanged (fired only if the XY row was actually showing Color(Max)/(Min))
+            // reaches OnProjectionSelectionChanged while every field here still reflects the *old*
+            // state -- harmless: the ComputeXYProjectionAsync this method itself triggers further
+            // down, once the new state is fully applied, supersedes it via the epoch guard.
+            _panel.ProjectionSelector.SetCompositeActive(active);
+
+            // A cached projection was computed for one particular shape: a LUT-mode projection is a
+            // single frame, a composite one a merged N-frame set. Toggling composite - or changing
+            // the channel count - therefore makes every cache stale. Without dropping them,
+            // UpdateSlicesAsync's "both planes projected and cached" fast path returns immediately
+            // and the side views keep displaying the projection built in the previous mode.
+            bool shapeChanged = _compositeActive != active
+                             || _compositeChannelCount != (active ? channelCount : 0);
+
+            _compositeActive = active;
+            _compositeAxisDimIndex = active ? channelAxisDimIndex : -1;
+            _compositeChannelCount = active ? channelCount : 0;
+            _compositeRecipes = active ? recipes : null;
+            _compositeBlendMode = blendMode;
+
+            if (shapeChanged)
+            {
+                _xzProjectionCache = null;
+                _yzProjectionCache = null;
+                _xyProjectionCache = null;
+                _cacheEpoch++;
+            }
+
+            // Recipe / blend edits change only how the existing slices are rendered, so they need no
+            // recomputation - but the side views still have to receive them. UpdateSlicesAsync
+            // applies the composite state only after doing work, and its fast path can skip that
+            // entirely, so push it here too.
+            ApplyCompositeViewState(_panel.BottomView, _compositeActive, _compositeChannelCount,
+                                    _compositeRecipes, _compositeBlendMode);
+            ApplyCompositeViewState(_panel.RightView, _compositeActive, _compositeChannelCount,
+                                    _compositeRecipes, _compositeBlendMode);
+
+            // Only a shape change (composite toggled on/off, or channel count changed) invalidates
+            // the cached slices/projections and requires recomputation. A pure recipe/blend edit
+            // (color, min/max, gain) is already fully handled by the synchronous ApplyCompositeViewState
+            // calls above - triggering UpdateSlicesAsync here as well would let a stale recipe captured
+            // by that in-flight run overwrite the fresh one just pushed (see UpdateSlicesAsync).
+            if (shapeChanged && _data != null && _currentIX >= 0 && _currentIY >= 0)
+            {
+                UpdateSlicesAsync(xChanged: true, yChanged: true);
+                if (_xyProjectionMode != null)
+                    ComputeXYProjectionAsync();
+            }
+        }
+
+        /// <summary>
         /// The depth axis name when orthogonal views are active, or <c>null</c> when deactivated.
         /// </summary>
         public string? ActiveAxisName => _data != null ? _axisName : null;
 
         /// <summary>Current crosshair X index (main data column) used for YZ slice.</summary>
-        public int CurrentIX => _lastIX;
+        public int CurrentIX => _currentIX;
 
         /// <summary>Current crosshair Y index (main data row) used for XZ slice.</summary>
-        public int CurrentIY => _lastIY;
+        public int CurrentIY => _currentIY;
 
         /// <summary>Current XZ projection mode, or <c>null</c> when in slice mode.</summary>
         internal ProjectionMode? XzProjectionMode => _xzProjectionMode;
 
         /// <summary>Current YZ projection mode, or <c>null</c> when in slice mode.</summary>
         internal ProjectionMode? YzProjectionMode => _yzProjectionMode;
+
+        /// <summary>
+        /// Current ColorCoded scan/colorize parameters, for the projection child window to seed its
+        /// header/details UI from when it first enters ColorCoded mode (<see cref="MatrixPlotter.EnterColorCodedProjectionMode"/>).
+        /// </summary>
+        internal (int Start, int End, LookupTable? DepthLut, bool RangeFixed, double FixedMin, double FixedMax, bool Invert) ColorCodedParams
+            => (_xyColorCodedStart, _xyColorCodedEnd, _xyColorCodedDepthLut,
+                _xyColorCodedRangeFixed, _xyColorCodedFixedMin, _xyColorCodedFixedMax, _xyColorCodedInvert);
+
+        /// <summary>The frozen axis's frame count, i.e. the valid Start/End upper bound. 1 when inactive.</summary>
+        internal int ActiveAxisCount => _data?.Dimensions[_axisName]?.Count ?? 1;
+
+        /// <summary>
+        /// The natural (Auto) intensity range from the most recently completed ColorCoded
+        /// recompute -- <c>winnerValue.GetValueRange()</c>, captured regardless of whether Fixed or
+        /// Auto is actually selected. <c>null</c> until the first recompute completes. The child
+        /// window uses this to keep its Auto-mode display current and to seed its Search buttons
+        /// while in Fixed mode (<see cref="MatrixPlotter.UpdateColorCodedAutoRange"/>).
+        /// </summary>
+        internal (double? Min, double? Max) LastColorCodedAutoRange => (_xyColorCodedLastAutoMin, _xyColorCodedLastAutoMax);
+
+        /// <summary>
+        /// The winner-index/depth-palette/resolved-range/invert bundle from the most recently
+        /// completed ColorCoded recompute, for the child window to push into its
+        /// <c>MxView.ColorCodedInfo</c> (<see cref="MatrixPlotter.UpdateColorCodedInfo"/>) -- drives
+        /// both <see cref="ColorCodedBitmapWriter"/>'s rendering and the pointer read-out's depth
+        /// position. <c>null</c> until the first recompute completes.
+        /// </summary>
+        internal ColorCodedRenderInfo? LastColorCodedRenderInfo => _xyColorCodedLastRenderInfo;
+
+        /// <summary>
+        /// Updates the ColorCoded scan/colorize parameters from the projection child window's own
+        /// header/details UI (<see cref="MatrixPlotter.ColorCodedParamsChanged"/>) and recomputes if
+        /// ColorCoded is currently active. The scan (<see cref="ExtremumIndexOperation"/>) runs here,
+        /// against the source data this controller owns -- the winner value result and the
+        /// winner-index/depth-palette/range/invert bundle needed to colour it are both pushed back
+        /// down through <see cref="XYProjectionChanged"/> -> <c>OnXYProjectionChanged</c> ->
+        /// <c>UpdateProjectionData</c>/<c>UpdateColorCodedInfo</c>.
+        /// </summary>
+        internal void SetColorCodedParams(int start, int end, LookupTable? depthLut,
+            bool rangeFixed, double fixedMin, double fixedMax, bool invert)
+        {
+            _xyColorCodedStart = start;
+            _xyColorCodedEnd = end;
+            _xyColorCodedDepthLut = depthLut;
+            _xyColorCodedRangeFixed = rangeFixed;
+            _xyColorCodedFixedMin = fixedMin;
+            _xyColorCodedFixedMax = fixedMax;
+            _xyColorCodedInvert = invert;
+            _xyProjectionCache = null;
+            _cacheEpoch++;
+            if (_xyColorCoded) ComputeXYProjectionAsync();
+        }
 
         /// <summary>
         /// Rebuilds the side-view slices/projections for the given crosshair position and
@@ -188,9 +417,10 @@ namespace MxPlot.UI.Avalonia.Controls
             _xzProjectionCache = null;
             _yzProjectionCache = null;
             _xyProjectionCache = null;
-            if (_data != null && _lastIX >= 0 && _lastIY >= 0)
+            _cacheEpoch++;
+            if (_data != null && _currentIX >= 0 && _currentIY >= 0)
             {
-                UpdateSlicesAsync(_lastIX, _lastIY);
+                UpdateSlicesAsync(xChanged: true, yChanged: true);
                 if (_xyProjectionMode != null)
                     ComputeXYProjectionAsync();
             }
@@ -259,6 +489,9 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _data     = data;
             _axisName = axisName;
+            // Which axis is "the frozen one" just changed (or this is a fresh activation), so any
+            // previous non-frozen-axis-position snapshot no longer applies -- see RefreshSlices.
+            _lastNonOrthoAxisPositions = null;
 
             // Restore per-axis orthogonal-view scale setting if one was previously saved.
             if (_orthoViewScalePerAxis.TryGetValue(axisName, out var saved))
@@ -269,7 +502,7 @@ namespace MxPlot.UI.Avalonia.Controls
                     int xCount = data.XCount;
                     double xStep = data.XStep;
                     // ZCount = depth pixel count; look up the exact axis being frozen, not Axes[0]
-                    var frozenAxis = data.Axes.FirstOrDefault(a => a.Name == axisName);
+                    var frozenAxis = data.Axes.FindAxis(axisName);
                     int zCount = frozenAxis?.Count ?? 1;
                     _orthoCustomAxisStep = (xCount > 0 && xStep > 0 && zCount > 0)
                         ? saved.Ratio * xCount * xStep / zCount
@@ -321,7 +554,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
             SyncRenderSettings();
             _panel.ProjectionSelector.UpdateAxisName(axisName);
-            _panel.ProjectionSelector.UpdateHyperstackState(data.Dimensions.AxisCount > 1);
+            // Projecting a single-axis volume down to one frame is still useful, so this is not
+            // gated on hyperstacks - only on an orthogonal axis being active at all.
+            _panel.ProjectionSelector.UpdateProjectedDataAvailability(true);
 
             // Disable projection for Complex data (projection requires IMinMaxValue<T> constraint)
             bool supportsProjection = data.ValueType != typeof(System.Numerics.Complex);
@@ -351,6 +586,20 @@ namespace MxPlot.UI.Avalonia.Controls
             var    cp = new Point(cx, cy);
             _panel.MainView.SetCrosshairDataPosition(cp);
             UpdateFrameIndicator();
+
+            // Force OnCrosshairMoved below to rebuild both side views even if the computed ix/iy
+            // happen to equal _currentIX/_currentIY from a previous Activate() call (e.g.
+            // re-freezing at the same data-center position after switching the frozen axis, or
+            // unfreeze-then-refreeze without moving the crosshair in between) -- xChanged/yChanged
+            // there is a pure position diff meant only for genuine crosshair drags (see
+            // UpdateSlicesAsync's doc comment: "callers that changed something other than
+            // position... must pass true for both"), and can't detect "the axis being sliced
+            // changed" on its own since Activate() always resets to the same centered position.
+            // -1 is this class's existing "no valid position yet" sentinel (see _currentIX's
+            // field initializer and its CurrentIX >= 0 guard elsewhere), so it's guaranteed to
+            // differ from any real (always >= 0) computed index.
+            _currentIX = -1;
+            _currentIY = -1;
             OnCrosshairMoved(this, cp);
         }
 
@@ -375,7 +624,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _axisIndicatorDragEndedHandlerBottom = null;
             _axisIndicatorDragEndedHandlerRight  = null;
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
-            _panel.ProjectionSelector.UpdateHyperstackState(false);
+            _panel.ProjectionSelector.UpdateProjectedDataAvailability(false);
             _panel.MainView.ShowCrosshair = false;
             _panel.MainView.AxisIndicatorPx = null;
             _panel.MainView.AxisIndicatorLabel = null;
@@ -385,11 +634,14 @@ namespace MxPlot.UI.Avalonia.Controls
             _panel.BottomView.SetMatrixDataInternal(null);
             _xzProjectionCache = null;
             _yzProjectionCache = null;
+            _cacheEpoch++;
             bool hadXYProjection = _xyProjectionMode != null;
             _xyProjectionMode  = null;
+            _xyColorCoded      = false;
             _xyProjectionCache = null;
             _data     = null;
             _axisName = string.Empty;
+            _lastNonOrthoAxisPositions = null;
 
             if (hadXYProjection)
                 XYProjectionChanged?.Invoke(this, null);
@@ -460,7 +712,7 @@ namespace MxPlot.UI.Avalonia.Controls
             string label = "";
             if (_data != null)
             {
-                var axis = _data.Axes.FirstOrDefault(a => a.Name == _axisName);
+                var axis = _data.Axes.FindAxis(_axisName);
                 if (axis != null)
                 {
                     idx = axis.Index;
@@ -482,21 +734,83 @@ namespace MxPlot.UI.Avalonia.Controls
         }
 
         /// <summary>
-        /// Re-runs the slice update at the last known crosshair position.
-        /// Call when the active frame changes because a non-volume axis index changed.
-        /// Has no effect if the orthogonal view is not active or no crosshair position has been set.
+        /// Re-runs the slice update at the last known crosshair position, always recomputing.
+        /// Call after the underlying pixel data itself may have changed in place -- e.g.
+        /// <c>MatrixPlotter.Refresh(rebuildOrthogonalData: true)</c> after a filter/edit -- where
+        /// axis positions alone can't tell us whether the visible slice actually needs rebuilding,
+        /// so this always does the work. For a pure axis-navigation trigger (every
+        /// <see cref="Core.IMatrixData.ActiveIndexChanged"/>), use
+        /// <see cref="RefreshSlicesIfAxisChanged"/> instead, which can skip redundant work.
+        /// No-op if the orthogonal view is not active or no crosshair position has been set.
         /// </summary>
         public void RefreshSlices()
         {
             if (_isExporting) return;
-            if (_data == null || _lastIX < 0 || _lastIY < 0) return;
+            if (_data == null || _currentIX < 0 || _currentIY < 0) return;
+            // Keep the baseline current so a later RefreshSlicesIfAxisChanged call isn't judged
+            // against a stale snapshot that predates this (possibly content-only) refresh.
+            _lastNonOrthoAxisPositions = _data.Dimensions.GetAxisIndices();
+            DoRefreshSlices();
+        }
+
+        /// <summary>
+        /// Same as <see cref="RefreshSlices"/>, but skips the recompute when the only axis whose
+        /// index changed since the last call is the frozen/orthogonal axis itself
+        /// (<see cref="_axisName"/>) -- moving along it doesn't change what XZ/YZ (slice or
+        /// projection mode) or the XY-projection window show, since those already span its entire
+        /// range by construction. Call this, not <see cref="RefreshSlices"/>, from
+        /// <see cref="Core.IMatrixData.ActiveIndexChanged"/>, which fires uniformly for every axis --
+        /// the frozen axis's own <see cref="AxisTracker"/> slider and the side views' draggable
+        /// depth indicator included, both of which just set the same <see cref="Axis.Index"/>.
+        /// </summary>
+        public void RefreshSlicesIfAxisChanged()
+        {
+            if (_isExporting) return;
+            if (_data == null || _currentIX < 0 || _currentIY < 0) return;
+
+            // _lastNonOrthoAxisPositions == null means "no baseline yet" (first call after
+            // Activate, or after a fresh RefreshSlices reset it) -- must always fall through and run.
+            int[] currentPositions = _data.Dimensions.GetAxisIndices();
+            if (_lastNonOrthoAxisPositions != null
+                && OnlyFrozenAxisDiffers(currentPositions, _lastNonOrthoAxisPositions))
+            {
+                _lastNonOrthoAxisPositions = currentPositions;
+                return;
+            }
+            _lastNonOrthoAxisPositions = currentPositions;
+            DoRefreshSlices();
+        }
+
+        private void DoRefreshSlices()
+        {
             // Projection caches depend on frame data; invalidate on any refresh
             _xzProjectionCache = null;
             _yzProjectionCache = null;
             _xyProjectionCache = null;
-            UpdateSlicesAsync(_lastIX, _lastIY);
+            _cacheEpoch++;
+            UpdateSlicesAsync(xChanged: true, yChanged: true);
             if (_xyProjectionMode != null)
                 ComputeXYProjectionAsync();
+        }
+
+        /// <summary>
+        /// True when <paramref name="a"/> and <paramref name="b"/> agree on every axis except the
+        /// currently frozen/orthogonal one (<see cref="_axisName"/>) -- the equality that makes
+        /// <see cref="RefreshSlicesIfAxisChanged"/>'s skip valid. Mirrors
+        /// <see cref="Core.IO.CacheStrategies.DimensionStrategy.ContextMatchesExceptTargetAxis"/>'s
+        /// same shape for the same reason (Volume mode's preload target set is likewise independent
+        /// of the target axis's own position), just applied here to "does this recompute need to run"
+        /// instead of "is this memoized target set still valid".
+        /// </summary>
+        private bool OnlyFrozenAxisDiffers(int[] a, int[] b)
+        {
+            int frozenIdx = _data!.Dimensions.GetAxisOrder(_axisName);
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (i == frozenIdx) continue;
+                if (a[i] != b[i]) return false;
+            }
+            return true;
         }
 
         /// <summary>
@@ -509,10 +823,10 @@ namespace MxPlot.UI.Avalonia.Controls
         public void RefreshCrosshairAndSlices()
         {
             var md = _data;
-            if (md == null || _lastIX < 0 || _lastIY < 0) return;
+            if (md == null || _currentIX < 0 || _currentIY < 0) return;
 
-            int ix = Math.Clamp(_lastIX, 0, md.XCount - 1);
-            int iy = Math.Clamp(_lastIY, 0, md.YCount - 1);
+            int ix = Math.Clamp(_currentIX, 0, md.XCount - 1);
+            int iy = Math.Clamp(_currentIY, 0, md.YCount - 1);
 
             if (md.XStep != 0 && md.YStep != 0)
             {
@@ -522,10 +836,10 @@ namespace MxPlot.UI.Avalonia.Controls
                 _panel.MainView.SetCrosshairDataPosition(new Point(cx, cy));
             }
 
-            _lastIX = ix;
-            _lastIY = iy;
+            _currentIX = ix;
+            _currentIY = iy;
             UpdateFrameIndicator();
-            UpdateSlicesAsync(ix, iy);
+            UpdateSlicesAsync(xChanged: true, yChanged: true);
         }
 
         private void OnMainScrollStateChanged(object? sender, EventArgs e) => SyncZoomFromMainView();
@@ -658,11 +972,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
                     // Issue 4: adjust MainView's Y translation so the CrossHair row stays centred.
                     double targetTransY = main.RawTransY;
-                    if (_data != null && _lastIY >= 0 && main.Bounds.Height > 0)
+                    if (_data != null && _currentIY >= 0 && main.Bounds.Height > 0)
                     {
-                        // _lastIY is a data-array row index (0 = YMin).
+                        // _currentIY is a data-array row index (0 = YMin).
                         // MainView uses FlipY=true: bmpRow 0 = top of image = YMax.
-                        int bmpRow = _data.YCount - 1 - _lastIY;
+                        int bmpRow = _data.YCount - 1 - _currentIY;
                         targetTransY = main.Bounds.Height / 2.0 - (bmpRow + 0.5) * zoomMain * ayMain;
                     }
                     main.ApplyZoomAndTrans(zoomMain, bot.RawTransX, targetTransY);
@@ -693,9 +1007,9 @@ namespace MxPlot.UI.Avalonia.Controls
 
                     // Issue 4: adjust MainView's X translation so the CrossHair column stays centred.
                     double targetTransX = main.RawTransX;
-                    if (_data != null && _lastIX >= 0 && main.Bounds.Width > 0)
+                    if (_data != null && _currentIX >= 0 && main.Bounds.Width > 0)
                     {
-                        targetTransX = main.Bounds.Width / 2.0 - (_lastIX + 0.5) * zoomMain * axMain;
+                        targetTransX = main.Bounds.Width / 2.0 - (_currentIX + 0.5) * zoomMain * axMain;
                     }
                     main.ApplyZoomAndTrans(zoomMain, targetTransX, right.RawTransY);
 
@@ -714,7 +1028,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             var data = _data;
             if (data == null) return;
-            var axis = data.Axes.FirstOrDefault(a => a.Name == _axisName);
+            var axis = data.Axes.FindAxis(_axisName);
             if (axis == null) return;
             int clamped = Math.Clamp(newIdx, 0, axis.Count - 1);
             if (axis.Index != clamped)
@@ -745,35 +1059,73 @@ namespace MxPlot.UI.Avalonia.Controls
                 iy = Math.Clamp((int)Math.Floor(dataPos.Y), 0, md.YCount - 1);
             }
 
-            _lastIX = ix;
-            _lastIY = iy;
-            UpdateSlicesAsync(ix, iy);
+            bool xChanged = ix != _currentIX;
+            bool yChanged = iy != _currentIY;
+            _currentIX = ix;
+            _currentIY = iy;
+            UpdateSlicesAsync(xChanged, yChanged);
         }
 
-        private void UpdateSlicesAsync(int ix, int iy)
+        /// <summary>
+        /// Rebuilds whichever of the XZ/YZ side views actually needs it, using
+        /// <see cref="_currentIX"/>/<see cref="_currentIY"/> as the target position.
+        /// </summary>
+        /// <param name="xChanged">
+        /// Whether X changed since the view currently on screen was built -- if not, and YZ isn't
+        /// waiting on a fresh projection, YZ (which slices at X) is left untouched: XZ is a
+        /// Y-constant plane, so moving only along X can never change it, and rebuilding it anyway
+        /// was the redundant recompute this parameter exists to avoid. Callers that changed
+        /// something other than position (composite shape, projection mode, data itself) must pass
+        /// <see langword="true"/> for both -- the position-based skip only applies to pure
+        /// crosshair moves.
+        /// </param>
+        /// <param name="yChanged">Same as <paramref name="xChanged"/>, but for Y / the XZ view.</param>
+        private void UpdateSlicesAsync(bool xChanged, bool yChanged)
         {
             if (_isUpdating)
             {
+                // Multiple requests can collide here while one Task is in flight (e.g. two rapid
+                // crosshair moves). OR-accumulate rather than overwrite: if hop A→B left X unchanged
+                // but B→C changed it, the merged request (A→C) must still rebuild YZ. Transitivity
+                // guarantees this is exact, not just a safe over-approximation: A.x != C.x if and
+                // only if at least one of the coalesced hops changed X. The same accumulation also
+                // makes it safe for a "force everything" call (composite/projection/data change) to
+                // collide with a pending pure position move -- the merged flags end up true either way.
                 _hasPending = true;
-                _pendingIX  = ix;
-                _pendingIY  = iy;
+                _pendingXChanged |= xChanged;
+                _pendingYChanged |= yChanged;
                 return;
             }
 
             var data     = _data;
             var axisName = _axisName;
             if (data == null) return;
+            int ix = _currentIX;
+            int iy = _currentIY;
 
             // Capture current projection state for the background thread
             var xzProjMode = _xzProjectionMode;
             var yzProjMode = _yzProjectionMode;
             var xzCache    = _xzProjectionCache;
             var yzCache    = _yzProjectionCache;
+            int epoch      = _cacheEpoch;
 
-            // Fast path: both views are in projection mode and both caches are valid
-            // → no computation needed, only the slice-mode view requires a new result.
-            bool xzNeedsWork = xzProjMode.HasValue ? xzCache == null : true;
-            bool yzNeedsWork = yzProjMode.HasValue ? yzCache == null : true;
+            // Capture Composite shape state for the background thread (set via SetCompositeState;
+            // see MatrixPlotter.Composite.cs). When inactive this whole block is a no-op and
+            // the branches below fall through to the original single-channel code path.
+            // Recipes/blend mode are intentionally NOT captured here - they are read live
+            // (_compositeRecipes/_compositeBlendMode) when applied back on the UI thread below,
+            // so a recipe edit that lands while this run is in flight is never regressed.
+            bool compositeActive = _compositeActive;
+            int compositeAxisDimIndex = _compositeAxisDimIndex;
+            int compositeChannelCount = _compositeChannelCount;
+
+            // Fast path: nothing needs rebuilding, either because both views are in projection
+            // mode with valid caches, or because the axis a slice-mode view depends on didn't move.
+            // XZ slices at Y (ViewFrom.Y) so it only needs yChanged; YZ slices at X so it only needs
+            // xChanged.
+            bool xzNeedsWork = xzProjMode.HasValue ? xzCache == null : yChanged;
+            bool yzNeedsWork = yzProjMode.HasValue ? yzCache == null : xChanged;
             if (!xzNeedsWork && !yzNeedsWork)
             {
                 // May be reached from the pending re-entry after the previous run
@@ -786,35 +1138,61 @@ namespace MxPlot.UI.Avalonia.Controls
             _isUpdating = true;
             if (xzNeedsWork) _panel.BottomView.IsBusy = true;
             if (yzNeedsWork) _panel.RightView.IsBusy  = true;
+            var lifetimeToken = _lifetimeCts.Token;
             Task.Run(() =>
             {
                 try
                 {
+                    if (lifetimeToken.IsCancellationRequested) return;
                     IMatrixData? xz = null;
                     IMatrixData? yz = null;
 
-                    // XZ (BottomView): projection or slice?
-                    if (xzProjMode.HasValue)
-                        xz = xzCache ?? data.Apply(new ProjectionOperation(ViewFrom.Y, xzProjMode.Value, axisName));
-                    // YZ (RightView): projection or slice?
-                    if (yzProjMode.HasValue)
-                        yz = yzCache ?? data.Apply(new ProjectionOperation(ViewFrom.X, yzProjMode.Value, axisName));
-
-                    // Slice for whichever view is not in projection mode
-                    if (xz == null || yz == null)
+                    if (compositeActive)
                     {
-                        if (xz == null && yz == null)
+                        // Composite path: extract per-channel and merge, instead of a single
+                        // data.Apply(...) call. Never touches the non-composite branch below.
+                        if (xzProjMode.HasValue)
+                            xz = xzCache ?? BuildChannelComposite(data, compositeAxisDimIndex, compositeChannelCount, bi =>
+                                data.Apply(new ProjectionOperation(ViewFrom.Y, xzProjMode.Value, axisName, bi)));
+                        if (yzProjMode.HasValue)
+                            yz = yzCache ?? BuildChannelComposite(data, compositeAxisDimIndex, compositeChannelCount, bi =>
+                                data.Apply(new ProjectionOperation(ViewFrom.X, yzProjMode.Value, axisName, bi)));
+
+                        // Only rebuild the sides that actually need it -- see xzNeedsWork/yzNeedsWork
+                        // above. Leaving xz/yz null here means "unchanged, don't touch this view"
+                        // (see the SetMatrixDataInternal calls below).
+                        if (xz == null && xzNeedsWork)
+                            xz = BuildChannelComposite(data, compositeAxisDimIndex, compositeChannelCount, bi =>
+                                data.Apply(new SliceOperation(ViewFrom.Y, iy, axisName, bi)));
+                        if (yz == null && yzNeedsWork)
+                            yz = BuildChannelComposite(data, compositeAxisDimIndex, compositeChannelCount, bi =>
+                                data.Apply(new SliceOperation(ViewFrom.X, ix, axisName, bi)));
+                    }
+                    else
+                    {
+                        // XZ (BottomView): projection or slice?
+                        if (xzProjMode.HasValue)
+                            xz = xzCache ?? data.Apply(new ProjectionOperation(ViewFrom.Y, xzProjMode.Value, axisName));
+                        // YZ (RightView): projection or slice?
+                        if (yzProjMode.HasValue)
+                            yz = yzCache ?? data.Apply(new ProjectionOperation(ViewFrom.X, yzProjMode.Value, axisName));
+
+                        // Slice for whichever view is not in projection mode AND actually needs
+                        // rebuilding. Use the fused dual-plane op only when both do; otherwise a
+                        // single-plane SliceOperation avoids touching the unchanged side entirely.
+                        bool needXzSlice = xz == null && xzNeedsWork;
+                        bool needYzSlice = yz == null && yzNeedsWork;
+                        if (needXzSlice && needYzSlice)
                         {
-                            // Both slice
                             var slices = data.Apply(new SliceOrthogonalOperation(ix, iy, axisName));
                             xz = slices.XZ;
                             yz = slices.YZ;
                         }
-                        else if (xz == null)
+                        else if (needXzSlice)
                         {
                             xz = data.Apply(new SliceOperation(ViewFrom.Y, iy, axisName));
                         }
-                        else
+                        else if (needYzSlice)
                         {
                             yz = data.Apply(new SliceOperation(ViewFrom.X, ix, axisName));
                         }
@@ -824,11 +1202,16 @@ namespace MxPlot.UI.Avalonia.Controls
                     var newXzCache = xzProjMode.HasValue ? xz : null;
                     var newYzCache = yzProjMode.HasValue ? yz : null;
 
+                    if (lifetimeToken.IsCancellationRequested) return;
                     Dispatcher.UIThread.Post(() =>
                     {
-                        // Update projection caches
-                        if (xzProjMode.HasValue) _xzProjectionCache = newXzCache;
-                        if (yzProjMode.HasValue) _yzProjectionCache = newYzCache;
+                        // Update projection caches, unless something invalidated them while this
+                        // run was in flight - storing then would resurrect a stale projection.
+                        if (epoch == _cacheEpoch)
+                        {
+                            if (xzProjMode.HasValue) _xzProjectionCache = newXzCache;
+                            if (yzProjMode.HasValue) _yzProjectionCache = newYzCache;
+                        }
 
                         // Save non-shared axis translations before FitToView resets them.
                         // OnMatrixDataChanged → FitToView resets all translations; SyncSidesFromMain
@@ -838,9 +1221,21 @@ namespace MxPlot.UI.Avalonia.Controls
                         double savedBotTransY   = _panel.BottomView.RawTransY;
                         double savedRightTransX = _panel.RightView.RawTransX;
 
+                        // Apply the *live* recipes/blend mode here, not the ones captured at the start
+                        // of this Task.Run: a recipe/blend edit (e.g. dragging a channel's histogram Max)
+                        // made while this run was in flight already pushed its own fresh values
+                        // synchronously via SetCompositeState -> ApplyCompositeViewState. Reapplying the
+                        // stale captured copy here would silently regress that edit right after it took
+                        // effect. compositeActive/compositeChannelCount stay captured because they must
+                        // match the shape of the xz/yz frames this run just built.
                         _isSyncing = true;
-                        _panel.BottomView.SetMatrixDataInternal(xz);
-                        _panel.RightView.SetMatrixDataInternal(yz);
+                        ApplyCompositeViewState(_panel.BottomView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
+                        ApplyCompositeViewState(_panel.RightView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
+                        // null here means "this side wasn't rebuilt because its axis didn't move" --
+                        // leaving the view's existing MatrixData in place IS the reuse, no separate
+                        // cache needed.
+                        if (xz != null) _panel.BottomView.SetMatrixDataInternal(xz);
+                        if (yz != null) _panel.RightView.SetMatrixDataInternal(yz);
                         SyncSidesFromMain();
 
                         // Restore non-shared axis scroll position so the user's Z-axis
@@ -866,7 +1261,11 @@ namespace MxPlot.UI.Avalonia.Controls
                         if (_hasPending)
                         {
                             _hasPending = false;
-                            UpdateSlicesAsync(_pendingIX, _pendingIY);
+                            bool pendingXChanged = _pendingXChanged;
+                            bool pendingYChanged = _pendingYChanged;
+                            _pendingXChanged = false;
+                            _pendingYChanged = false;
+                            UpdateSlicesAsync(pendingXChanged, pendingYChanged);
                         }
                         else
                         {
@@ -877,6 +1276,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 }
                 catch
                 {
+                    if (lifetimeToken.IsCancellationRequested) return;
                     Dispatcher.UIThread.Post(() =>
                     {
                         _panel.BottomView.IsBusy = false;
@@ -897,16 +1297,35 @@ namespace MxPlot.UI.Avalonia.Controls
                 case ProjectionPlane.XZ:
                     _xzProjectionMode  = e.IsEnabled ? e.Mode : null;
                     _xzProjectionCache = null;   // invalidate cache on any change
+                    _cacheEpoch++;
                     break;
                 case ProjectionPlane.YZ:
                     _yzProjectionMode  = e.IsEnabled ? e.Mode : null;
                     _yzProjectionCache = null;
+                    _cacheEpoch++;
                     break;
                 case ProjectionPlane.XY:
                     _xyProjectionMode  = e.IsEnabled ? e.Mode : null;
+                    _xyColorCoded      = e.IsEnabled && _panel.ProjectionSelector.IsColorCoded(ProjectionPlane.XY);
                     _xyProjectionCache = null;
+                    _cacheEpoch++;
                     if (e.IsEnabled)
+                    {
+                        if (_xyColorCoded)
+                        {
+                            // Reset to defaults on every fresh enable: full axis range, default
+                            // (Spectrum) depth palette, Auto intensity range, no invert. The child
+                            // window's details panel (MatrixPlotter.ColorCoded.cs) is seeded from
+                            // these via ColorCodedParams right after this.
+                            var axis = _data?.Dimensions[_axisName];
+                            _xyColorCodedStart = 0;
+                            _xyColorCodedEnd = axis != null ? axis.Count - 1 : 0;
+                            _xyColorCodedDepthLut = null;
+                            _xyColorCodedRangeFixed = false;
+                            _xyColorCodedInvert = false;
+                        }
                         ComputeXYProjectionAsync();
+                    }
                     else
                         XYProjectionChanged?.Invoke(this, null);
                     return;   // XY doesn't affect crosshair or side-view slices
@@ -915,8 +1334,8 @@ namespace MxPlot.UI.Avalonia.Controls
             ApplyCrosshairVisibility();
 
             // Re-run with last known position to update the affected view
-            if (_data != null && _lastIX >= 0 && _lastIY >= 0)
-                UpdateSlicesAsync(_lastIX, _lastIY);
+            if (_data != null && _currentIX >= 0 && _currentIY >= 0)
+                UpdateSlicesAsync(xChanged: true, yChanged: true);
         }
 
         /// <summary>
@@ -947,22 +1366,146 @@ namespace MxPlot.UI.Avalonia.Controls
                 return;
             }
 
+            if (_xyComputeInFlight)
+            {
+                _xyComputeHasPending = true;
+                return;
+            }
+            _xyComputeInFlight = true;
+
+            bool compositeActive = _compositeActive;
+            int compositeAxisDimIndex = _compositeAxisDimIndex;
+            int compositeChannelCount = _compositeChannelCount;
+            // Composite and ColorCoded are mutually exclusive (see SetCompositeState's comment) --
+            // ProjectionSelector.SetCompositeActive already keeps the UI from offering Color(Max)/
+            // (Min) while Composite is on, but this is the actual point where the two would collide
+            // (ExtremumIndexOperation's axis-index scan does not account for a composited axis), so
+            // it gets its own unconditional check rather than trusting the UI never to reach here
+            // with both set. Falls back to a plain projection instead of colouring.
+            bool colorCoded = _xyColorCoded && !compositeActive;
+            int colorCodedStart = _xyColorCodedStart;
+            int colorCodedEnd = _xyColorCodedEnd;
+            var colorCodedDepthLut = _xyColorCodedDepthLut;
+            bool colorCodedRangeFixed = _xyColorCodedRangeFixed;
+            double colorCodedFixedMin = _xyColorCodedFixedMin;
+            double colorCodedFixedMax = _xyColorCodedFixedMax;
+            bool colorCodedInvert = _xyColorCodedInvert;
+            int epoch = _cacheEpoch;
+            var lifetimeToken = _lifetimeCts.Token;
+
             _panel.MainView.IsBusy = true;
             Task.Run(() =>
             {
                 try
                 {
-                    var result = data.Apply(new ProjectionOperation(ViewFrom.Z, mode.Value, axisName));
+                    // The window (and this controller) may already be gone by the time this Task
+                    // gets scheduled -- skip the scan entirely rather than do wasted work.
+                    if (lifetimeToken.IsCancellationRequested) return;
+                    IMatrixData result;
+                    double? autoMin = null, autoMax = null;
+                    ColorCodedRenderInfo? resultRenderInfo = null;
+                    if (colorCoded)
+                    {
+                        // compositeActive is guaranteed false here (colorCoded is defined above as
+                        // _xyColorCoded && !compositeActive) -- Composite and ColorCoded are
+                        // mutually exclusive by design, not an unhandled combination to revisit
+                        // later. See this method's colorCoded assignment and
+                        // ProjectionSelector.SetCompositeActive.
+                        var (winnerIndex, winnerValue) = data.Apply(
+                            new ExtremumIndexOperation(mode.Value, colorCodedStart, colorCodedEnd, axisName));
+                        // winnerValue -- an ordinary projection-shaped result, same type as the
+                        // source data -- becomes the window's own MatrixData directly. Colorizing
+                        // happens only at render time (ColorCodedBitmapWriter, driven by
+                        // ColorCodedRenderInfo below); the window's data itself is a real projected
+                        // value everywhere Duplicate/Convert/Filter/Overlay analysis/Save touch it,
+                        // not an opaque packed-ARGB int the way the earlier TrueColorBitmapWriter
+                        // design left it. See ColorCodedRenderInfo's doc comment.
+                        result = winnerValue;
+                        // The natural range comes from winnerValue itself (the winning values
+                        // actually picked by the scan), not data.GetValueRange() -- the latter is
+                        // the *source* data's current-frame range, which depends on _axisName's own
+                        // ActiveIndex. Since the projected axis is fully collapsed by the Start..End
+                        // scan, moving its slider must not change the displayed colours; winnerValue
+                        // is a fresh single-frame result that only depends on the other axes'
+                        // positions (correctly re-picked when e.g. Time changes). Always computed
+                        // (not just when Auto is selected) so the child's Search buttons have
+                        // something to search for even while Fixed is selected.
+                        var (naturalMin, naturalMax) = winnerValue.GetValueRange();
+                        autoMin = naturalMin;
+                        autoMax = naturalMax;
+                        double valueMin = colorCodedRangeFixed ? colorCodedFixedMin : naturalMin;
+                        double valueMax = colorCodedRangeFixed ? colorCodedFixedMax : naturalMax;
+                        int sliceCount = colorCodedEnd - colorCodedStart + 1;
+                        var depthColors = (colorCodedDepthLut ?? ColorThemes.Spectrum)
+                            .Resample(sliceCount).AsSpan().ToArray();
+                        // Invert reverses which end of the depth palette maps to which end of the
+                        // axis -- the same "reverse the LUT array" semantics ordinary LUT mode's
+                        // Invert already has (MatrixPlotter.cs's BuildHistogramLutColors), not a
+                        // per-pixel intensity flip. Baking it into the array order here means
+                        // ColorCodedBitmapWriter and the depth histogram (both of which just consume
+                        // DepthColors as given) automatically respect it with no separate flag.
+                        if (colorCodedInvert) Array.Reverse(depthColors);
+                        var scannedAxis = data.Axes.FindAxis(axisName);
+                        if (scannedAxis != null)
+                        {
+                            // Computed here (background thread), not in UpdateColorCodedHistogram on
+                            // the UI thread -- this single-threaded full-frame scan over WinnerIndex
+                            // was the dominant remaining UI-thread stall on every Start/End edit for
+                            // a large XY / long-axis dataset (e.g. otomo1.tif's 997-frame stack).
+                            // Riding along with the ExtremumIndexOperation scan that already produced
+                            // WinnerIndex means no extra pass is needed later, just a hand-off.
+                            int[] hist = winnerIndex.CreateHistogram(0, scannedAxis.Count, 0, scannedAxis.Count);
+                            resultRenderInfo = new ColorCodedRenderInfo(
+                                winnerIndex, colorCodedStart, depthColors, valueMin, valueMax, scannedAxis, hist);
+                        }
+                    }
+                    else
+                    {
+                        result = compositeActive
+                            ? BuildChannelComposite(data, compositeAxisDimIndex, compositeChannelCount, bi =>
+                                data.Apply(new ProjectionOperation(ViewFrom.Z, mode.Value, axisName, bi)))
+                            : data.Apply(new ProjectionOperation(ViewFrom.Z, mode.Value, axisName));
+                    }
+                    // Nothing left to do once the owning window is gone -- skip scheduling the
+                    // continuation entirely rather than post work whose only purpose is updating
+                    // that window's (and its controller's) now-meaningless state.
+                    if (lifetimeToken.IsCancellationRequested) return;
                     Dispatcher.UIThread.Post(() =>
                     {
-                        _xyProjectionCache = result;
+                        if (epoch == _cacheEpoch)
+                        {
+                            _xyProjectionCache = result;
+                            if (colorCoded)
+                            {
+                                _xyColorCodedLastAutoMin = autoMin;
+                                _xyColorCodedLastAutoMax = autoMax;
+                                _xyColorCodedLastRenderInfo = resultRenderInfo;
+                            }
+                        }
                         _panel.MainView.IsBusy = false;
                         XYProjectionChanged?.Invoke(this, result);
+                        _xyComputeInFlight = false;
+                        if (_xyComputeHasPending)
+                        {
+                            _xyComputeHasPending = false;
+                            ComputeXYProjectionAsync();
+                        }
                     });
                 }
                 catch
                 {
-                    Dispatcher.UIThread.Post(() => _panel.MainView.IsBusy = false);
+                    if (lifetimeToken.IsCancellationRequested) return;
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _panel.MainView.IsBusy = false;
+                        if (colorCoded) ColorCodedComputeFailed?.Invoke();
+                        _xyComputeInFlight = false;
+                        if (_xyComputeHasPending)
+                        {
+                            _xyComputeHasPending = false;
+                            ComputeXYProjectionAsync();
+                        }
+                    });
                 }
             });
         }
@@ -974,29 +1517,9 @@ namespace MxPlot.UI.Avalonia.Controls
         public void ClearXYProjection()
         {
             _xyProjectionMode  = null;
+            _xyColorCoded      = false;
             _xyProjectionCache = null;
-        }
-
-        /// <summary>
-        /// Computes the XY projection for the current source data frame (i.e. the frame
-        /// determined by <see cref="IMatrixData.ActiveIndex"/> at call time) and active
-        /// projection mode. Always performs a fresh computation — the interactive cache is
-        /// intentionally bypassed so that each export frame gets the correct projection.
-        /// Returns <c>null</c> when no XY projection mode is active or no data is loaded.
-        /// Intended for use by export hosts that drive frame iteration externally.
-        /// </summary>
-        public Task<MxPlot.Core.IMatrixData?> ComputeXYProjectionForExportAsync()
-        {
-            var data = _data;
-            var axisName = _axisName;
-            var mode = _xyProjectionMode;
-            if (data == null || mode == null)
-                return Task.FromResult<MxPlot.Core.IMatrixData?>(null);
-
-            // Always recompute: ActiveIndex has been changed by the export host for this frame,
-            // so the cached result (which was computed for a different frame) must not be reused.
-            return Task.Run<MxPlot.Core.IMatrixData?>(() =>
-                data.Apply(new ProjectionOperation(ViewFrom.Z, mode.Value, axisName)));
+            _cacheEpoch++;
         }
     }
 }

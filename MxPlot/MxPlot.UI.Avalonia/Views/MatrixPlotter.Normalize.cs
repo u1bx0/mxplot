@@ -28,12 +28,16 @@ namespace MxPlot.UI.Avalonia.Views
             bool isMultiFrame = _currentData.FrameCount > 1;
             bool isVirtual = _currentData.IsVirtual;
 
-            var p = await NormalizeDialog.ShowAsync(this, isMultiFrame, isVirtual);
+            var p = await NormalizeDialog.ShowAsync(this, isMultiFrame, isVirtual, IsSyncFollower);
             if (p == null) return;
+
+            // Composite + This Frame Only: process every channel at the current position
+            // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
+            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
 
             // ── Pre-scan global max if needed ─────────────────────────────────
             double globalMax = double.NaN;
-            if (p.Scope == NormalizeScope.Global && !p.ThisFrameOnly && isMultiFrame)
+            if (p.Scope == NormalizeScope.Global && isMultiFrame && (!p.ThisFrameOnly || compositeCube != null))
             {
                 var scanProgress = BeginProgress("Scanning max value\u2026", blockInput: true);
                 _normalizeCts?.Dispose();
@@ -41,7 +45,7 @@ namespace MxPlot.UI.Avalonia.Views
                 var scanCt = _normalizeCts.Token;
                 try
                 {
-                    var data = _currentData;
+                    var data = compositeCube?.Cube ?? _currentData;
                     globalMax = await Task.Run(() => ScanGlobalMaxValue(data, scanCt), scanCt);
                 }
                 catch (OperationCanceledException) { return; }
@@ -53,9 +57,11 @@ namespace MxPlot.UI.Avalonia.Views
             int frameIdx = _currentData.ActiveIndex;
             bool singleFrame = p.ThisFrameOnly || !isMultiFrame;
             string label = $"Normalize (max\u2192{p.Target:G4})";
-            string detail = singleFrame
-                ? $"frame {frameIdx}, target={p.Target:G4}"
-                : $"scope={p.Scope}, target={p.Target:G4}";
+            string detail = compositeCube != null
+                ? $"[{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}], scope={p.Scope}, target={p.Target:G4}"
+                : singleFrame
+                    ? $"frame {frameIdx}, target={p.Target:G4}"
+                    : $"scope={p.Scope}, target={p.Target:G4}";
 
             var execProgress = BeginProgress($"Normalizing\u2026", blockInput: true);
             _normalizeCts?.Dispose();
@@ -68,12 +74,12 @@ namespace MxPlot.UI.Avalonia.Views
                 var op = new NormalizeOperation(
                     Target: p.Target,
                     Scope: p.Scope,
-                    SingleFrameIndex: singleFrame ? frameIdx : -1,
+                    SingleFrameIndex: compositeCube != null ? -1 : (singleFrame ? frameIdx : -1),
                     PrecomputedGlobalMax: globalMax,
                     Progress: execProgress,
                     CancellationToken: ct);
 
-                var data = _currentData;
+                var data = compositeCube?.Cube ?? _currentData;
                 result = await Task.Run(() => data.Apply(op), ct);
             }
             catch (OperationCanceledException) { return; }
@@ -85,11 +91,21 @@ namespace MxPlot.UI.Avalonia.Views
 
             if (p.ReplaceData)
             {
-                SetMatrixData(result);
+                if (compositeCube != null)
+                {
+                    var snapshot = CaptureCompositeCubeState();
+                    SetMatrixData(result, closeSyncFollowers: true);
+                    if (snapshot != null) ReenterCompositeMode(snapshot.Value, compositeCube.Value.ChannelAxisName);
+                }
+                else
+                {
+                    SetMatrixData(result, closeSyncFollowers: true);
+                }
             }
             else
             {
                 var resultPlotter = MatrixPlotter.Create(result, _view.Lut, $"Normalized {Title}");
+                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
                 resultPlotter.Show();
             }
         }

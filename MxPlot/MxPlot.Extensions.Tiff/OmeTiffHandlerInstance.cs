@@ -4,6 +4,7 @@ using MxPlot.Core.IO;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -283,18 +284,22 @@ namespace MxPlot.Extensions.Tiff
                     bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
                     Debug.WriteLine($"[ReadHyperstack] Stored data structure: {(isTiled ? "Tile" : "Strip")}");
 
+                    // The raw MMF read path bypasses LibTiff's own decode-time byte-order normalization,
+                    // so the source file's actual byte order must be threaded through explicitly.
+                    bool isBigEndian = tiff.IsBigEndian();
+
                     if (isTiled)
                     {
                         (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) = ScanTileInfo(tiff, data.TotalFrames, progress, ct);
                         Debug.WriteLine($"[ReadHyperstack] offset array for tiled image was extracted. length = {offsets.Length}");
-                        var vl = new VirtualTiledFrames<T>(filename, data.Width, data.Height, tileWidth, tileLength, offsets, byteCounts, isYFlipped: true);
+                        var vl = new VirtualTiledFrames<T>(filename, data.Width, data.Height, tileWidth, tileLength, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
                         data.ImageStack = vl;
                     }
                     else //Strip
                     {
                         var (offsets, byteCounts) = ScanStripInfo(tiff, data.TotalFrames, progress, ct);
                         Debug.WriteLine($"[ReadHyperstack] offset array for stripped image was extracted. length = {offsets.Length}");
-                        data.ImageStack = new VirtualStrippedFrames<T>(filename, data.Width, data.Height, offsets, byteCounts, isYFlipped: true);
+                        data.ImageStack = new VirtualStrippedFrames<T>(filename, data.Width, data.Height, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
                     }
 
                     Debug.WriteLine($"[ReadHyperstack] VirtualFrameList was initialized.");
@@ -474,6 +479,8 @@ namespace MxPlot.Extensions.Tiff
                     data.UnitX = pixels.Attribute("PhysicalSizeXUnit")?.Value ?? "µm";
                     data.UnitY = pixels.Attribute("PhysicalSizeYUnit")?.Value ?? "µm";
                     data.UnitZ = pixels.Attribute("PhysicalSizeZUnit")?.Value ?? "µm";
+
+                    ReadChannelMetadata(pixels, ns, data);
 
                     // Detect multi-file OME-TIFF: any TiffData/UUID/@FileName that differs from
                     // the file being opened.  We cannot resolve the external file here (the
@@ -683,7 +690,10 @@ namespace MxPlot.Extensions.Tiff
                         {
                             var key = mElement.Attribute("K")?.Value;
 
-                            // XElement.Value automatically strips CDATA wrappers, returning the raw string content.
+                            // IMPORTANT:
+                            // XML end-of-line normalization applies during parsing.
+                            // CRLF ("\r\n") and CR ("\r") in text content are normalized to LF ("\n")
+                            // before XElement.Value is materialized.
                             var value = mElement.Value;
 
                             if (!string.IsNullOrEmpty(key))
@@ -809,6 +819,14 @@ namespace MxPlot.Extensions.Tiff
             tiff.SetDirectory(0);
             bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
 
+            // Compute each frame's min/max right after it's read (cache-hot) via the same
+            // MinMaxFinder MatrixData<T> would use on its own, so the eventual MatrixData<T> is
+            // constructed with its value-range cache already warm instead of MatrixPlotter's
+            // "All frames" range mode having to scan the whole dataset synchronously on open.
+            var finder = MatrixData<T>.DefaultMinMaxFinder;
+            var minValues = finder != null ? new List<double>(actualFrames) : null;
+            var maxValues = finder != null ? new List<double>(actualFrames) : null;
+
             progress?.Report(-actualFrames);
             for (int directory = 0; directory < actualFrames; directory++)
             {
@@ -817,11 +835,22 @@ namespace MxPlot.Extensions.Tiff
                     ? ReadSingleFrameTiled(tiff, data.Width, data.Height)
                     : ReadSingleFrameStripped(tiff, data.Width, data.Height);
                 data.ImageStack.Add(frameData);
+
+                if (finder != null)
+                {
+                    var (mins, maxs) = finder(frameData);
+                    minValues!.Add(mins[0]);
+                    maxValues!.Add(maxs[0]);
+                }
+
                 progress?.Report(directory);
 
                 if (directory < actualFrames - 1 && !tiff.ReadDirectory())
                     throw new InvalidDataException($"Could not advance to directory {directory + 1}");
             }
+
+            data.MinValues = minValues;
+            data.MaxValues = maxValues;
             progress?.Report(actualFrames);
         }
 
@@ -868,6 +897,25 @@ namespace MxPlot.Extensions.Tiff
             });
 
             data.ImageStack = imageStack.ToList();
+
+            // Sequential, right after the parallel decode (mirrors the sequential "write frames,
+            // then min/max" merge step already used elsewhere): same MinMaxFinder MatrixData<T>
+            // would use on its own, warming the value-range cache ahead of construction.
+            var finder = MatrixData<T>.DefaultMinMaxFinder;
+            if (finder != null)
+            {
+                var minValues = new List<double>(actualFrames);
+                var maxValues = new List<double>(actualFrames);
+                for (int f = 0; f < actualFrames; f++)
+                {
+                    var (mins, maxs) = finder(imageStack[f]);
+                    minValues.Add(mins[0]);
+                    maxValues.Add(maxs[0]);
+                }
+                data.MinValues = minValues;
+                data.MaxValues = maxValues;
+            }
+
             progress?.Report(actualFrames);
         }
 
@@ -1222,7 +1270,7 @@ namespace MxPlot.Extensions.Tiff
                         new XAttribute("PhysicalSizeZ", data.PixelSizeZ),
 
                         // Channel definitions (shared across all FOVs)
-                        CreateChannels(data.Channels, ns),
+                        CreateChannels(data.Channels, ns, data),
 
                         CreateTiffData(data.Channels, data.ZSlices, data.TimePoints, ns, startIfd),
 
@@ -1254,15 +1302,115 @@ namespace MxPlot.Extensions.Tiff
             return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + ome.ToString();
         }
 
-        private IEnumerable<XElement> CreateChannels(int channelCount, XNamespace ns)
+        /// <summary>
+        /// Reads the per-channel Name / Color / EmissionWavelength attributes from the
+        /// <c>Pixels/Channel</c> elements into <paramref name="data"/>.
+        /// Each array is left <c>null</c> unless at least one channel actually carried that
+        /// attribute, so a file that specifies nothing does not fabricate defaults.
+        /// </summary>
+        private static void ReadChannelMetadata(XElement pixels, XNamespace ns, HyperstackMetadata data)
+        {
+            var channelElements = pixels.Elements(ns + "Channel").ToList();
+            if (channelElements.Count == 0) return;
+
+            int count = data.Channels;
+            var names = new string[count];
+            var colors = new int[count];
+            var waves = new double[count];
+            bool anyName = false, anyColor = false, anyWave = false;
+            // OME-XML defines -1 (opaque white) as the default Color, and many writers emit it on
+            // every channel to mean "unspecified". Taking that literally paints the whole composite
+            // white and leaves the colour swatches looking blank, so a file where *every* channel
+            // carries the default is treated as having no colour information at all.
+            const int OmeUnspecifiedColor = -1;
+            bool allColorsDefault = true;
+
+            for (int i = 0; i < count && i < channelElements.Count; i++)
+            {
+                var ch = channelElements[i];
+
+                string? name = ch.Attribute("Name")?.Value;
+                if (!string.IsNullOrWhiteSpace(name)) { names[i] = name; anyName = true; }
+
+                // OME-XML stores Color as a signed 32-bit RGBA value, not ARGB.
+                if (int.TryParse(ch.Attribute("Color")?.Value, out int rgba))
+                {
+                    colors[i] = RgbaToArgb(rgba);
+                    anyColor = true;
+                    if (rgba != OmeUnspecifiedColor) allColorsDefault = false;
+                }
+
+                if (double.TryParse(ch.Attribute("EmissionWavelength")?.Value,
+                        NumberStyles.Float, CultureInfo.InvariantCulture, out double wl))
+                {
+                    waves[i] = wl;
+                    anyWave = true;
+                }
+            }
+
+            // Fill any channel the file left unnamed so the tag list is never sparse.
+            if (anyName)
+                for (int i = 0; i < count; i++)
+                    if (string.IsNullOrEmpty(names[i])) names[i] = $"Ch{i + 1}";
+
+            data.ChannelNames = anyName ? names : null;
+            data.ChannelColors = anyColor && !allColorsDefault ? colors : null;
+            data.ChannelWavelengths = anyWave ? waves : null;
+        }
+
+        /// <summary>Converts an OME-XML RGBA colour integer to MxPlot ARGB order.</summary>
+        internal static int RgbaToArgb(int rgba)
+        {
+            uint v = unchecked((uint)rgba);
+            uint r = (v >> 24) & 0xFF, g = (v >> 16) & 0xFF, b = (v >> 8) & 0xFF, a = v & 0xFF;
+            // Plenty of writers emit the RGB part only and leave the alpha byte at zero. A fully
+            // transparent channel colour is meaningless for compositing - the blend reads just
+            // R/G/B - but it does make the colour swatch in the UI invisible, so a zero alpha is
+            // taken to mean "not specified" and the colour is made opaque.
+            if (a == 0) a = 0xFF;
+            return unchecked((int)((a << 24) | (r << 16) | (g << 8) | b));
+        }
+
+        /// <summary>Converts a MxPlot ARGB colour integer to the OME-XML RGBA order.</summary>
+        internal static int ArgbToRgba(int argb)
+        {
+            uint v = unchecked((uint)argb);
+            uint a = (v >> 24) & 0xFF, r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
+            return unchecked((int)((r << 24) | (g << 16) | (b << 8) | a));
+        }
+
+        /// <summary>
+        /// Emits the <c>Channel</c> elements. Name / Color / EmissionWavelength are written only
+        /// when the source <see cref="ColorAxis"/> actually carried them, so a plain Channel
+        /// axis still produces the same minimal markup as before.
+        /// </summary>
+        private IEnumerable<XElement> CreateChannels(int channelCount, XNamespace ns, HyperstackMetadata data)
         {
             for (int i = 0; i < channelCount; i++)
             {
-                yield return new XElement(ns + "Channel",
+                var channel = new XElement(ns + "Channel",
                     new XAttribute("ID", $"Channel:0:{i}"),
-                    new XAttribute("SamplesPerPixel", 1), //Grayscale
-                    new XElement(ns + "LightPath")
+                    new XAttribute("SamplesPerPixel", 1) //Grayscale
                 );
+
+                if (data.ChannelNames != null && i < data.ChannelNames.Length
+                    && !string.IsNullOrWhiteSpace(data.ChannelNames[i]))
+                    channel.Add(new XAttribute("Name", data.ChannelNames[i]));
+
+                // OME-XML expects RGBA order, not ARGB.
+                if (data.ChannelColors != null && i < data.ChannelColors.Length)
+                    channel.Add(new XAttribute("Color", ArgbToRgba(data.ChannelColors[i])));
+
+                if (data.ChannelWavelengths != null && i < data.ChannelWavelengths.Length
+                    && data.ChannelWavelengths[i] > 0)
+                {
+                    channel.Add(new XAttribute("EmissionWavelength",
+                        data.ChannelWavelengths[i].ToString(CultureInfo.InvariantCulture)));
+                    channel.Add(new XAttribute("EmissionWavelengthUnit", "nm"));
+                }
+
+                channel.Add(new XElement(ns + "LightPath"));
+                yield return channel;
             }
         }
 
@@ -1423,6 +1571,25 @@ namespace MxPlot.Extensions.Tiff
         /// </summary>
         public int Height { get; set; }
         public int Channels { get; set; }
+
+        /// <summary>
+        /// Per-channel display names from the OME-XML <c>Channel/</c> attributes.
+        /// <c>null</c> when the file carries none. Length equals <see cref="Channels"/>.
+        /// </summary>
+        public string[]? ChannelNames { get; set; }
+
+        /// <summary>
+        /// Per-channel display colours from the OME-XML <c>Channel/</c> attributes,
+        /// already converted to MxPlot ARGB order. <c>null</c> when the file carries none.
+        /// Length equals <see cref="Channels"/>.
+        /// </summary>
+        public int[]? ChannelColors { get; set; }
+
+        /// <summary>
+        /// Per-channel emission wavelengths from OME-XML, in nanometres.
+        /// <c>null</c> when the file carries none. Length equals <see cref="Channels"/>.
+        /// </summary>
+        public double[]? ChannelWavelengths { get; set; }
         public int ZSlices { get; set; }
         public int TimePoints { get; set; }
         public double StartTime { get; set; } = 0.0;
@@ -1605,6 +1772,15 @@ namespace MxPlot.Extensions.Tiff
     {
         public IList<T[]>? ImageStack { get; set; }
 
+        /// <summary>
+        /// Per-frame min/max, in <see cref="ImageStack"/> order, computed while frames were read
+        /// (via <see cref="MatrixData{T}.DefaultMinMaxFinder"/>) so the eventual <see cref="MatrixData{T}"/>
+        /// is constructed with its value-range cache already warm. Null for the Virtual load path,
+        /// which never touches pixel bytes at open time and must not be forced to.
+        /// </summary>
+        public List<double>? MinValues { get; set; }
+        public List<double>? MaxValues { get; set; }
+
         // Override the base PixelType property
         public new string PixelType => GetPixelTypeString();
 
@@ -1655,6 +1831,18 @@ namespace MxPlot.Extensions.Tiff
             data.TimePoints = tnum;
             data.Channels = cnum;
             data.FovCount = fovNum;
+
+            // Carry a ColorAxis's names / colours / wavelengths into the OME-XML so they
+            // survive a round-trip. A plain Channel axis leaves these null and writes nothing.
+            if (dimensions.Contains("Channel") && dimensions["Channel"] is ColorAxis cc)
+            {
+                if (cc.Tags.Count == cnum)
+                    data.ChannelNames = cc.Tags.ToArray();
+                if (cc.HasAssignedColors && cc.AssignedColors!.Count == cnum)
+                    data.ChannelColors = cc.AssignedColors.ToArray();
+                if (cc.HasWavelengths && cc.Wavelengths!.Count == cnum)
+                    data.ChannelWavelengths = cc.Wavelengths.ToArray();
+            }
 
             data.PixelSizeX = md.XStep;
             data.PixelSizeY = md.YStep;

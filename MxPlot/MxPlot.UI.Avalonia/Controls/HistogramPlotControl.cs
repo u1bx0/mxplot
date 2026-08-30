@@ -239,6 +239,14 @@ namespace MxPlot.UI.Avalonia.Controls
                 _viewMin = min;
                 _viewMax = max;
 
+                // Keep the plot window framing the (possibly newly-widened) view range, mirroring
+                // SetHistogram's preservePlotWindow=true behavior. Without this, a programmatic
+                // range push that lands outside the current zoom (e.g. the "Find" data-extremes
+                // button) just clamps to the widget edges at render time and looks like nothing
+                // happened, even though _viewMin/_viewMax genuinely changed.
+                _plotMin = Math.Min(_plotMin, _viewMin);
+                _plotMax = Math.Max(_plotMax, _viewMax);
+
                 // Sync StyledProperties
                 SetCurrentValue(ViewMinProperty, _viewMin);
                 SetCurrentValue(ViewMaxProperty, _viewMax);

@@ -31,11 +31,19 @@ namespace MxPlot.Extensions.Tiff
     /// </code>
     /// </para>
     /// </remarks>
-    public class ImageJTiffFormat : IMatrixDataReader, IMatrixDataWriter, IProgressReportable
+    public class ImageJTiffFormat : IMatrixDataReader, IMatrixDataWriter, IProgressReportable, IVirtualLoadable
     {
         public string FormatName => "TIFF (ImageJ-compatible)";
 
         public IReadOnlyList<string> Extensions { get; } = [".tif", ".tiff"];
+
+        /// <summary>
+        /// Gets or sets loading mode of the file. Virtual (MMF-backed) loading is currently only
+        /// available for ImageJ's single-IFD "packed" hyperstack layout (see
+        /// <c>ImageJTiffHandler.LoadPackedFramesVirtual</c>); a normal multi-IFD file always loads
+        /// InMemory regardless of this setting.
+        /// </summary>
+        public LoadingMode LoadingMode { get; set; } = LoadingMode.Auto;
 
         /// <summary>
         /// Gets or sets the progress reporter for tracking the read/write operations.
@@ -69,7 +77,7 @@ namespace MxPlot.Extensions.Tiff
         {
             if (typeof(T) == typeof(byte) || typeof(T) == typeof(ushort))
             {
-                var md = ImageJTiffHandler.Load<T>(filePath, ProgressReporter, _ct, MaxParallelDegree);
+                var md = ImageJTiffHandler.Load<T>(filePath, ProgressReporter, _ct, MaxParallelDegree, LoadingMode);
                 return md;
             }
             else
@@ -82,11 +90,11 @@ namespace MxPlot.Extensions.Tiff
         {
             string typeName = OmeTiffReader.DetectPixelType(path);
             if (typeName == "uint16"){
-                return ImageJTiffHandler.Load<ushort>(path, ProgressReporter, _ct, MaxParallelDegree);
-            } 
+                return ImageJTiffHandler.Load<ushort>(path, ProgressReporter, _ct, MaxParallelDegree, LoadingMode);
+            }
             else if (typeName == "uint8")
             {
-                return ImageJTiffHandler.Load<byte>(path, ProgressReporter, _ct, MaxParallelDegree);
+                return ImageJTiffHandler.Load<byte>(path, ProgressReporter, _ct, MaxParallelDegree, LoadingMode);
             }
             else
             {

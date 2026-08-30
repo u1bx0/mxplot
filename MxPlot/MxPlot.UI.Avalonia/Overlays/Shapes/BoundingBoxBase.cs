@@ -102,8 +102,22 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             if (this is IAnalyzableOverlay evaluable)
             {
                 yield return evaluable.FindMinMax;
+
+                // Fixed labels ("Show Statistics" / "Use ROI for Value Range" never change text);
+                // on/off state is reflected via the icon slot instead. This runs on every open of
+                // the context menu (OnSurfaceContextRequested rebuilds it fresh each time), so state
+                // is always current with no separate "remember to update the label" call site to
+                // keep in sync -- unlike a dynamic Header, which needed updating at every place
+                // ShowStatistics/IsValueRangeRoi could change (including OverlaySerializer's restore
+                // path, easy to miss).
+                evaluable.ToggleShowStatistics.Icon =
+                    evaluable.ShowStatistics ? MenuIcons.CheckboxChecked : MenuIcons.CheckboxUnchecked;
                 yield return evaluable.ToggleShowStatistics;
+
+                evaluable.UseRoiForValueRange.Icon =
+                    evaluable.IsValueRangeRoi ? MenuIcons.CheckboxChecked : MenuIcons.CheckboxUnchecked;
                 yield return evaluable.UseRoiForValueRange;
+
                 yield return evaluable.CopyData;
                 yield return OverlayMenuEntry.Separator();
             }
@@ -114,11 +128,14 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         // ── Statistics label drawing helper ───────────────────────────────────
 
         /// <summary>
-        /// Draws the cached statistics label just outside the bottom-left corner of the
-        /// bounding box. Call from <see cref="OverlayObjectBase.Draw"/> in concrete subclasses
-        /// when <see cref="IAnalyzableOverlay.ShowStatistics"/> is true.
+        /// Draws a statistics label just outside the bottom-left corner of the bounding box. Call
+        /// from <see cref="OverlayObjectBase.Draw"/> in concrete subclasses when
+        /// <see cref="IAnalyzableOverlay.ShowStatistics"/> is true, passing either
+        /// <see cref="IAnalyzableOverlay.CachedStatisticsLabel"/> (Composite/ColorCoded, per-channel
+        /// breakdown) or <see cref="IAnalyzableOverlay.CachedStatistics"/>'s <c>ToLabel()</c>
+        /// (ordinary single-frame case).
         /// </summary>
-        protected void DrawStatisticsLabel(AvaloniaOverlayGraphics g, RegionStatistics stats)
+        protected void DrawStatisticsLabel(AvaloniaOverlayGraphics g, string label)
         {
             // All 4 corners in screen space (accounts for FlipV / Rotate90CCW in ortho views)
             var sTL = g.WorldToScreen(X,         Y);
@@ -137,7 +154,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             }
 
             g.DrawStringAtScreen(
-                stats.ToLabel(),
+                label,
                 foreground: Colors.White,
                 background: Color.FromArgb(200, 30, 30, 30),
                 screenPos: new Point(best.X + 4, best.Y + 4));

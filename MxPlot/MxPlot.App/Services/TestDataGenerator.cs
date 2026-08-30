@@ -107,7 +107,7 @@ namespace MxPlot.App.Services
             md.XUnit = "";
             md.YUnit = "";
             md.DefineDimensions(
-                new ColorChannel(["n=2", "n=4", "n=6"]),
+                new ColorAxis(["n=2", "n=4", "n=6"]),
                 Axis.Z(zNum, -extent, extent, ""),
                 Axis.Time(tNum, 0.0, 330.0, "°"));
 

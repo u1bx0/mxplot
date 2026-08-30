@@ -43,6 +43,11 @@ namespace MxPlot.App
                 MatrixPlotterPluginRegistry.LoadFromDirectory(pluginsDir);
                 MxPlotAppPluginRegistry.LoadFromDirectory(pluginsDir);
                 MatrixPlotterPluginRegistry.AddExportPlugin(new AviExporter());
+                // MP4 has no bundled encoder (see FfmpegFrameWriter) -- only offer it when an
+                // actual ffmpeg is reachable, so the menu never advertises an export that would
+                // just fail.
+                if (Mp4Exporter.IsFfmpegAvailable())
+                    MatrixPlotterPluginRegistry.AddExportPlugin(new Mp4Exporter());
 
                 var vm = new MxPlotAppViewModel();
                 var win = new MxPlotAppWindow { DataContext = vm };

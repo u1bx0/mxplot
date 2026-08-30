@@ -9,12 +9,14 @@ using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
 using MxPlot.UI.Avalonia.Rendering;
+using MxPlot.UI.Avalonia.Utils;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Complex = System.Numerics.Complex;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -46,10 +48,12 @@ namespace MxPlot.UI.Avalonia.Views
             if (obj is TextObject text)
             {
                 text.Edit.Handler = () => OnTextEditRequested(text);
-                // Use EffectiveData (= LinkedSource's data when set) so that {N:p}/{N:i} tokens
-                // resolve against the correct axis state on XZ/YZ slice views and XY projection
-                // windows, whose own MatrixData has no axes.
-                text.DataContext = EffectiveData ?? ResolveSourceView(text).MatrixData;
+                // Resolve {N:p}/{N:i} against a data instance that actually has axes: XZ/YZ slice
+                // views fall back to this window's own volume, and an XY-projection window - whose
+                // projected data has no axes at all - borrows its owner's via OverlayAxisSource.
+                text.DataContext = OverlayAxisSource?._currentData
+                    ?? _currentData
+                    ?? ResolveSourceView(text).MatrixData;
             }
             if (obj is RectObject rect)
                 rect.GeometryChanged += OnRectGeometryChanged;
@@ -133,6 +137,12 @@ namespace MxPlot.UI.Avalonia.Views
                 UpdateNoticeFromOverlay(obj);
             else
                 ResolveSourceView(obj).OverlayInfoText = null;
+
+            // A composite statistics label's per-channel cap depends on IsSelected (see
+            // ComputeCompositeStatisticsLabel) -- both the object losing selection (collapses back
+            // down) and the one gaining it (expands) need their cached label recomputed, and this
+            // fires once per object per transition, covering both sides of a selection change.
+            if (obj is BoundingBoxBase bbox) RefreshCachedStatistics(bbox);
         }
 
         private void OnLineGeometryChanged(object? sender, (global::Avalonia.Point P1, global::Avalonia.Point P2) _)
@@ -199,15 +209,11 @@ namespace MxPlot.UI.Avalonia.Views
             evaluable.ShowStatistics = !evaluable.ShowStatistics;
 
             if (evaluable.ShowStatistics)
-            {
-                var sourceView = ResolveSourceView(bbox);
-                if (sourceView.MatrixData != null)
-                    evaluable.CachedStatistics = ComputeRegionStatistics(
-                        evaluable, bbox, sourceView.MatrixData, sourceView.FrameIndex);
-            }
+                RecomputeCachedStatistics(evaluable, bbox, ResolveSourceView(bbox));
             else
             {
                 evaluable.CachedStatistics = null;
+                evaluable.CachedStatisticsLabel = null;
             }
             ResolveSourceView(bbox).OverlayManager.InvalidateVisual();
         }
@@ -305,7 +311,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             // SetRange() does not fire RangeChanged event, so manually update histogram if settings panel is open
             // Call UpdateHistogram() instead of SetViewValueRange() to ensure proper async cancellation
-            if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+            if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
             {
                 UpdateHistogram();
             }
@@ -321,10 +327,95 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (bbox is not IAnalyzableOverlay evaluable || !evaluable.ShowStatistics) return;
             var sourceView = ResolveSourceView(bbox);
-            if (sourceView.MatrixData == null) return;
-            evaluable.CachedStatistics = ComputeRegionStatistics(
-                evaluable, bbox, sourceView.MatrixData, sourceView.FrameIndex);
+            RecomputeCachedStatistics(evaluable, bbox, sourceView);
             sourceView.OverlayManager.InvalidateVisual();
+        }
+
+        /// <summary>
+        /// Recomputes and stores <see cref="IAnalyzableOverlay.CachedStatistics"/> or
+        /// <see cref="IAnalyzableOverlay.CachedStatisticsLabel"/> (whichever applies) for
+        /// <paramref name="bbox"/>. No-op when <paramref name="sourceView"/> has no data.
+        /// </summary>
+        private void RecomputeCachedStatistics(IAnalyzableOverlay evaluable, BoundingBoxBase bbox, MxView sourceView)
+        {
+            var md = sourceView.MatrixData;
+            if (md == null) return;
+
+            var compositeLabel = ComputeCompositeStatisticsLabel(evaluable, bbox, md, sourceView);
+            if (compositeLabel != null)
+            {
+                evaluable.CachedStatisticsLabel = compositeLabel;
+                evaluable.CachedStatistics = null;
+            }
+            else
+            {
+                evaluable.CachedStatisticsLabel = null;
+                evaluable.CachedStatistics = ComputeRegionStatistics(evaluable, bbox, md, sourceView.FrameIndex);
+            }
+        }
+
+        /// <summary>
+        /// Maximum number of channels shown individually in an <b>unselected</b> overlay's composite
+        /// statistics label before the rest are collapsed into a trailing "... (+N more)" line --
+        /// several ROIs each showing many composite-axis positions (all visible by default, see
+        /// <c>BuildChannelComposite</c>) at once would otherwise clutter the view with tall blocks
+        /// for overlays the user isn't currently focused on. The <b>selected</b> overlay (the one the
+        /// user just toggled statistics on, or clicked to inspect) shows every visible channel with
+        /// no cap -- see <see cref="OnOverlaySelectionChanged"/>, which recomputes this on selection
+        /// change so the cap actually updates as focus moves between overlays.
+        /// </summary>
+        private const int MaxCompositeStatisticsChannelsUnselected = 4;
+
+        /// <summary>
+        /// Builds a per-channel statistics label when Composite/ColorCoded rendering is active, one
+        /// line per visible channel ("{tag}: Min …, Max …, Avg …") -- the region-statistics
+        /// counterpart to <c>RenderSurface.TryAddCompositeValueRuns</c>'s per-channel cursor
+        /// read-out, which this mirrors (same <see cref="RenderingMode"/> check, same visible-only
+        /// filtering over <see cref="MxView.CompositeRecipes"/>/<see cref="MxView.CompositeFrameIndices"/>).
+        /// Each line is labelled via <see cref="GetChannelDisplayName"/> -- the same channel tag
+        /// ("GFP", "Red", ...) shown everywhere else in Composite mode, falling back to "Ch0"/"Ch1"
+        /// only when the axis carries no tags. A single ordinary <c>RegionStatistics</c> for "the
+        /// current frame" would silently reflect only one channel of what the composite actually
+        /// displays. Returns <see langword="null"/> when not in Composite/ColorCoded mode (or no
+        /// recipes/indices are available), so the caller falls back to the ordinary single-frame
+        /// statistics.
+        /// </summary>
+        private string? ComputeCompositeStatisticsLabel(
+            IAnalyzableOverlay evaluable, BoundingBoxBase bbox, IMatrixData md, MxView sourceView)
+        {
+            if (sourceView.RenderingMode is not (RenderingMode.Composite or RenderingMode.ColorCoded))
+                return null;
+
+            var recipes = sourceView.CompositeRecipes;
+            var indices = sourceView.CompositeFrameIndices;
+            if (recipes is not { Count: > 0 } || indices is not { Length: > 0 })
+                return null;
+
+            int count = Math.Min(recipes.Count, indices.Length);
+            int maxShown = bbox.IsSelected ? int.MaxValue : MaxCompositeStatisticsChannelsUnselected;
+            var lines = new List<string>();
+            int shown = 0, visibleTotal = 0;
+            int numPoints = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (!recipes[i].IsVisible) continue;
+                visibleTotal++;
+                if (shown >= maxShown) continue;
+                var stats = ComputeRegionStatistics(evaluable, bbox, md, indices[i]);
+                // Every channel shares the same ROI and the same ContainsWorldPoint filter, so the
+                // point count is the same for all of them (barring a channel-specific NaN inside the
+                // ROI, an edge case not worth a per-channel count here) -- take it once from the
+                // first channel actually computed rather than repeating "(n=...)" on every line.
+                if (shown == 0) numPoints = stats.NumPoints;
+                lines.Add(stats.ToCompactLabel(GetChannelDisplayName(i)));
+                shown++;
+            }
+
+            if (lines.Count == 0) return null;
+            if (visibleTotal > shown)
+                lines.Add($"... (+{visibleTotal - shown} more)");
+            lines.Add($"(n={numPoints})");
+            return string.Join("\n", lines);
         }
 
         /// <summary>
@@ -381,8 +472,18 @@ namespace MxPlot.UI.Avalonia.Views
                 _lineProfileWindows.Remove(line);
             }
 
-            string? groupAxisName = (sourceView.RenderingMode == RenderingMode.Composite 
-                && md.Dimensions.Contains("Channel")) ? "Channel" : null;
+            // The composite axis is not always named "Channel" (see ColorCoded_View_InitialDesign.md
+            // section 3.3.7) -- look up this window's actual composite axis name instead of assuming
+            // it. Axis names survive the per-channel extract+merge that builds orthogonal-view
+            // Composite data (see OrthogonalViewController.Composite.cs), so the name found on
+            // _currentData still applies to sourceView's (possibly derived) md.
+            string? compositeAxisName = _isCompositeMode && _currentData != null
+                && _compositeAxisDimIndex >= 0 && _compositeAxisDimIndex < _currentData.Dimensions.AxisCount
+                ? _currentData.Dimensions[_compositeAxisDimIndex].Name
+                : null;
+            string? groupAxisName = (sourceView.RenderingMode == RenderingMode.Composite
+                && compositeAxisName != null && md.Dimensions.Contains(compositeAxisName))
+                ? compositeAxisName : null;
             var series = BuildProfileSeries(line, md, sourceView, groupAxisName);
             if (series.Count == 0) return;
 
@@ -393,14 +494,18 @@ namespace MxPlot.UI.Avalonia.Views
                 yAxisLabel: "Value",
                 title: "Line Profile (Bilinear)");
             _lineProfileWindows[line] = (win, sourceView, groupAxisName);
-            //Default behaviour: Y axis is fixed:
-            if (_view.IsFixedRange)
+            // Default behaviour: initialize the Y axis to whatever value range is currently
+            // displayed for the image -- the header ValueRangeBar (LUT mode) or the shared
+            // Composite range (Global scope). This must NOT be gated on IsFixedRange: that flag
+            // only governs whether the *rendered image* rescales per frame (false in Current
+            // mode), it is not "what range is currently shown" -- DisplayedMinValue/Max already
+            // tracks that correctly across Fixed/Current/All/Roi.
+            var (vrMin, vrMax) = GetCurrentDisplayedValueRange();
+            if (!double.IsNaN(vrMin) && !double.IsNaN(vrMax))
             {
-                var min = _view.FixedMin;
-                var max = _view.FixedMax;
                 win.Plot.YAxisFixed = true;
-                win.Plot.YFixedMin = min;
-                win.Plot.YFixedMax = max;
+                win.Plot.YFixedMin = vrMin;
+                win.Plot.YFixedMax = vrMax;
             }
             else
             {
@@ -457,6 +562,13 @@ namespace MxPlot.UI.Avalonia.Views
             var result = new List<PlotSeries>();
             var dims = md.Dimensions;
 
+            // Complex data (including Composite) has no natural double value — reduce it using
+            // the same ComplexValueMode-based projection currently shown in sourceView's bitmap,
+            // so the profile matches what the user sees on screen.
+            Func<Complex, double>? complexConverter = md.ValueType == typeof(Complex)
+                ? ComplexValueModeConverter.GetConverter(sourceView.ComplexValueMode)
+                : null;
+
             if (groupAxisName != null && dims.Contains(groupAxisName))
             {
                 var axis = dims[groupAxisName]!;
@@ -465,7 +577,13 @@ namespace MxPlot.UI.Avalonia.Views
 
                 for (int i = 0; i < frameIndices.Length; i++)
                 {
-                    var profile = ExtractLineProfile(line, md, frameIndices[i], sourceView.FlipY);
+                    // Skip channels the user has hidden via BlendRecipe.IsVisible in the Composite
+                    // settings panel, so the profile plot only shows what is actually blended into
+                    // the displayed image. Independent of value type T.
+                    if (i < _compositeRecipes.Count && !_compositeRecipes[i].IsVisible)
+                        continue;
+
+                    var profile = ExtractLineProfile(line, md, frameIndices[i], sourceView.FlipY, complexConverter);
                     if (profile.Count == 0) continue;
 
                     string label = taggedAxis != null ? taggedAxis[i] : $"{axis.Name}{i}";
@@ -474,12 +592,32 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY);
+                var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY, complexConverter);
                 if (profile.Count > 0)
                     result.Add(new PlotSeries(profile, "Profile", PlotStyle.Line));
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Returns the value range currently displayed for the image: the header
+        /// <see cref="ValueRangeBar"/> in LUT mode (correct across Fixed/Current/All/Roi, since
+        /// <see cref="ValueRangeBar.DisplayedMinValue"/>/<see cref="ValueRangeBar.DisplayedMaxValue"/>
+        /// always track what is shown, unlike <c>IsFixedRange</c> which only says whether the
+        /// rendered image rescales per frame), or the shared Composite range in Global scope.
+        /// Returns <c>NaN</c> when no single range applies (Composite Channel-wise scope, where
+        /// each channel owns its own range) -- callers should fall back to auto-fit in that case.
+        /// </summary>
+        private (double Min, double Max) GetCurrentDisplayedValueRange()
+        {
+            if (_isCompositeMode)
+            {
+                return _compositeScope == CompositeRangeScope.Global && _compositeRecipes.Count > 0
+                    ? (_compositeRecipes[0].ValueMin, _compositeRecipes[0].ValueMax)
+                    : (double.NaN, double.NaN);
+            }
+            return (_rangeBar.DisplayedMinValue, _rangeBar.DisplayedMaxValue);
         }
 
         /// <summary>
@@ -608,6 +746,33 @@ namespace MxPlot.UI.Avalonia.Views
                 UpdateLineProfile(line);
         }
 
+        /// <summary>
+        /// Fully rebuilds every Composite-grouped Line Profile plot (one series per visible channel,
+        /// grouped over whichever axis is the current composite axis), including which series exist —
+        /// not just their point values. Needed whenever a channel's
+        /// <see cref="BlendRecipe.IsVisible"/> is toggled in the Composite settings panel, since that
+        /// changes how many series <see cref="BuildProfileSeries"/> returns.
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="UpdateLineProfile"/> (index-based <see cref="ProfilePlotControl.UpdatePointsAndFit"/>,
+        /// used for lightweight per-frame updates while dragging the line), this calls
+        /// <see cref="ProfilePlotControl.SetData"/>, which resets per-series colors and the
+        /// legend's manual show/hide toggles — acceptable here because the channel set itself changed.
+        /// </remarks>
+        private void RebuildChannelGroupedLineProfiles()
+        {
+            foreach (var (line, entry) in _lineProfileWindows.ToArray())
+            {
+                if (entry.GroupAxisName == null) continue;
+                var md = entry.SourceView.MatrixData;
+                if (md == null) continue;
+
+                var series = BuildProfileSeries(line, md, entry.SourceView, entry.GroupAxisName);
+                var plot = entry.Window.Plot;
+                plot.SetData(series, plot.XLabel, plot.YLabel, plot.PlotTitle);
+            }
+        }
+
         private void RefreshAllRegionStatistics()
         {
             foreach (var view in new[] { _view, _orthoPanel.BottomView, _orthoPanel.RightView })
@@ -633,7 +798,8 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         private static List<(double X, double Y)> ExtractLineProfile(
-            LineObject line, IMatrixData md, int frameIndex, bool flipY = true)
+            LineObject line, IMatrixData md, int frameIndex, bool flipY = true,
+            Func<Complex, double>? complexValueConverter = null)
         {
             // ── 1. SAT: return empty when the segment lies entirely outside
             //          the bitmap rectangle [0, XCount-1] × [0, YCount-1] ─────────────
@@ -664,13 +830,34 @@ namespace MxPlot.UI.Avalonia.Views
             if (px1 > px2 || (px1 == px2 && py1 > py2))
                 (px1, py1, px2, py2) = (px2, py2, px1, py1);
 
-            var (pos, values) = md.GetLineProfile(
-                (X: px1, Y: py1), (X: px2, Y: py2),
-                frameIndex: frameIndex, option: LineProfileOption.Bilinear);
+            (double[] pos, double[] values) = md.ValueType == typeof(Complex)
+                ? ((MatrixData<Complex>)md).GetLineProfile(
+                    (X: px1, Y: py1), (X: px2, Y: py2),
+                    frameIndex: frameIndex, option: LineProfileOption.Bilinear,
+                    valueConverter: complexValueConverter ?? (c => c.Magnitude))
+                : md.GetLineProfile(
+                    (X: px1, Y: py1), (X: px2, Y: py2),
+                    frameIndex: frameIndex, option: LineProfileOption.Bilinear);
             var points = new List<(double X, double Y)>(pos.Length);
             for (int i = 0; i < pos.Length; i++)
                 points.Add((pos[i], values[i]));
             return points;
+        }
+
+        /// <summary>
+        /// Closes only the profile windows that were opened as a Composite-grouped plot.
+        /// Called when leaving Composite mode, where those multi-series plots no longer match what
+        /// the view shows. Profiles opened in LUT mode are single-series and stay untouched, so the
+        /// user does not lose unrelated work.
+        /// </summary>
+        private void CloseChannelGroupedLineProfiles()
+        {
+            foreach (var (line, entry) in _lineProfileWindows.ToArray())
+            {
+                if (entry.GroupAxisName == null) continue;
+                entry.Window.Close();          // Closed handler also removes the entry
+                _lineProfileWindows.Remove(line);
+            }
         }
 
         private void CloseAllLineProfiles()
@@ -713,9 +900,36 @@ namespace MxPlot.UI.Avalonia.Views
                     naturalW = Math.Max(1, (int)Math.Round(region.XCount * xStep / yStep));
             }
 
+            // While Composite is active, the ROI image should show the same blended colours as
+            // the screen rather than a single (Channel-0) LUT frame. Mirrors the Composite check
+            // OnLinePlotProfileRequested already uses for the same sourceView.
+            var compositeRecipes = sourceView.CompositeRecipes;
+            var compositeFrameIndices = sourceView.CompositeFrameIndices;
+            bool useComposite = sourceView.RenderingMode == RenderingMode.Composite
+                && compositeRecipes is { Count: > 0 }
+                && compositeFrameIndices is { Length: > 0 }
+                && compositeRecipes.Count == compositeFrameIndices.Length;
+
             // Render the region at natural (aspect-corrected) size for the preview + image copy.
             WriteableBitmap RenderRegion()
-                => BitmapWriter.CreateBitmap(region, 0, sourceView.Lut, vmin, vmax);
+            {
+                if (useComposite)
+                {
+                    // The "no data in the rectangle" check above already ran on frame 0 — that is
+                    // a purely geometric question (ContainsWorldPoint), so it holds for every
+                    // channel. A per-channel extraction still failing here would mean the channel
+                    // frame index is out of range; fall back to an all-NaN layer rather than throw.
+                    var channelArrays = compositeFrameIndices!
+                        .Select(fi => ExtractRectRegionPixels(evaluable, bbox, md, fi)?.Values
+                                   ?? new double[region.XCount * region.YCount])
+                        .ToList();
+                    var compositeRegion = new MatrixData<double>(region.XCount, region.YCount, channelArrays);
+                    return CompositeBitmapWriter.CreateBitmap(
+                        compositeRegion, Enumerable.Range(0, compositeFrameIndices.Length).ToArray(),
+                        compositeRecipes!, sourceView.CompositeBlendMode);
+                }
+                return LutBitmapWriter.CreateBitmap(region, 0, sourceView.Lut, vmin, vmax);
+            }
 
             Bitmap RenderScaled(int w, int h)
             {
@@ -774,13 +988,17 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Extracts pixels within <paramref name="bbox"/> into a new single-frame
-        /// <see cref="MatrixData{T}"/> of type <c>double</c>.
+        /// Extracts pixels within <paramref name="bbox"/> at <paramref name="frameIndex"/> into a
+        /// dense row-major array, in the same bottom-origin row order every <see cref="MatrixData{T}"/>
+        /// in this codebase uses (row 0 = the bottom of the display) — the convention
+        /// <see cref="LutBitmapWriter"/>/<see cref="CompositeBitmapWriter"/> already expect via their
+        /// own <c>FlipY</c> handling, so callers never need to flip the result themselves.
         /// Pixels outside <see cref="IAnalyzableOverlay.ContainsWorldPoint"/> are stored as NaN.
-        /// FlipY is applied so that row 0 of the result corresponds to the top of the display.
-        /// Returns <c>null</c> when the region contains no pixels.
+        /// Returns <c>null</c> when the rectangle contains no in-bounds pixels — a purely geometric
+        /// question, independent of <paramref name="frameIndex"/>, so a caller extracting several
+        /// channels of the same rectangle only needs to check this once.
         /// </summary>
-        private static MatrixData<double>? ExtractRectRegionData(
+        private static (double[] Values, int Width, int Height)? ExtractRectRegionPixels(
             IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
             IMatrixData md, int frameIndex)
         {
@@ -803,7 +1021,10 @@ namespace MxPlot.UI.Avalonia.Views
             for (int wy = yMin; wy <= yMax; wy++)
             {
                 int dataY = (md.YCount - 1) - wy;
-                int destRow = wy - yMin;
+                // wy is screen/world space (Y-down: yMin is the top of the rect on screen).
+                // destRow must land in the opposite (bottom-origin) convention, so the row at the
+                // screen bottom of the rect (wy = yMax) becomes row 0.
+                int destRow = yMax - wy;
                 for (int wx = xMin; wx <= xMax; wx++)
                 {
                     double v = evaluable.ContainsWorldPoint(new Point(wx + 0.5, wy + 0.5))
@@ -814,6 +1035,21 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             if (arr.All(double.IsNaN)) return null;
+            return (arr, w, h);
+        }
+
+        /// <summary>
+        /// Extracts pixels within <paramref name="bbox"/> into a new single-frame
+        /// <see cref="MatrixData{T}"/> of type <c>double</c>. See
+        /// <see cref="ExtractRectRegionPixels"/> for the row convention and NaN handling.
+        /// </summary>
+        private static MatrixData<double>? ExtractRectRegionData(
+            IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
+            IMatrixData md, int frameIndex)
+        {
+            var pixels = ExtractRectRegionPixels(evaluable, bbox, md, frameIndex);
+            if (pixels == null) return null;
+            var (arr, w, h) = pixels.Value;
             return new MatrixData<double>(w, h, arr);
         }
     }

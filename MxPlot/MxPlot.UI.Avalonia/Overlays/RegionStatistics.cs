@@ -28,6 +28,15 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         /// <summary>Returns the two-line label displayed inside the overlay region.</summary>
         public string ToLabel() =>
-            $"Min {Fmt(Min)}, Max {Fmt(Max)}\nAvg {Fmt(Average)} (n={NumPoints})";
+            $"Min {Fmt(Min)}, Max {Fmt(Max)}, Avg {Fmt(Average)}\n(n={NumPoints})";
+
+        /// <summary>
+        /// Returns a single-line label prefixed with <paramref name="prefix"/> (e.g. a channel tag
+        /// like "Ch0"), for composite per-channel statistics breakdowns. Omits "(n=...)" -- the same
+        /// ROI/point count applies to every channel, so the caller appends it once instead of
+        /// repeating it per line.
+        /// </summary>
+        public string ToCompactLabel(string prefix) =>
+            $"{prefix}: Min {Fmt(Min)}, Max {Fmt(Max)}, Avg {Fmt(Average)}";
     }
 }

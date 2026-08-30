@@ -145,19 +145,39 @@ namespace MxPlot.UI.Avalonia.Views
 
         internal void SyncApplyLutDepth(int depth)
         {
-            if (_levelNud == null) return;
             using var _ = _reentrancy.Begin(GuardContext.SyncApply);
-            _levelNud.Value = (decimal)depth;
+            ApplyLutDepthToLayers(depth);
         }
 
         internal void SyncApplyInverted(bool inverted)
         {
-            if (_invertLutChk == null) return;
             using var _ = _reentrancy.Begin(GuardContext.SyncApply);
-            _invertLutChk.IsChecked = inverted;
+            ApplyInvertedToLayers(inverted);
         }
 
         internal void SyncApplyRangeMode(ValueRangeMode mode)
+        {
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
+            ApplyRangeModeToLayers(mode);
+        }
+
+        internal void SyncApplyFixedRange(double min, double max)
+        {
+            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
+            ApplyFixedRangeToLayers(min, max);
+        }
+
+        /// <summary>
+        /// Applies a value-range mode change across the RangeBar/View layers. This is the shared
+        /// mechanism used by both external control (VM/Facade-driven changes, in
+        /// <see cref="OnDataContextChanged"/>) and cross-plotter Linked Sync (<see cref="SyncApplyRangeMode"/>) —
+        /// they are two independent callers of the same operation, not one built on top of the
+        /// other. Cross-plotter re-broadcast suppression (<see cref="GuardContext.SyncApply"/>) is
+        /// specifically <see cref="SyncApplyRangeMode"/>'s concern, not this method's — calling this
+        /// directly (as external control does) lets <c>SyncRangeModeChanged</c>/<c>SyncFixedRangeChanged</c>
+        /// still propagate normally to any Linked Plotter Sync group.
+        /// </summary>
+        internal void ApplyRangeModeToLayers(ValueRangeMode mode)
         {
             // All and Current are multi-frame-only concepts.
             // Downgrade to Current (displayed as "Auto") on single-frame targets.
@@ -165,13 +185,54 @@ namespace MxPlot.UI.Avalonia.Views
             if (!isMultiFrame && (mode == ValueRangeMode.All || mode == ValueRangeMode.Current))
                 mode = ValueRangeMode.Current;
 
-            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
+            // Roi only means anything while an overlay is designated as the range source.
+            // ValueRangeBar.SetMode does not check that itself (SetRoiAvailable is the bar's own
+            // route in, and it is only ever called from the overlay code), so guard it here rather
+            // than let an external caller park the bar in a mode with nothing behind it.
+            if (mode == ValueRangeMode.Roi && _valueRangeOverlay == null)
+                mode = ValueRangeMode.Current;
+
             _rangeBar.SetMode(mode);
         }
 
-        internal void SyncApplyFixedRange(double min, double max)
+        /// <summary>
+        /// Applies a LUT quantization level across the settings-panel/View layers. Shared between
+        /// external control and Linked Sync (<see cref="SyncApplyLutDepth"/>) — see
+        /// <see cref="ApplyRangeModeToLayers"/> for the rationale.
+        /// </summary>
+        /// <remarks>
+        /// Drives the level spinner rather than <c>_view</c> directly, because the spinner's
+        /// <c>ValueChanged</c> handler owns the rest of the change (orthogonal sync, saved view
+        /// settings, the LUT dirty flag, histogram rebuild, Linked Sync broadcast). Note that the
+        /// spinner does not clamp a programmatic assignment to its own 2–4096 bounds — the value
+        /// reaches <c>_view</c> as given, deliberately, so that this route and a direct
+        /// <c>MainView.LutDepth</c> assignment stay equivalent. Falls back to <c>_view</c> only in
+        /// the defensive case where the panel has not been built.
+        /// </remarks>
+        internal void ApplyLutDepthToLayers(int depth)
         {
-            using var _ = _reentrancy.Begin(GuardContext.SyncApply);
+            if (_levelNud == null) { _view.LutDepth = depth; return; }
+            _levelNud.Value = (decimal)depth;
+        }
+
+        /// <summary>
+        /// Applies LUT inversion across the settings-panel/View layers. Shared between external
+        /// control and Linked Sync (<see cref="SyncApplyInverted"/>) — see
+        /// <see cref="ApplyLutDepthToLayers"/> for why the widget is driven rather than the view.
+        /// </summary>
+        internal void ApplyInvertedToLayers(bool inverted)
+        {
+            if (_invertLutChk == null) { _view.IsInvertedColor = inverted; return; }
+            _invertLutChk.IsChecked = inverted;
+        }
+
+        /// <summary>
+        /// Applies a fixed value range (min/max) across the RangeBar/View layers. Shared between
+        /// external control and Linked Sync (<see cref="SyncApplyFixedRange"/>) — see
+        /// <see cref="ApplyRangeModeToLayers"/> for the rationale.
+        /// </summary>
+        internal void ApplyFixedRangeToLayers(double min, double max)
+        {
             _rangeBar.SetRange(min, max);
             _view.FixedMin = min;
             _view.FixedMax = max;
@@ -191,7 +252,7 @@ namespace MxPlot.UI.Avalonia.Views
         internal void SyncApplyAxisIndex(string axisName, int index)
         {
             if (_currentData == null) return;
-            var axis = _currentData.Axes.FirstOrDefault(a => a.Name == axisName);
+            var axis = _currentData.Axes.FindAxis(axisName);
             if (axis == null) return;
             int clamped = Math.Clamp(index, 0, axis.Count - 1);
             using var _ = _reentrancy.Begin(GuardContext.SyncApply);
@@ -287,7 +348,7 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_currentData == null) return false;
 
-            var axis = _currentData.Axes.FirstOrDefault(a => a.Name == axisName);
+            var axis = _currentData.Axes.FindAxis(axisName);
             if (axis == null || axis.IsIndexBased || axis.Count <= 1)
                 return false;
 

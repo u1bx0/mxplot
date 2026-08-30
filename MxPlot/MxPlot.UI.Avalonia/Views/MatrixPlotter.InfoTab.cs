@@ -222,8 +222,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.XMin = v;
                 xRngEd.Text = data.XRange.ToString(vfmt, fmt);
                 xStpEd.Text = data.XStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Min, v));
                 return true;
             });
             // Max → Min fixed, recompute Range and Step
@@ -234,8 +232,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.XMax = v;
                 xRngEd.Text = data.XRange.ToString(vfmt, fmt);
                 xStpEd.Text = data.XStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Max, v));
                 return true;
             });
             // Range → Max = Min + Range, recompute Step
@@ -249,8 +245,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.XMax = newMax;
                 xMaxEd.Text = data.XMax.ToString(vfmt, fmt);
                 xStpEd.Text = data.XStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Max, newMax));
                 return true;
             });
             // Step  → Max = Min + Step × (N-1), recompute Range
@@ -264,8 +258,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.XMax = newMax;
                 xMaxEd.Text = data.XMax.ToString(vfmt, fmt);
                 xRngEd.Text = data.XRange.ToString(vfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Step, s));
                 return true;
             });
             Wire(xUniEd, () =>
@@ -278,7 +270,7 @@ namespace MxPlot.UI.Avalonia.Views
             });
 
             AddRow();
-            Place(Ro("x"), row, 0);
+            Place(Ro("X"), row, 0);
             Place(Ro(data.XCount.ToString(), right: true), row, 1);
             Place(xMinEd, row, 2);
             Place(xMaxEd, row, 3);
@@ -302,8 +294,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.YMin = v;
                 yRngEd.Text = data.YRange.ToString(vfmt, fmt);
                 yStpEd.Text = data.YStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Min, v));
                 return true;
             });
             // Max → Min fixed, recompute Range and Step
@@ -314,8 +304,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.YMax = v;
                 yRngEd.Text = data.YRange.ToString(vfmt, fmt);
                 yStpEd.Text = data.YStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Max, v));
                 return true;
             });
             // Range → Max = Min + Range, recompute Step
@@ -329,8 +317,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.YMax = newMax;
                 yMaxEd.Text = data.YMax.ToString(vfmt, fmt);
                 yStpEd.Text = data.YStep.ToString(sfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Max, newMax));
                 return true;
             });
             // Step  → Max = Min + Step × (N-1), recompute Range
@@ -344,8 +330,6 @@ namespace MxPlot.UI.Avalonia.Views
                 data.YMax = newMax;
                 yMaxEd.Text = data.YMax.ToString(vfmt, fmt);
                 yRngEd.Text = data.YRange.ToString(vfmt, fmt);
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Step, s));
                 return true;
             });
             Wire(yUniEd, () =>
@@ -358,7 +342,7 @@ namespace MxPlot.UI.Avalonia.Views
             });
 
             AddRow();
-            Place(Ro("y"), row, 0);
+            Place(Ro("Y"), row, 0);
             Place(Ro(data.YCount.ToString(), right: true), row, 1);
             Place(yMinEd, row, 2);
             Place(yMaxEd, row, 3);
@@ -393,8 +377,6 @@ namespace MxPlot.UI.Avalonia.Views
                             ca.Min = v;
                             aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
                             aStpEd.Text = ca.Step.ToString(sfmt, fmt);
-                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Min, v));
                             return true;
                         });
                         // Max → Min fixed, recompute Range and Step
@@ -405,8 +387,6 @@ namespace MxPlot.UI.Avalonia.Views
                             ca.Max = v;
                             aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
                             aStpEd.Text = ca.Step.ToString(sfmt, fmt);
-                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Max, v));
                             return true;
                         });
                         // Range → Max = Min + Range, recompute Step
@@ -420,8 +400,6 @@ namespace MxPlot.UI.Avalonia.Views
                             ca.Max = newMax;
                             aMaxEd.Text = ca.Max.ToString(vfmt, fmt);
                             aStpEd.Text = ca.Step.ToString(sfmt, fmt);
-                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Max, newMax));
                             return true;
                         });
                         // Step  → Max = Min + Step × (N-1), recompute Range
@@ -435,8 +413,6 @@ namespace MxPlot.UI.Avalonia.Views
                             ca.Max = newMax;
                             aMaxEd.Text = ca.Max.ToString(vfmt, fmt);
                             aRngEd.Text = (ca.Max - ca.Min).ToString(vfmt, fmt);
-                            if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                                SyncScaleChanged?.Invoke(this, (ca.Name, ScaleParameter.Step, s));
                             return true;
                         });
                     }
@@ -496,98 +472,132 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Axis rename ──────────────────────────────────────────────────────
 
         /// <summary>
-        /// Renames an axis interactively. For specialized axis types (TaggedAxis, ColorChannel, FovAxis)
-        /// the user is warned that downgrading to a plain <see cref="Axis"/> will discard type-specific
-        /// data. Duplicate-name validation is performed before the rename is applied.
+        /// Renames an axis interactively. <see cref="FovAxis"/> keeps its own downgrade-confirm flow
+        /// (its tile layout is unrelated to Composite/Index-based). For every other axis, the dialog's
+        /// "Index-based" checkbox drives promotion to (or demotion from) a Composite-compatible
+        /// <see cref="TaggedAxis"/> explicitly - no axis name is treated specially any more (Composite
+        /// itself has not required the literal name "Channel" for a while; see
+        /// ColorCoded_View_InitialDesign.md section 3.3.7). Duplicate-name validation is performed
+        /// before the rename is applied.
         /// </summary>
         private async Task RenameAxisAsync(IMatrixData data, Axis axis)
         {
-            bool needsDowngrade = axis is FovAxis || axis is TaggedAxis;
-            if (needsDowngrade)
+            if (axis is FovAxis)
             {
-                string typeName = axis switch
-                {
-                    ColorChannel => "Color Channel",
-                    FovAxis => "FOV",
-                    TaggedAxis => "Tagged",
-                    _ => "specialized"
-                };
                 bool ok = await ShowConfirmDialogAsync(
                     "Rename Axis",
-                    $"This axis has a specialized type ({typeName}). Renaming will convert it to a plain axis, "
-                    + "discarding its specialized properties (tags, color assignments, tile layout, etc.).\n\nContinue?");
+                    "This axis has a specialized type (FOV). Renaming will convert it to a plain axis, "
+                    + "discarding its tile layout.\n\nContinue?");
                 if (!ok) return;
+
+                var fovDlg = new AxisRenameDialog(axis.Name);
+                await fovDlg.ShowDialog(this);
+                if (fovDlg.Result == null) return;
+                string fovName = fovDlg.Result.Trim();
+                if (string.IsNullOrEmpty(fovName) || fovName == axis.Name) return;
+                if (await IsDuplicateAxisNameAsync(data, axis, fovName)) return;
+
+                DeactivateOrthogonalViewIfShowing(axis);
+                ReplaceAxis(data, axis, new Axis(axis.Count, axis.Min, axis.Max, fovName, axis.Unit, false));
+                RefreshInfoTab();
+                SetScaleDirty(true);
+                return;
             }
 
-            var dlg = new AxisRenameDialog(axis.Name);
+            bool isColorAxis = axis is TaggedAxis;
+            bool isActiveCompositeAxis = _isCompositeMode && _compositeAxisDimIndex >= 0
+                && _compositeAxisDimIndex < data.Dimensions.AxisCount
+                && ReferenceEquals(data.Dimensions[_compositeAxisDimIndex], axis);
+
+            var dlg = new AxisRenameDialog(
+                axis.Name,
+                isIndexBased: isColorAxis,
+                indexToggleEnabled: !isActiveCompositeAxis,
+                indexLockedReason: isActiveCompositeAxis
+                    ? "Currently used by Composite mode (Index-based is required)."
+                    : null);
             await dlg.ShowDialog(this);
             if (dlg.Result == null) return;
 
             string newName = dlg.Result.Trim();
-            if (string.IsNullOrEmpty(newName) || newName == axis.Name) return;
+            bool wantsIndexBased = dlg.IsIndexBased ?? isColorAxis;
+            if (string.IsNullOrEmpty(newName)) return;
+            if (newName == axis.Name && wantsIndexBased == isColorAxis) return;
 
-            bool isDuplicate =
-                newName.Equals("x", StringComparison.OrdinalIgnoreCase) ||
-                newName.Equals("y", StringComparison.OrdinalIgnoreCase) ||
-                data.Axes.Any(a => !ReferenceEquals(a, axis) &&
-                    a.Name.Equals(newName, StringComparison.OrdinalIgnoreCase));
-            if (isDuplicate)
-            {
-                await ShowMessageDialogAsync("Rename Axis", $"An axis named \u201c{newName}\u201d already exists.");
-                return;
-            }
+            if (await IsDuplicateAxisNameAsync(data, axis, newName)) return;
 
-            // If the Volume view is showing this axis, deactivate it first to avoid
-            // stale axis-name references inside OrthogonalViewController after the rename.
-            if (_orthoController.ActiveAxisName?.Equals(axis.Name, StringComparison.OrdinalIgnoreCase) == true)
-            {
-                foreach (var child in _trackerPanel.Children)
-                {
-                    if (child is AxisTracker t && t.FreezeButton.IsChecked == true)
-                    {
-                        t.FreezeButton.IsChecked = false;
-                        break;
-                    }
-                }
-            }
+            DeactivateOrthogonalViewIfShowing(axis);
 
-            if (needsDowngrade)
+            if (wantsIndexBased == isColorAxis)
             {
-                int savedIdx = axis.Index;
-                Axis newPlainAxis = newName.Equals("Channel", StringComparison.OrdinalIgnoreCase)
-                    ? Axis.Channel(axis.Count, axis.Unit)
-                    : new Axis(axis.Count, axis.Min, axis.Max, newName, axis.Unit, false);
-                // Reuse original axis objects for non-renamed axes so existing AxisTrackers keep working
-                var newAxes = data.Axes
-                    .Select(a => ReferenceEquals(a, axis) ? newPlainAxis : a)
-                    .ToArray();
-                data.DefineDimensions(newAxes);
-                newPlainAxis.Index = savedIdx;
-                RebuildTrackerPanel(data);
-            }
-            else
-            {
+                // No type change - a plain rename in place, no DefineDimensions/tracker rebuild needed.
                 string oldName = axis.Name;
-                if (newName.Equals("Channel", StringComparison.OrdinalIgnoreCase))
-                {
-                    axis.IsIndexBased = true; // auto-resets min=0, max=count-1
-                    axis.Name = "Channel";
-                }
-                else
-                {
-                    axis.IsIndexBased = false;
-                    axis.Name = newName; // AxisTracker updates its label automatically via Axis.NameChanged
-                }
-                // Update the key of _axisTrackers element
+                axis.Name = newName; // AxisTracker updates its label automatically via Axis.NameChanged
                 if (_axisTrackers.TryGetValue(oldName, out var tracker))
                 {
                     _axisTrackers.Remove(oldName);
                     _axisTrackers[axis.Name] = tracker;
                 }
             }
+            else if (wantsIndexBased)
+            {
+                // Promote: plain -> Composite-compatible TaggedAxis, tags seeded the same way
+                // PromoteToColorAxisIfNeeded does for an implicit promotion on entering Composite.
+                string prefix = DefaultCompositeTagPrefix(newName);
+                var tags = Enumerable.Range(0, axis.Count).Select(i => $"{prefix}{i}").ToArray();
+                ReplaceAxis(data, axis, new ColorAxis(tags) { Unit = axis.Unit, Name = newName });
+            }
+            else
+            {
+                // Demote: discard tags/colors, falling back to a plain Scale-editable axis.
+                ReplaceAxis(data, axis, new Axis(axis.Count, axis.Min, axis.Max, newName, axis.Unit, false));
+            }
 
             RefreshInfoTab();
             SetScaleDirty(true);
+        }
+
+        /// <summary>True (with a "name already exists" dialog shown) when <paramref name="newName"/> collides with "x", "y", or another axis.</summary>
+        private async Task<bool> IsDuplicateAxisNameAsync(IMatrixData data, Axis axis, string newName)
+        {
+            bool isDuplicate =
+                newName.Equals("x", StringComparison.OrdinalIgnoreCase) ||
+                newName.Equals("y", StringComparison.OrdinalIgnoreCase) ||
+                data.Axes.Any(a => !ReferenceEquals(a, axis) &&
+                    a.Name.Equals(newName, StringComparison.OrdinalIgnoreCase));
+            if (isDuplicate)
+                await ShowMessageDialogAsync("Rename Axis", $"An axis named “{newName}” already exists.");
+            return isDuplicate;
+        }
+
+        /// <summary>
+        /// If the Volume view is showing <paramref name="axis"/>, deactivates it first to avoid stale
+        /// axis-name references inside OrthogonalViewController after the rename.
+        /// </summary>
+        private void DeactivateOrthogonalViewIfShowing(Axis axis)
+        {
+            if (_orthoController.ActiveAxisName?.Equals(axis.Name, StringComparison.OrdinalIgnoreCase) != true) return;
+            foreach (var child in _trackerPanel.Children)
+            {
+                if (child is AxisTracker t && t.FreezeButton.IsChecked == true)
+                {
+                    t.FreezeButton.IsChecked = false;
+                    break;
+                }
+            }
+        }
+
+        /// <summary>Swaps <paramref name="axis"/> for <paramref name="replacement"/> in <paramref name="data"/>'s dimensions and rebuilds the tracker panel/menu around it.</summary>
+        private void ReplaceAxis(IMatrixData data, Axis axis, Axis replacement)
+        {
+            int savedIdx = axis.Index;
+            var newAxes = data.Axes
+                .Select(a => ReferenceEquals(a, axis) ? replacement : a)
+                .ToArray();
+            data.DefineDimensions(newAxes);
+            replacement.Index = savedIdx;
+            RebuildTrackerPanel(data);
+            InvalidateMenuPanel();
         }
 
         // ── Metadata tab ─────────────────────────────────────────────────────
@@ -858,7 +868,7 @@ namespace MxPlot.UI.Avalonia.Views
                 return new StackPanel
                 {
                     Orientation = Orientation.Horizontal,
-                    Spacing = 4,
+                    Spacing = 3,
                     Children =
                     {
                         pathIcon,
@@ -870,7 +880,7 @@ namespace MxPlot.UI.Avalonia.Views
             tabControl.Items.Add(new TabItem
             {
                 Header = TabHdr("Metadata", MenuIcons.Metadata),
-                Padding = new Thickness(8, 3),
+                Padding = new Thickness(0),
                 Content = metaGrid,
             });
         }

@@ -238,16 +238,114 @@ namespace MxPlot.App.ViewModels
             ManagedWindows.Remove(item);
         }
 
+        // ── Sort ──────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Ascending/descending toggle state for the root-level sibling group. Holds the direction
+        /// the *next* sort will apply, so repeated invocations flip ascending/descending like a
+        /// clicked column header.
+        /// </summary>
+        private bool _nextRootSortAscending = true;
+
+        /// <summary>
+        /// Per-scope ascending/descending toggle state for non-root sibling groups, keyed by the
+        /// parent item that owns them. Reference-type dictionary keys cannot be <c>null</c>, so the
+        /// root-level scope is tracked separately via <see cref="_nextRootSortAscending"/> instead.
+        /// </summary>
+        private readonly Dictionary<WindowListItemViewModel, bool> _nextChildSortAscending = new();
+
+        /// <summary>
+        /// The sibling group that "Sort by Name" would act on for <paramref name="clicked"/>:
+        /// its parent's <see cref="WindowListItemViewModel.ChildItems"/>, or the root-level
+        /// windows (<see cref="WindowListItemViewModel.ParentItem"/> is <c>null</c>) if it has none.
+        /// </summary>
+        private List<WindowListItemViewModel> GetSortSiblings(WindowListItemViewModel clicked) =>
+            clicked.ParentItem is { } parent
+                ? parent.ChildItems.ToList()
+                : ManagedWindows.Where(m => m.ParentItem is null).ToList();
+
+        /// <summary>Whether sorting is meaningful for <paramref name="clicked"/>'s scope (2+ siblings).</summary>
+        internal bool CanSortSiblings(WindowListItemViewModel clicked) => GetSortSiblings(clicked).Count >= 2;
+
+        /// <summary>
+        /// Whether the next "Sort by Name" invocation for <paramref name="clicked"/>'s scope will
+        /// sort ascending. Used by the context menu to label the direction before it is clicked.
+        /// </summary>
+        internal bool NextSortIsAscending(WindowListItemViewModel clicked) =>
+            clicked.ParentItem is { } parent
+                ? !_nextChildSortAscending.TryGetValue(parent, out var asc) || asc
+                : _nextRootSortAscending;
+
+        /// <summary>
+        /// Sorts, by name, only the sibling group containing <paramref name="clicked"/> — i.e. the
+        /// children of <paramref name="clicked"/>'s parent, or the root-level windows if it has none.
+        /// Other hierarchy levels and other linked groups are left untouched. Each sibling moves as
+        /// a block together with its own descendant subtree, so linked (child) windows always stay
+        /// directly after their parent. Toggles ascending/descending on repeated calls for the same scope.
+        /// </summary>
+        internal void SortSiblingsByName(WindowListItemViewModel clicked)
+        {
+            var parent = clicked.ParentItem;
+            var siblings = GetSortSiblings(clicked);
+            if (siblings.Count < 2) return;
+
+            bool ascending = NextSortIsAscending(clicked);
+            if (parent is not null) _nextChildSortAscending[parent] = !ascending;
+            else _nextRootSortAscending = !ascending;
+
+            var ordered = ascending
+                ? siblings.OrderBy(s => s.FileName, StringComparer.OrdinalIgnoreCase).ToList()
+                : siblings.OrderByDescending(s => s.FileName, StringComparer.OrdinalIgnoreCase).ToList();
+
+            // Reposition each sibling's whole block (itself + descendants) into the new order,
+            // starting right after the parent (or at index 0 for the root level).
+            // Uses ObservableCollection.Move (not Remove+Insert): Move raises a single "Move"
+            // change, not "Remove"+"Add", so it does not trip the CollectionChanged handler above
+            // that unsubscribes Window.Closed on Remove — a Remove+Insert pair here would silently
+            // detach that handler from every moved window, leaving it stuck in the list on close.
+            int insertAt = parent is not null ? ManagedWindows.IndexOf(parent) + 1 : 0;
+            foreach (var sib in ordered)
+            {
+                int blockStart = ManagedWindows.IndexOf(sib);
+                int blockEnd = FindSubtreeEndIndex(sib);
+                int blockLen = blockEnd - blockStart + 1;
+
+                // Snapshot the block's members before moving any of them — moving one shifts
+                // the indices of the others, so each member's position is re-resolved just
+                // before its own Move rather than computed from the original blockStart.
+                var blockMembers = new List<WindowListItemViewModel>(blockLen);
+                for (int i = 0; i < blockLen; i++) blockMembers.Add(ManagedWindows[blockStart + i]);
+
+                foreach (var member in blockMembers)
+                {
+                    ManagedWindows.Move(ManagedWindows.IndexOf(member), insertAt);
+                    insertAt++;
+                }
+            }
+
+            if (parent is not null)
+            {
+                parent.ChildItems.Clear();
+                parent.ChildItems.AddRange(ordered);
+            }
+        }
+
         /// <summary>
         /// Loads a file via <see cref="FormatRegistry"/> and opens it in a new <see cref="MatrixPlotter"/>.
         /// Called from code-behind after file dialog or drag-and-drop.
         /// </summary>
-        internal async Task LoadAndOpenFileAsync(string path, Views.MxPlotAppWindow owner)
+        /// <param name="path">Full path of the file to load.</param>
+        /// <param name="owner">Dashboard window used as the dialog owner and topmost-suspension anchor.</param>
+        /// <param name="forceLoadingPrompt">
+        /// When true, always asks the user to choose InMemory vs Virtual loading, even below the
+        /// large-file threshold. Set from drag-drop when Shift is held at drop time.
+        /// </param>
+        internal async Task LoadAndOpenFileAsync(string path, Views.MxPlotAppWindow owner, bool forceLoadingPrompt = false)
         {
             var fileName = Path.GetFileName(path);
             try
             {
-                var mode = await owner.ResolveLoadingModeAsync(path);
+                var mode = await owner.ResolveLoadingModeAsync(path, forceLoadingPrompt);
                 if (mode == null) return; // user cancelled
 
                 var loadMode = mode.Value;

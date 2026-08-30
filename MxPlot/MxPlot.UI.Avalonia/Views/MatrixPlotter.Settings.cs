@@ -36,6 +36,7 @@ namespace MxPlot.UI.Avalonia.Views
         private const string KeyRenderMode = "mxplot.render.mode";
 
         // Composite / ColorCoded (shared key group)
+        // mxplot.composite.axis
         // mxplot.composite.blend
         // mxplot.composite.{i}.visible
         // mxplot.composite.{i}.color
@@ -43,6 +44,9 @@ namespace MxPlot.UI.Avalonia.Views
         // mxplot.composite.{i}.max
         // mxplot.composite.{i}.gain
         // mxplot.composite.{i}.gamma
+        // Which axis is composited -- Composite is no longer restricted to one named "Channel"
+        // (see Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.7).
+        private const string KeyCompositeAxis = "mxplot.composite.axis";
         private const string KeyCompositeBlend = "mxplot.composite.blend";
         private const string KeyCompositePrefix = "mxplot.composite.";
         private const string KeyChVisible = ".visible";
@@ -51,6 +55,11 @@ namespace MxPlot.UI.Avalonia.Views
         private const string KeyChMax = ".max";
         private const string KeyChGain = ".gain";
         private const string KeyChGamma = ".gamma";
+        // Composite value-range scope/mode (added with Global vs Channel-wise support).
+        // Absent = Global + Current, matching the defaults, so older files still load.
+        private const string KeyCompositeScope  = "mxplot.composite.scope";
+        private const string KeyCompositeVrMode = "mxplot.composite.vrmode";
+        private const string KeyChVrMode = ".vrmode";
 
         /// <summary>
         /// Serializes current overlay objects into <c>_currentData.Metadata</c>
@@ -160,7 +169,12 @@ namespace MxPlot.UI.Avalonia.Views
         /// from metadata. Pass <c>false</c> when the current Fixed range must be preserved
         /// across a data update (e.g. linked filter refresh).
         /// </param>
-        private void RestoreViewSettings(IMatrixData data, bool restoreVR = true)
+        /// <param name="isFirstLoad">
+        /// <c>true</c> only when this window had no data before. Gates the "open an RGB colour image
+        /// in Composite" default so that a later in-place data swap (Crop, Reverse Stack, …) never
+        /// pushes the user back into a mode they deliberately left.
+        /// </param>
+        private void RestoreViewSettings(IMatrixData data, bool restoreVR = true, bool isFirstLoad = false)
         {
             //_suppressModified = true;
             using var _init = _reentrancy.Begin(GuardContext.Initializing);
@@ -175,7 +189,7 @@ namespace MxPlot.UI.Avalonia.Views
                     var lut = ColorThemes.Get(lutName);
                     _view.Lut = lut;
                     _lutSelector.SelectLut(lut);
-                    Icon = _lutSelector.SelectedIcon;
+                    UpdateWindowIcon();
                     if (DataContext is ViewModels.MatrixPlotterViewModel vm)
                     {
                         vm.Lut = lut;
@@ -313,8 +327,20 @@ namespace MxPlot.UI.Avalonia.Views
                 }
             }
 
-            // Render mode (Composite / ColorCoded) — must come after axes restoration
-            RestoreRenderModeSettings(meta, data);
+            // Render mode (Composite / ColorCoded) — must come after axes restoration.
+            // RestoreRenderModeSettings only rehydrates the Composite *fields*; entering the mode
+            // (which builds the header, the channel rows and the orthogonal composite state) is
+            // SyncCompositeUiAfterRestore's job. See MatrixPlotter.Composite.cs.
+            var restoredMode = RestoreRenderModeSettings(meta, data);
+
+            // A file that carries mxplot.render.mode has already had its display mode decided, so
+            // that always wins. Only when the key is absent does the data itself get a say, and an
+            // RGB colour image is the one case where LUT mode is the wrong default.
+            if (restoredMode == RenderingMode.Lut && isFirstLoad && !meta.ContainsKey(KeyRenderMode)
+                && TryAutoEnterRgbComposite(data))
+                return;
+
+            SyncCompositeUiAfterRestore(data, restoredMode);
         }
 
         /// <summary>
@@ -327,8 +353,19 @@ namespace MxPlot.UI.Avalonia.Views
             if (_view.RenderingMode is RenderingMode.Composite or RenderingMode.ColorCoded
                 && _view.CompositeRecipes != null)
             {
-                meta[KeyCompositeBlend] = _view.CompositeBlendMode.ToString();
+                // SaveCompositeRecipes calls RemoveCompositeKeys internally to clear stale
+                // per-channel entries before rewriting them -- that also wipes KeyCompositeAxis
+                // and KeyCompositeBlend, so those two must be (re)written *after* it runs, not
+                // before. Writing them first meant every save silently discarded the axis name,
+                // which made a saved Composite file reopen in LUT mode (RestoreRenderModeSettings
+                // never found mxplot.composite.axis to resolve).
                 SaveCompositeRecipes(meta, _view.CompositeRecipes);
+                if (_currentData != null && _compositeAxisDimIndex >= 0
+                    && _compositeAxisDimIndex < _currentData.Dimensions.AxisCount)
+                    meta[KeyCompositeAxis] = _currentData.Dimensions[_compositeAxisDimIndex].Name;
+                meta[KeyCompositeBlend] = _view.CompositeBlendMode.ToString();
+                meta[KeyCompositeScope] = _compositeScope.ToString();
+                meta[KeyCompositeVrMode] = _compositeGlobalMode.ToString();
             }
             else
             {
@@ -354,6 +391,8 @@ namespace MxPlot.UI.Avalonia.Views
                 meta[$"{pfx}{KeyChMax}"] = r.ValueMax.ToString("R", CultureInfo.InvariantCulture);
                 meta[$"{pfx}{KeyChGain}"] = r.Gain.ToString("R", CultureInfo.InvariantCulture);
                 meta[$"{pfx}{KeyChGamma}"] = r.Gamma.ToString("R", CultureInfo.InvariantCulture);
+                if (_compositeBars != null && i < _compositeBars.Length)
+                    meta[$"{pfx}{KeyChVrMode}"] = _compositeBars[i].RangeMode.ToString();
             }
         }
 
@@ -362,47 +401,87 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private void RemoveCompositeKeys(System.Collections.Generic.IDictionary<string, string> meta)
         {
+            meta.Remove(KeyCompositeAxis);
             meta.Remove(KeyCompositeBlend);
+            meta.Remove(KeyCompositeScope);
+            meta.Remove(KeyCompositeVrMode);
             int i = 0;
             while (true)
             {
                 string pfx = $"{KeyCompositePrefix}{i}";
                 if (!meta.ContainsKey($"{pfx}{KeyChColor}")) break;
                 foreach (var s in new[]
-                    { KeyChVisible, KeyChColor, KeyChMin, KeyChMax, KeyChGain, KeyChGamma })
+                    { KeyChVisible, KeyChColor, KeyChMin, KeyChMax, KeyChGain, KeyChGamma, KeyChVrMode })
                     meta.Remove($"{pfx}{s}");
                 i++;
             }
         }
 
         /// <summary>
-        /// Restores rendering mode and composite settings from metadata.
+        /// Reads the persisted rendering mode and rehydrates the Composite fields from metadata,
+        /// and returns the mode the caller should switch to.
+        /// <para>
+        /// <c>mxplot.render.mode</c> is the "which mode does this file open in?" flag, and it is
+        /// deliberately honoured <b>on its own</b>: a file carrying only that key (no
+        /// <c>mxplot.composite.*</c> recipes) still opens in Composite, because
+        /// <see cref="EnterCompositeMode"/> generates default recipes whenever the recipe count does
+        /// not match the channel count. The composite keys are an optional refinement of the flag,
+        /// not a precondition for it.
+        /// </para>
+        /// <para>
+        /// This method deliberately does not touch <see cref="MxView.RenderingMode"/> or the
+        /// composite properties on <see cref="_view"/>; <see cref="EnterCompositeMode"/> sets all of
+        /// them, and computes the frame indices from the real <c>DimensionStructure</c> rather than
+        /// assuming the Channel axis is the fastest-varying one.
+        /// </para>
         /// </summary>
-        private void RestoreRenderModeSettings(
+        private RenderingMode RestoreRenderModeSettings(
             System.Collections.Generic.IDictionary<string, string> meta, IMatrixData data)
         {
-            if (!meta.TryGetValue(KeyRenderMode, out string? modeStr)) return;
-            if (string.IsNullOrEmpty(modeStr)) return;
-            if (!System.Enum.TryParse<RenderingMode>(modeStr, out var mode)) return;
-            if (mode == RenderingMode.Lut) return; // デフォルトのため処理不要
+            if (!meta.TryGetValue(KeyRenderMode, out string? modeStr)) return RenderingMode.Lut;
+            if (string.IsNullOrEmpty(modeStr)) return RenderingMode.Lut;
+            if (!System.Enum.TryParse<RenderingMode>(modeStr, out var mode)) return RenderingMode.Lut;
+            if (mode == RenderingMode.Lut) return RenderingMode.Lut; // default: nothing to restore
 
             var recipes = LoadCompositeRecipes(meta);
-            if (recipes.Count == 0) return;
+            _compositeRecipes = recipes;
 
-            var blendMode = BlendMode.Additive;
-            if (meta.TryGetValue(KeyCompositeBlend, out string? blendStr))
-            {
-                System.Enum.TryParse(blendStr, out blendMode);
-            }
+            _compositeBlendMode = BlendMode.Additive;
+            if (meta.TryGetValue(KeyCompositeBlend, out string? blendStr)
+                && System.Enum.TryParse<BlendMode>(blendStr, out var blendMode))
+                _compositeBlendMode = blendMode;
 
-            int[] indices = System.Linq.Enumerable.Range(0, recipes.Count).ToArray();
-
-            _view.CompositeFrameIndices = indices;
-            _view.CompositeRecipes = recipes;
-            _view.CompositeBlendMode = blendMode;
-            _view.RenderingMode = mode;
+            // Range scope / modes. Absent keys keep the defaults (Global + Current), so files
+            // written before this feature existed still restore cleanly.
+            if (meta.TryGetValue(KeyCompositeScope, out string? scopeStr)
+                && System.Enum.TryParse<CompositeRangeScope>(scopeStr, out var scope))
+                _compositeScope = scope;
+            if (meta.TryGetValue(KeyCompositeVrMode, out string? vrStr)
+                && System.Enum.TryParse<ValueRangeMode>(vrStr, out var vrMode))
+                _compositeGlobalMode = vrMode;
+            _compositeRestoredModes = recipes.Count > 0
+                ? LoadCompositeChannelModes(meta, recipes.Count)
+                : null;
 
             Debug.WriteLine($"[MatrixPlotter.RestoreRenderModeSettings] Restored {mode} mode with {recipes.Count} recipes");
+            return mode;
+        }
+
+        /// <summary>
+        /// Loads the per-channel value-range modes. Any channel whose key is missing falls back to
+        /// <see cref="ValueRangeMode.Current"/>, which is the default for a freshly entered session.
+        /// </summary>
+        private static ValueRangeMode[] LoadCompositeChannelModes(
+            System.Collections.Generic.IDictionary<string, string> meta, int count)
+        {
+            var modes = new ValueRangeMode[count];
+            for (int i = 0; i < count; i++)
+            {
+                modes[i] = meta.TryGetValue($"{KeyCompositePrefix}{i}{KeyChVrMode}", out string? ms)
+                        && System.Enum.TryParse<ValueRangeMode>(ms, out var m)
+                    ? m : ValueRangeMode.Current;
+            }
+            return modes;
         }
 
         /// <summary>

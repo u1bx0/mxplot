@@ -29,6 +29,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Avalonia.Diagnostics;
 
 namespace MxPlot.App.Views
 {
@@ -115,6 +116,13 @@ namespace MxPlot.App.Views
         private TextBlock _toastText = null!;
         private CancellationTokenSource? _toastCts;
 
+        /// <summary>
+        /// Whether Shift was down on the last DragOver tick, so the "will prompt for loading
+        /// mode" toast fires once per Shift press rather than on every tick (DragOver fires
+        /// continuously on mouse move). Null while no file drag is in progress over the window list.
+        /// </summary>
+        private bool? _dragHintShiftState;
+
         /// <summary>Threshold above which the loading-mode dialog is shown.</summary>
         private const long LargeFileThresholdBytes = 500 * 1024 * 1024;
 
@@ -122,6 +130,10 @@ namespace MxPlot.App.Views
 
         public MxPlotAppWindow()
         {
+#if DEBUG
+            this.AttachDevTools();
+#endif
+
             InitializeComponent();
 
             // ── Top bar: drag to move + minimize + close ────────────────
@@ -178,21 +190,41 @@ namespace MxPlot.App.Views
             DragDrop.SetAllowDrop(listPanel, true);
             listPanel.AddHandler(DragDrop.DropEvent, async (_, e) =>
             {
+                _dragHintShiftState = null;
                 if (e.Data.GetFiles() is { } files)
                 {
+                    // Shift held at drop time forces the InMemory/Virtual prompt even for
+                    // small files, instead of silently resolving via LoadingMode.Auto.
+                    bool forcePrompt = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
                     foreach (var item in files)
                     {
                         var path = item.TryGetLocalPath();
                         if (path != null)
-                            await ViewModel.LoadAndOpenFileAsync(path, this);
+                            await ViewModel.LoadAndOpenFileAsync(path, this, forcePrompt);
                     }
                 }
             });
+            listPanel.AddHandler(DragDrop.DragEnterEvent, (_, __) => _dragHintShiftState = null);
+            listPanel.AddHandler(DragDrop.DragLeaveEvent, (_, __) => _dragHintShiftState = null);
             listPanel.AddHandler(DragDrop.DragOverEvent, (_, e) =>
             {
-                e.DragEffects = e.Data.GetFiles() != null
-                    ? DragDropEffects.Copy
-                    : DragDropEffects.None;
+                bool hasFiles = e.Data.GetFiles() != null;
+                e.DragEffects = hasFiles ? DragDropEffects.Copy : DragDropEffects.None;
+                if (!hasFiles) return;
+
+                // No hint toast for the default (no-modifier) case — only announce the
+                // Shift-forces-prompt behavior when the user actually presses Shift, and
+                // only once per press (DragOver fires continuously on mouse move).
+                bool shift = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+                if (shift && _dragHintShiftState != true)
+                {
+                    _dragHintShiftState = true;
+                    _ = ShowToastAsync("Will prompt for loading mode");
+                }
+                else if (!shift)
+                {
+                    _dragHintShiftState = false;
+                }
             });
 
             // ── Window List: selection → ViewModel sync + activate ───────
@@ -366,10 +398,14 @@ namespace MxPlot.App.Views
                     Topmost = IsCurrentForegroundOurProcess();
             };
 
+            var memoryMonitorItem = new MenuItem { Header = "Memory Monitor" };
+            memoryMonitorItem.Click += (_, _) => MemoryMonitorWindow.ShowOrActivate();
+
             var aboutMenuItem = flyout.Items.OfType<MenuItem>().First(m => m.Header?.ToString() == "About");
             int aboutIdx = ((System.Collections.IList)flyout.Items).IndexOf(aboutMenuItem);
             //flyout.Items.Insert(aboutIdx, new Separator());
             flyout.Items.Insert(aboutIdx, topmostItem);
+            flyout.Items.Insert(aboutIdx + 1, memoryMonitorItem);
 
             // Dashboard stays above own plot windows; drops behind other apps when they take focus.
             Topmost = true;
@@ -379,10 +415,19 @@ namespace MxPlot.App.Views
             {
                 w.Activated += OnAnyAppWindowActivated;
                 w.Deactivated += OnAnyAppWindowDeactivated;
+                // Maximize case: dock the dashboard against the screen edge instead of
+                // leaving it wherever it happened to be sitting under the now-fullscreen window.
+                EventHandler<AvaloniaPropertyChangedEventArgs> onPropertyChanged = (_, e) =>
+                {
+                    if (e.Property == WindowStateProperty && w.WindowState == WindowState.Maximized)
+                        Dispatcher.UIThread.Post(() => TryDockDashboardOnMaximize(w), DispatcherPriority.Background);
+                };
+                w.PropertyChanged += onPropertyChanged;
                 w.Closed += (_, _) =>
                 {
                     w.Activated -= OnAnyAppWindowActivated;
                     w.Deactivated -= OnAnyAppWindowDeactivated;
+                    w.PropertyChanged -= onPropertyChanged;
                     if (_isSyncActive && _syncSelectionSnapshot != null
                         && _syncSelectionSnapshot.Any(vm => vm.Window == w))
                         SetSyncActive(false);
@@ -634,6 +679,12 @@ namespace MxPlot.App.Views
         {
             if (!_avoidOverlapEnabled) return;
             if (_adjustingOverlap) return;
+            // Guards against a stray Activated/PositionChanged event that can fire while a
+            // window is in the middle of closing, at which point its Position/Bounds may
+            // already be stale (e.g. reset towards the screen origin) — without this check,
+            // that phantom rect can look like it overlaps the dashboard and drag it sideways
+            // for no visible reason when the user closes the last plot window.
+            if (!plotWindow.IsVisible) return;
             if (plotWindow.WindowState != WindowState.Normal) return;
             if (WindowState != WindowState.Normal) return;
 
@@ -680,6 +731,9 @@ namespace MxPlot.App.Views
             if (!_avoidOverlapEnabled) return;
             if (_adjustingOverlap) return;
             if (_isSyncActive) return;
+            // See the matching comment in TryAvoidDashboardOverlap: skip windows that are
+            // already closing, whose Position/Bounds can no longer be trusted.
+            if (!plotWindow.IsVisible) return;
             if (plotWindow.WindowState != WindowState.Normal) return;
             if (WindowState != WindowState.Normal) return;
 
@@ -713,6 +767,41 @@ namespace MxPlot.App.Views
 
             _adjustingOverlap = true;
             try { Position = new PixelPoint((int)(newX * sc), Position.Y); }
+            finally { _adjustingOverlap = false; }
+        }
+
+        /// <summary>
+        /// When a plot window is maximized, docks the dashboard against the left edge of that
+        /// window's screen (staying Topmost so it remains reachable) instead of leaving it
+        /// wherever it happened to be sitting, now buried under the fullscreen content.
+        /// No-op if the dashboard is already at the edge, or sits on a different screen.
+        /// </summary>
+        private void TryDockDashboardOnMaximize(Window plotWindow)
+        {
+            if (!_avoidOverlapEnabled) return;
+            if (_adjustingOverlap) return;
+            if (_isSyncActive) return;
+            if (!plotWindow.IsVisible) return;
+            if (plotWindow.WindowState != WindowState.Maximized) return;
+            if (WindowState != WindowState.Normal) return;
+
+            var screen = Screens.ScreenFromWindow(plotWindow);
+            var dashScreen = Screens.ScreenFromWindow(this);
+            if (screen == null || dashScreen == null || dashScreen.Bounds != screen.Bounds) return;
+
+            double sc = screen.Scaling;
+            var wb = screen.WorkingArea;
+            var screenRect = new Rect(wb.X / sc, wb.Y / sc, wb.Width / sc, wb.Height / sc);
+            var dashRect = new Rect(Position.X / sc, Position.Y / sc, Bounds.Width, Bounds.Height);
+
+            const double Gap = 8.0;
+            double targetX = screenRect.Left + Gap;
+            if (Math.Abs(dashRect.Left - targetX) < 1.0) return;
+
+            double newY = Math.Max(screenRect.Top, Math.Min(dashRect.Top, screenRect.Bottom - dashRect.Height));
+
+            _adjustingOverlap = true;
+            try { Position = new PixelPoint((int)(targetX * sc), (int)(newY * sc)); }
             finally { _adjustingOverlap = false; }
         }
 

@@ -15,6 +15,7 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Processing operations ─────────────────────────────────────────────
 
         private CancellationTokenSource? _cropCts;
+        private CancellationTokenSource? _grayscaleCts;
         private static CropRoiBounds? _lastCropBounds;
 
         /// <summary>
@@ -132,11 +133,26 @@ namespace MxPlot.UI.Avalonia.Views
                     zCount = Math.Max(1, Math.Min(zCount, depthAxis.Count - zStart));
                 }
 
+                // Axis.Slice() (used by Substack to shrink this axis) has no way to sub-range a
+                // FovAxis's tile layout - an arbitrary contiguous index range is not generally a
+                // valid tile rectangle - so it deliberately degrades to a plain Axis. Warn before
+                // that happens, mirroring RenameAxisAsync's confirmation for the same kind of
+                // specialized-axis downgrade.
+                if (depthAxis is FovAxis)
+                {
+                    string opName = p.Mode == CropMode.Substack ? "Substack" : "3D Crop";
+                    bool ok = await ShowConfirmDialogAsync(
+                        opName,
+                        $"The “{axisName}” axis has a specialized type (FOV). {opName} will convert it "
+                        + "to a plain axis, discarding its tile layout.\n\nContinue?");
+                    if (!ok) return;
+                }
+
                 string progressLabel = p.Mode == CropMode.Substack ? "Substack…" : "3D Crop…";
-                var progress = BeginProgress(progressLabel, blockInput: true);
                 _cropCts?.Dispose();
                 _cropCts = new CancellationTokenSource();
                 var ct = _cropCts.Token;
+                var progress = BeginProgress(progressLabel, blockInput: true, _cropCts);
                 int sourceActiveIndex = _currentData.ActiveIndex;
                 try
                 {
@@ -173,10 +189,10 @@ namespace MxPlot.UI.Avalonia.Views
             // ── XY Crop ───────────────────────────────────────────────────────
             if (isMultiFrame)
             {
-                var progress = BeginProgress("Cropping…", blockInput: true);
                 _cropCts?.Dispose();
                 _cropCts = new CancellationTokenSource();
                 var ct = _cropCts.Token;
+                var progress = BeginProgress("Cropping…", blockInput: true, _cropCts);
                 int sourceActiveIndex = _currentData.ActiveIndex;
                 try
                 {
@@ -276,10 +292,12 @@ namespace MxPlot.UI.Avalonia.Views
                 _cropUndoData = _currentData;
                 _cropUndoDirty = _dirty;
                 _cropUndoTitle = Title;
-                _cropUndoLutVrSnapshot = _lutVrSnapshot;
+                _cropUndoRenderSnapshot = _renderSnapshot;
                 _cropUndoScaleSnapshot = _scaleSnapshot;
                 var newTitle = $"Crop of {Title}";
-                SetMatrixData(result);
+                // Replace-data crop discards the old instance, so live followers must be closed
+                // first - see CloseSyncFollowers.
+                SetMatrixData(result, closeSyncFollowers: true);
                 Title = newTitle;
                 SetDirty(DirtyFlags.Data, true);
             }
@@ -295,19 +313,19 @@ namespace MxPlot.UI.Avalonia.Views
             var undo = _cropUndoData;
             var undoDirty = _cropUndoDirty;
             var undoTitle = _cropUndoTitle;
-            var undoLutVr = _cropUndoLutVrSnapshot;
+            var undoLutVr = _cropUndoRenderSnapshot;
             var undoScale = _cropUndoScaleSnapshot;
             _cropUndoData = null;
-            _cropUndoLutVrSnapshot = null;
+            _cropUndoRenderSnapshot = null;
             _cropUndoScaleSnapshot = null;
             SetMatrixData(undo);
             // Restore the snapshots and dirty flags from before the crop was applied.
             // SetMatrixData has already replaced them with crop-data snapshots; overwrite here.
-            _lutVrSnapshot = undoLutVr;
+            _renderSnapshot = undoLutVr;
             _scaleSnapshot = undoScale;
             _dirty = undoDirty;
             if (_dirty != DirtyFlags.None) IsModifiedChanged?.Invoke(this, EventArgs.Empty);
-            if ((_dirty & (DirtyFlags.Lut | DirtyFlags.Vr)) != 0 && _lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = _lutVrSnapshot != null;
+            UpdateRenderRevertButtons();
             UpdateScaleRevertButton();
             Title = undoTitle ?? Title;
             SyncCropReverted?.Invoke(this, EventArgs.Empty);
@@ -389,31 +407,33 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Builds a human-readable frame label for the title of an extracted frame window.
-        /// For Hyperstack data, formats as "[A=1, B=3]"; for flat multi-frame, "[i=8]".
+        /// For Hyperstack data, formats as "[A=0, B=2]"; for flat multi-frame, "[i:7]".
         /// </summary>
         /// <summary>
         /// Formats an axis value at the given index as a short string suitable for window titles.
-        /// Index-based axes use "i=N" (1-based). Scaled axes use the value formatted to 3 decimal places with unit.
-        /// Example: "Z=12.500 um", "Time=0.100 s", "Channel=i=2"
+        /// Index-based axes use "i:N" (0-based, matching <see cref="AxisTracker.BuildPositionText"/>'s
+        /// convention and every 0-based index elsewhere in the codebase). Scaled axes use the value
+        /// formatted to 3 decimal places with unit.
+        /// Example: "Z=12.500 um", "Time=0.100 s", "Channel=i:2"
         /// </summary>
         /// <param name="verbose">
-        /// When <c>true</c>, appends the 1-based index suffix for scaled axes: "12.500 um (i=22)".
-        /// When <c>false</c>, returns the value only: "12.500 um". Index-based axes always use "(Index=N)".
+        /// When <c>true</c>, appends the 0-based index suffix for scaled axes: "12.500 um (idx:22)".
+        /// When <c>false</c>, returns the value only: "12.500 um". Index-based axes always use "i:N".
         /// </param>
         private static string FormatAxisValue(Axis axis, int index, bool verbose = false)
         {
             if (axis.IsIndexBased)
-                return $"i:{index + 1}";
+                return $"i:{index}";
             double val = axis.ValueAt(index);
             string unit = string.IsNullOrEmpty(axis.Unit) ? "" : $" {axis.Unit}";
-            return verbose ? $"{val:F3}{unit} (idx:{index + 1})" : $"{val:F3}{unit}";
+            return verbose ? $"{val:F3}{unit} (idx:{index})" : $"{val:F3}{unit}";
         }
 
         private static string BuildFrameLabel(IMatrixData data, int frameIndex)
         {
             var axes = data.Axes;
             if (axes.Count == 0)
-                return $"[i={frameIndex + 1}]";
+                return $"[i={frameIndex}]";
 
             var coords = data.Dimensions.GetAxisIndices(frameIndex);
             var parts = new System.Text.StringBuilder();
@@ -429,7 +449,7 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var axes = data.Axes;
             if (axes.Count == 0)
-                return $"i={frameIndex + 1}";
+                return $"i={frameIndex}";
 
             var coords = data.Dimensions.GetAxisIndices(frameIndex);
             return string.Join(", ", Enumerable.Range(0, axes.Count)
@@ -447,7 +467,11 @@ namespace MxPlot.UI.Avalonia.Views
         /// <param name="fixedAxisName">Fixed spatial axis name ("Y" for XZ, "X" for YZ).</param>
         /// <param name="fixedPixelIndex">0-based pixel index of the fixed spatial axis.</param>
         /// <param name="sourceData">Source data for resolving additional hyperstack axis values.</param>
-        private static string BuildOrthoLabel(string horizAxis, string vertAxis, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData)
+        /// <param name="skipAxisName">
+        /// Extra axis to omit — used when Composite mode extracts the whole Channel axis instead
+        /// of fixing it, so listing its (no-longer-fixed) index would be misleading.
+        /// </param>
+        private static string BuildOrthoLabel(string horizAxis, string vertAxis, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData, string? skipAxisName = null)
         {
             var sb = new System.Text.StringBuilder();
             // iy=/ix= is a 0-based pixel coordinate, grouped with the plane name as an attribute
@@ -459,14 +483,14 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 foreach (var axis in sourceData.Axes)
                 {
-                    if (axis.Name == vertAxis) continue;
+                    if (string.Equals(axis.Name, vertAxis, StringComparison.OrdinalIgnoreCase) || string.Equals(axis.Name, skipAxisName, StringComparison.OrdinalIgnoreCase)) continue;
                     sb.Append($", {axis.Name}={FormatAxisValue(axis, axis.Index)}");
                 }
             }
             return $"[{sb}]";
         }
 
-        private static string BuildOrthoHistoryDetail(string planeName, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData, string depthAxisName)
+        private static string BuildOrthoHistoryDetail(string planeName, string fixedAxisName, int fixedPixelIndex, IMatrixData? sourceData, string depthAxisName, string? skipAxisName = null)
         {
             var sb = new System.Text.StringBuilder();
             string pixelTag = fixedAxisName.ToLowerInvariant();
@@ -475,7 +499,7 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 foreach (var axis in sourceData.Axes)
                 {
-                    if (axis.Name == depthAxisName) 
+                    if (string.Equals(axis.Name, depthAxisName, StringComparison.OrdinalIgnoreCase) || string.Equals(axis.Name, skipAxisName, StringComparison.OrdinalIgnoreCase))
                         continue;
                     sb.Append($", {axis.Name}={FormatAxisValue(axis, axis.Index, verbose: true)}");
                 }
@@ -487,46 +511,106 @@ namespace MxPlot.UI.Avalonia.Views
         /// Extracts the current frame or orthogonal slice and opens it in a new
         /// <see cref="MatrixPlotter"/> window.
         /// For the main view, <see cref="MxView.FrameIndex"/> is used to slice the current frame.
-        /// For orthogonal views (XZ / YZ), a live fixed-plane extract window is created:
-        /// the slice position (iy / ix) is captured at the moment of extraction and the child
-        /// window is refreshed whenever the parent refreshes. When the parent's data instance
-        /// is replaced (<see cref="MatrixDataChanged"/>), the child window is closed automatically.
+        /// For orthogonal views (XZ / YZ), a live fixed-plane extract window is created. Everything
+        /// that identifies the frame is captured at extraction - the slice position (iy / ix) and
+        /// the position of every axis - so the window keeps showing the plane named in its title
+        /// however the parent is navigated afterwards. What it does follow is pixel edits: the
+        /// captured volume shares the parent's frame buffers, and each parent refresh re-slices it.
+        /// The window closes when the parent replaces its data instance outright, since the volume
+        /// it captured belongs to the old one.
         /// </summary>
         private void InvokeExtractFrame(MxView sourceView)
         {
             if (sourceView == _orthoPanel.BottomView)
             {
-                // XZ view: fixed Y slice — live extract
+                // XZ view: fixed Y slice — live extract. In Composite mode, extract every
+                // channel (not just whichever one ActiveIndex is pinned to) via the same
+                // per-channel-extract-and-merge OrthogonalViewController already uses to render
+                // this very side view, so the live extract keeps showing a proper Composite blend.
                 var capturedData = _currentData;
                 if (capturedData == null) return;
                 int capturedIY = _orthoController.CurrentIY;
                 string capturedAxis = _orthoController.ActiveAxisName ?? "Z";
+                bool useComposite = _isCompositeMode && _compositeAxisDimIndex >= 0;
+                int capturedChannelDim = _compositeAxisDimIndex;
+                string? channelAxisName = useComposite ? capturedData.Dimensions[capturedChannelDim].Name : null;
 
-                var result = capturedData.Apply(new SliceOperation(ViewFrom.Y, capturedIY, capturedAxis));
-                string frameLabel = BuildOrthoLabel("X", capturedAxis, "Y", capturedIY, capturedData);
+                // Freeze every axis, not just the slice position: "Extract" means this frame, and
+                // the window title and history entry below record the full coordinate. Capturing
+                // the volume rather than re-deriving it per rebuild is what pins the other axes -
+                // ExtractAlong with deepCopy:false shares the source's frame buffers by reference,
+                // so the extract still follows pixel edits while staying on its own (C, T, ...).
+                var capturedIndices = capturedData.Dimensions.GetAxisIndices();
+                IMatrixData CaptureVolume(int[] indices) =>
+                    capturedData.Apply(new ExtractAlongOperation(capturedAxis, indices, DeepCopy: false));
+
+                IMatrixData[] volumes;
+                if (useComposite)
+                {
+                    int channelCount = capturedData.Dimensions[capturedChannelDim].Count;
+                    volumes = new IMatrixData[channelCount];
+                    for (int c = 0; c < channelCount; c++)
+                    {
+                        var bi = (int[])capturedIndices.Clone();
+                        bi[capturedChannelDim] = c;
+                        volumes[c] = CaptureVolume(bi);
+                    }
+                }
+                else
+                {
+                    volumes = [CaptureVolume(capturedIndices)];
+                }
+
+                // The captured volumes carry a single axis, so the slice needs no axis name.
+                // dst is null on the first call (nothing to write into yet) and the window's own
+                // data thereafter, so every later slice lands in the frames already on screen.
+                IMatrixData BuildXZ(IMatrixData? dst)
+                {
+                    if (!useComposite)
+                        return volumes[0].Apply(new SliceOperation(ViewFrom.Y, capturedIY, Dst: dst));
+
+                    var perChannel = new IMatrixData[volumes.Length];
+                    for (int c = 0; c < volumes.Length; c++)
+                        perChannel[c] = volumes[c].Apply(new SliceOperation(ViewFrom.Y, capturedIY, Dst: dst, DstIndex: c));
+                    // With dst supplied the per-channel slices already share its frames, so the
+                    // merge just rebuilds an equivalent wrapper and the caller keeps using dst.
+                    return OrthogonalViewController.MergeChannelComposite(
+                        capturedData, capturedChannelDim, perChannel);
+                }
+
+                var result = BuildXZ(null);
+                string frameLabel = BuildOrthoLabel("X", capturedAxis, "Y", capturedIY, capturedData, channelAxisName);
                 AppendHistory(result, "Extract Frame (XZ)", Title,
-                    BuildOrthoHistoryDetail("XZ", "Y", capturedIY, capturedData, capturedAxis));
+                    BuildOrthoHistoryDetail("XZ", "Y", capturedIY, capturedData, capturedAxis, channelAxisName));
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
+                if (useComposite) SeedChildCompositeMode(child, result, channelAxisName!);
 
-                EventHandler refreshHandler = (_, _) =>
-                {
-                    var updated = capturedData.Apply(new SliceOperation(ViewFrom.Y, capturedIY, capturedAxis));
-                    child.SetMatrixData(updated);
-                };
-                EventHandler<IMatrixData?> dataChangedHandler = null!;
-                dataChangedHandler = (_, _) =>
-                {
-                    this.Refreshed -= refreshHandler;
-                    this.MatrixDataChanged -= dataChangedHandler;
-                    child.Close();
-                };
-                this.Refreshed += refreshHandler;
-                this.MatrixDataChanged += dataChangedHandler;
-                child.Closed += (_, _) =>
-                {
-                    this.Refreshed -= refreshHandler;
-                    this.MatrixDataChanged -= dataChangedHandler;
-                };
+                // The extract is pinned to its captured volumes and slice position, so frame
+                // navigation must not rebuild it - only a content change (Refreshed) may. And
+                // because it closed over those buffers, it cannot outlive the source swapping data.
+                //
+                // Re-slicing into the window's own frames keeps one IMatrixData on screen for its
+                // whole life: no per-update allocation, and nothing downstream has to re-resolve
+                // the instance. The cost is that the renderer can read a frame mid-write, so the
+                // image may tear briefly under a fast feed. Building a fresh slice and swapping it
+                // in would avoid that, at the price of a full-frame allocation per update and a new
+                // instance each time; slicing on the UI thread would avoid it too, but a Virtual
+                // source pulls every depth frame through the MMF and would stall the window.
+                var windowData = child.MatrixData;
+                _ = new LinkedView(child, this,
+                    (_, ct) => Task.Run<LinkedViewUpdate?>(() =>
+                    {
+                        var updated = BuildXZ(windowData);
+                        // GetArray invalidated each frame as the slice started writing it. Doing it
+                        // again now closes the gap where a render in between could have cached a
+                        // range measured from a half-written frame.
+                        if (windowData != null)
+                            for (int i = 0; i < windowData.FrameCount; i++) windowData.Invalidate(i);
+                        return new LinkedViewUpdate(updated, useComposite ? channelAxisName : null);
+                    }, ct),
+                    LinkedViewCommit.RefreshInPlace,
+                    trackActiveIndex: false,
+                    closeOnSourceDataReplaced: true);
 
                 child.Show();
                 return;
@@ -534,55 +618,160 @@ namespace MxPlot.UI.Avalonia.Views
 
             if (sourceView == _orthoPanel.RightView)
             {
-                // YZ view: fixed X slice — live extract
+                // YZ view: fixed X slice — live extract. Same Composite handling as the XZ branch
+                // above (see comment there).
                 var capturedData = _currentData;
                 if (capturedData == null) return;
                 int capturedIX = _orthoController.CurrentIX;
                 string capturedAxis = _orthoController.ActiveAxisName ?? "Z";
+                bool useComposite = _isCompositeMode && _compositeAxisDimIndex >= 0;
+                int capturedChannelDim = _compositeAxisDimIndex;
+                string? channelAxisName = useComposite ? capturedData.Dimensions[capturedChannelDim].Name : null;
 
-                var result = capturedData.Apply(new SliceOperation(ViewFrom.X, capturedIX, capturedAxis));
-                string frameLabel = BuildOrthoLabel("Y", capturedAxis, "X", capturedIX, capturedData);
+                // Freeze every axis, not just the slice position: "Extract" means this frame, and
+                // the window title and history entry below record the full coordinate. Capturing
+                // the volume rather than re-deriving it per rebuild is what pins the other axes -
+                // ExtractAlong with deepCopy:false shares the source's frame buffers by reference,
+                // so the extract still follows pixel edits while staying on its own (C, T, ...).
+                var capturedIndices = capturedData.Dimensions.GetAxisIndices();
+                IMatrixData CaptureVolume(int[] indices) =>
+                    capturedData.Apply(new ExtractAlongOperation(capturedAxis, indices, DeepCopy: false));
+
+                IMatrixData[] volumes;
+                if (useComposite)
+                {
+                    int channelCount = capturedData.Dimensions[capturedChannelDim].Count;
+                    volumes = new IMatrixData[channelCount];
+                    for (int c = 0; c < channelCount; c++)
+                    {
+                        var bi = (int[])capturedIndices.Clone();
+                        bi[capturedChannelDim] = c;
+                        volumes[c] = CaptureVolume(bi);
+                    }
+                }
+                else
+                {
+                    volumes = [CaptureVolume(capturedIndices)];
+                }
+
+                // The captured volumes carry a single axis, so the slice needs no axis name.
+                // dst is null on the first call (nothing to write into yet) and the window's own
+                // data thereafter, so every later slice lands in the frames already on screen.
+                IMatrixData BuildYZ(IMatrixData? dst)
+                {
+                    if (!useComposite)
+                        return volumes[0].Apply(new SliceOperation(ViewFrom.X, capturedIX, Dst: dst));
+
+                    var perChannel = new IMatrixData[volumes.Length];
+                    for (int c = 0; c < volumes.Length; c++)
+                        perChannel[c] = volumes[c].Apply(new SliceOperation(ViewFrom.X, capturedIX, Dst: dst, DstIndex: c));
+                    // With dst supplied the per-channel slices already share its frames, so the
+                    // merge just rebuilds an equivalent wrapper and the caller keeps using dst.
+                    return OrthogonalViewController.MergeChannelComposite(
+                        capturedData, capturedChannelDim, perChannel);
+                }
+
+                var result = BuildYZ(null);
+                string frameLabel = BuildOrthoLabel("Y", capturedAxis, "X", capturedIX, capturedData, channelAxisName);
                 AppendHistory(result, "Extract Frame (YZ)", Title,
-                    BuildOrthoHistoryDetail("YZ", "X", capturedIX, capturedData, capturedAxis));
+                    BuildOrthoHistoryDetail("YZ", "X", capturedIX, capturedData, capturedAxis, channelAxisName));
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
+                if (useComposite) SeedChildCompositeMode(child, result, channelAxisName!);
 
-                EventHandler refreshHandler = (_, _) =>
-                {
-                    var updated = capturedData.Apply(new SliceOperation(ViewFrom.X, capturedIX, capturedAxis));
-                    child.SetMatrixData(updated);
-                };
-                EventHandler<IMatrixData?> dataChangedHandler = null!;
-                dataChangedHandler = (_, _) =>
-                {
-                    this.Refreshed -= refreshHandler;
-                    this.MatrixDataChanged -= dataChangedHandler;
-                    child.Close();
-                };
-                this.Refreshed += refreshHandler;
-                this.MatrixDataChanged += dataChangedHandler;
-                child.Closed += (_, _) =>
-                {
-                    this.Refreshed -= refreshHandler;
-                    this.MatrixDataChanged -= dataChangedHandler;
-                };
+                // The extract is pinned to its captured volumes and slice position, so frame
+                // navigation must not rebuild it - only a content change (Refreshed) may. And
+                // because it closed over those buffers, it cannot outlive the source swapping data.
+                //
+                // Re-slicing into the window's own frames keeps one IMatrixData on screen for its
+                // whole life: no per-update allocation, and nothing downstream has to re-resolve
+                // the instance. The cost is that the renderer can read a frame mid-write, so the
+                // image may tear briefly under a fast feed. Building a fresh slice and swapping it
+                // in would avoid that, at the price of a full-frame allocation per update and a new
+                // instance each time; slicing on the UI thread would avoid it too, but a Virtual
+                // source pulls every depth frame through the MMF and would stall the window.
+                var windowData = child.MatrixData;
+                _ = new LinkedView(child, this,
+                    (_, ct) => Task.Run<LinkedViewUpdate?>(() =>
+                    {
+                        var updated = BuildYZ(windowData);
+                        // GetArray invalidated each frame as the slice started writing it. Doing it
+                        // again now closes the gap where a render in between could have cached a
+                        // range measured from a half-written frame.
+                        if (windowData != null)
+                            for (int i = 0; i < windowData.FrameCount; i++) windowData.Invalidate(i);
+                        return new LinkedViewUpdate(updated, useComposite ? channelAxisName : null);
+                    }, ct),
+                    LinkedViewCommit.RefreshInPlace,
+                    trackActiveIndex: false,
+                    closeOnSourceDataReplaced: true);
 
                 child.Show();
                 return;
             }
 
             {
-                // Main view: slice the current frame (shallow copy)
+                // Main view: slice the current frame (shallow copy). In Composite mode, a plain
+                // single-frame slice would silently collapse every channel down to whichever one
+                // ActiveIndex happens to be pinned to - extract the whole Channel axis instead
+                // (fixing every other axis at its current index), reusing the same
+                // ExtractAlongOperation "Extract Dimension" already applies for any axis.
                 var data = sourceView.MatrixData;
                 if (data == null) return;
                 int frameIndex = sourceView.FrameIndex;
-                bool isDeepCopy = !data.IsWritable; //true only if data is Writable (e.g., read-only MMF)
-                var result = data.Apply(new SliceAtOperation(frameIndex, DeepCopy: isDeepCopy));
-                string frameLabel = BuildFrameLabel(data, frameIndex);
-                AppendHistory(result, "Extract Frame" + (isDeepCopy ? "(deep copy)" : ""), Title,
-                    data.FrameCount > 1 ? BuildFrameHistoryDetail(data, frameIndex) : null);
+
+                IMatrixData result;
+                string frameLabel;
+                string historyLabel;
+                string? historyDetail;
+                var compositeCube = TryExtractCompositeFrameCube(data);
+                if (compositeCube != null)
+                {
+                    result = compositeCube.Value.Cube;
+                    string channelAxisName = compositeCube.Value.ChannelAxisName;
+                    frameLabel = $"[{BuildCompositeCubeLabel(data, channelAxisName)}]";
+                    historyLabel = "Extract Frame (Composite)";
+                    var otherAxes = data.Axes.Where(a => !string.Equals(a.Name, channelAxisName, StringComparison.OrdinalIgnoreCase));
+                    historyDetail = $"axis={channelAxisName}; fixed: " + string.Join(", ",
+                        otherAxes.Select(a => $"{a.Name}={FormatAxisValue(a, a.Index, verbose: true)}"));
+                }
+                else
+                {
+                    bool isDeepCopy = !data.IsWritable; //true only if data is Writable (e.g., read-only MMF)
+                    result = data.Apply(new SliceAtOperation(frameIndex, DeepCopy: isDeepCopy));
+                    frameLabel = BuildFrameLabel(data, frameIndex);
+                    historyLabel = "Extract Frame" + (isDeepCopy ? "(deep copy)" : "");
+                    historyDetail = data.FrameCount > 1 ? BuildFrameHistoryDetail(data, frameIndex) : null;
+                }
+                AppendHistory(result, historyLabel, Title, historyDetail);
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}");
+                if (compositeCube != null) SeedChildCompositeMode(child, result, compositeCube.Value.ChannelAxisName);
                 child.Show();
             }
+        }
+
+        /// <summary>
+        /// Resolves the Channel axis on a freshly extracted child's data by name and delegates to
+        /// <see cref="SeedChildCompositeState"/> for the actual state hand-off. Extract's three call
+        /// sites (XY/XZ/YZ) only ever have the axis name in hand (not the axis object itself), which
+        /// is the one thing <see cref="SeedChildCompositeState"/> needs a resolved <see cref="Axis"/>
+        /// for.
+        /// </summary>
+        private void SeedChildCompositeMode(MatrixPlotter child, IMatrixData childData, string channelAxisName)
+        {
+            var channelAxis = childData.Axes.FindAxis(channelAxisName);
+            if (channelAxis == null) return;
+            SeedChildCompositeState(child, channelAxis);
+        }
+
+        /// <summary>
+        /// Keeps an already-Composite child window's frame-index/range/histogram bookkeeping in
+        /// sync after its data was swapped via <see cref="UpdateProjectionData"/> - see
+        /// <see cref="SyncCurrentDataFromView"/> for why that swap alone isn't enough.
+        /// </summary>
+        private void RefreshCompositeAfterDataSwap()
+        {
+            SyncCurrentDataFromView();
+            ApplyCompositeFrameIndices();
         }
 
         // ── Extract Dimension (Extract Along / Extract At) ────────────────────
@@ -593,7 +782,7 @@ namespace MxPlot.UI.Avalonia.Views
             HideMenuPanel();
 
             var axes = _currentData.Axes;
-            var p = await ExtractDimensionDialog.ShowAsync(this, axes);
+            var p = await ExtractDimensionDialog.ShowAsync(this, axes, IsSyncFollower);
             if (p == null) return;
 
             IMatrixData result;
@@ -610,18 +799,18 @@ namespace MxPlot.UI.Avalonia.Views
 
                     // History: record the fixed positions of all other axes
                     var otherAxesParts = axes
-                        .Where(a => a.Name != p.AxisName)
+                        .Where(a => !string.Equals(a.Name, p.AxisName, StringComparison.OrdinalIgnoreCase))
                         .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index, verbose: true)}");
                     historyDetail = $"axis={p.AxisName}; fixed: {string.Join(", ", otherAxesParts)}";
 
                     var otherTitleParts = axes
-                        .Where(a => a.Name != p.AxisName)
+                        .Where(a => !string.Equals(a.Name, p.AxisName, StringComparison.OrdinalIgnoreCase))
                         .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index)}");
                     resultTitle = $"{Title} [Along {p.AxisName}, {string.Join(", ", otherTitleParts)}]";
                 }
                 else
                 {
-                    var targetAxis = axes.First(a => a.Name == p.AxisName);
+                    var targetAxis = axes.FindAxis(p.AxisName)!;
                     result = _currentData.Apply(new SelectByOperation(p.AxisName, targetAxis.Index));
 
                     historyDetail = $"{p.AxisName}={FormatAxisValue(targetAxis, targetAxis.Index, verbose: true)}";
@@ -643,7 +832,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (p.ReplaceData)
             {
                 var newTitle = Title;
-                SetMatrixData(result);
+                SetMatrixData(result, closeSyncFollowers: true);
                 Title = newTitle;
                 SetDirty(DirtyFlags.Data, true);
             }
@@ -661,8 +850,8 @@ namespace MxPlot.UI.Avalonia.Views
             HideMenuPanel();
 
             var axes = _currentData.Axes;
-            var p = await ReverseStackDialog.ShowAsync(this, axes);
-            if (p == null) 
+            var p = await ReverseStackDialog.ShowAsync(this, axes, IsSyncFollower);
+            if (p == null)
                 return;
 
             if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Reverse Stack")) 
@@ -691,13 +880,87 @@ namespace MxPlot.UI.Avalonia.Views
             if (p.ReplaceData)
             {
                 var newTitle = Title;
-                SetMatrixData(result);
+                SetMatrixData(result, closeSyncFollowers: true);
                 Title = newTitle;
                 SetDirty(DirtyFlags.Data, true);
             }
             else
             {
                 MatrixPlotter.Create(result, _view.Lut, $"Reversed {Title}").Show();
+            }
+        }
+
+        /// <summary>
+        /// Collapses the Channel axis into a single grayscale channel.
+        /// </summary>
+        /// <remarks>
+        /// Shows the standard processing dialog so the user can choose whether to replace the
+        /// current window or open the result in a new one. The grayscale weights are still
+        /// determined automatically from the channel tags (Rec.709 luma for an R/G/B triplet,
+        /// mean otherwise).
+        /// </remarks>
+        private async Task InvokeConvertToGrayscaleAsync()
+        {
+            if (_currentData == null) return;
+            HideMenuPanel();
+
+            var channelAxis = _currentData.Axes.FindAxis("Channel");
+            if (channelAxis == null) return;
+
+            var dlg = await GrayscaleDialog.ShowAsync(this, IsSyncFollower);
+            if (dlg == null)
+                return;
+
+            if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Convert to Grayscale"))
+                return;
+
+            bool luma = ColorAxis.IsRgbTriplet(channelAxis);
+            int channelCount = channelAxis.Count;
+
+            IMatrixData result;
+            _grayscaleCts?.Dispose();
+            _grayscaleCts = new CancellationTokenSource();
+            var ct = _grayscaleCts.Token;
+            var progress = BeginProgress("Converting to grayscale…", blockInput: true, _grayscaleCts);
+            try
+            {
+                result = await Task.Run(() => _currentData.Apply(
+                    new GrayscaleOperation(channelAxis.Name, GrayscaleMethod.Auto, progress, ct)), ct);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (OutOfMemoryException)
+            {
+                await ShowMessageDialogAsync("Out of Memory",
+                    "Not enough memory to process this dataset.\nOperation cancelled.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageDialogAsync("Convert to Grayscale Failed", ex.Message);
+                return;
+            }
+            finally
+            {
+                _grayscaleCts?.Dispose();
+                _grayscaleCts = null;
+                EndProgress();
+            }
+
+            string detail = luma
+                ? $"{channelCount} channels, Rec.709 luma"
+                : $"{channelCount} channels, mean";
+            AppendHistory(result, "Convert to Grayscale", Title, detail);
+
+            if (dlg.ReplaceData)
+            {
+                var newTitle = Title;
+                SetMatrixData(result, closeSyncFollowers: true);
+                Title = newTitle;
+                SetDirty(DirtyFlags.Data, true);
+            }
+            else
+            {
+                MatrixPlotter.Create(result, _view.Lut, $"Grayscale of {Title}").Show();
             }
         }
 

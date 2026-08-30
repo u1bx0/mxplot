@@ -66,8 +66,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         public ParallelOptions? ParallelOptions { get; set; }
 
         /// <summary>
-        /// Not used by <see cref="CompositeBitmapWriter"/>.
-        /// Per-layer converters are specified via <see cref="BlendRecipe.ValueConverter"/>.
+        /// Gets or sets the converter used for struct-based values during Complex rendering.
+        /// Must be set to <c>Func&lt;Complex, double&gt;</c> when <see cref="ValueType"/> is <see cref="Complex"/>.
         /// </summary>
         public object? StructValueConverter { get; set; }
 
@@ -75,18 +75,21 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         #region Cache Fields
 
-        // Reference-equality cache key — no rebuild when same context instance is reused.
+        // Reference-equality cache key — no rebuild when the same context and converter instance are reused.
         private CompositeRenderingContext? _lastContext;
+        private object? _lastStructValueConverter;
 
         // Direct-index LUTs for byte / ushort / short.
         // Null entry means the layer is inactive (not visible or zero gain).
         private int[][]? _cachedDirectMaps;
 
+        // Frame-sized scratch buffer; see EnsureScratch.
+        private int[]? _scratch;
+
         // Scale LUTs for int / float / double / Complex.
         private int[][]? _cachedScaleMaps;
         private double[]? _cachedScales;
         private double[]? _cachedOffsets;
-        private Func<Complex, double>[]? _cachedConverters;
 
         #endregion
 
@@ -111,6 +114,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         {
             ValueType = valueType ?? throw new ArgumentNullException(nameof(valueType));
 
+            if (valueType == typeof(Complex))
+                StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);
+
             unsafe
             {
                 _renderLoop = valueType switch
@@ -122,7 +128,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     Type t when t == typeof(float) => RenderFloatComposite,
                     Type t when t == typeof(double) => RenderDoubleComposite,
                     Type t when t == typeof(Complex) => RenderComplexComposite,
-                    _ => throw new NotSupportedException($"Type {valueType} is not supported.")
+                    _ => RenderFallbackComposite
                 };
             }
         }
@@ -173,8 +179,12 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private void EnsureLutCache(CompositeRenderingContext ctx)
         {
-            // Reference equality: same context instance → skip rebuild.
-            if (ReferenceEquals(_lastContext, ctx)) return;
+            var structConverter = StructValueConverter;
+
+            // Same context and same converter instance → skip rebuild.
+            if (ReferenceEquals(_lastContext, ctx)
+                && ReferenceEquals(_lastStructValueConverter, structConverter))
+                return;
 
             if (ValueType == typeof(byte))
                 BuildDirectMaps(ctx.Recipes, size: 256, indexOffset: 0);
@@ -183,9 +193,10 @@ namespace MxPlot.UI.Avalonia.Rendering
             else if (ValueType == typeof(short))
                 BuildDirectMaps(ctx.Recipes, size: 65536, indexOffset: 32768);
             else
-                BuildScaleMaps(ctx.Recipes);
+                BuildScaleMaps(ctx.Recipes, structConverter);
 
             _lastContext = ctx;
+            _lastStructValueConverter = structConverter;
         }
 
         /// <summary>
@@ -223,29 +234,26 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// <summary>
         /// Builds a <see cref="ScaleLutSize"/>-entry color map per layer for
         /// int / float / double / Complex data.
-        /// Also caches per-layer scale/offset arrays and Complex converters.
+        /// Also caches per-layer scale/offset arrays.
         /// </summary>
-        private void BuildScaleMaps(IReadOnlyList<BlendRecipe> recipes)
+        private void BuildScaleMaps(IReadOnlyList<BlendRecipe> recipes, object? structConverter)
         {
             int count = recipes.Count;
             _cachedScaleMaps = new int[count][];
             _cachedScales = new double[count];
             _cachedOffsets = new double[count];
-            bool isComplex = ValueType == typeof(Complex);
-            _cachedConverters = isComplex ? new Func<Complex, double>[count] : null;
+
+            if (ValueType == typeof(Complex)
+                && structConverter is not Func<Complex, double>)
+            {
+                throw new InvalidOperationException(
+                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering.");
+            }
 
             for (int i = 0; i < count; i++)
             {
                 var r = recipes[i];
                 if (!r.IsVisible || r.Gain <= 0) { _cachedScaleMaps[i] = null!; continue; }
-
-                if (isComplex)
-                {
-                    _cachedConverters![i] = r.ValueConverter as Func<Complex, double>
-                        ?? throw new InvalidOperationException(
-                            $"Layer {i}: BlendRecipe.ValueConverter must be " +
-                            $"Func<Complex, double> for Complex rendering.");
-                }
 
                 double range = r.ValueMax - r.ValueMin;
                 if (range == 0) range = 1.0;
@@ -270,31 +278,43 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         #region Core Rendering
 
-        private void RenderCore(IMatrixData source, WriteableBitmap target,
-                                CompositeRenderingContext ctx)
+        private unsafe void RenderCore(IMatrixData source, WriteableBitmap target,
+                                       CompositeRenderingContext ctx)
         {
-            using var fb = target.Lock();
-            unsafe
+            int width = source.XCount;
+            int height = source.YCount;
+            var scratch = EnsureScratch(width, height);
+
+            fixed (int* pScratch = scratch)
             {
-                int height = source.YCount;
-                int posStride = fb.RowBytes / 4;
-                int* targetPtr;
-                int strideInts;
+                // FlipY is absorbed here, so the blit below is always a plain forward copy.
+                int* targetPtr = FlipY ? pScratch + (height - 1) * width : pScratch;
+                int strideInts = FlipY ? -width : width;
 
-                if (FlipY)
-                {
-                    targetPtr = (int*)fb.Address + (height - 1) * posStride;
-                    strideInts = -posStride;
-                }
-                else
-                {
-                    targetPtr = (int*)fb.Address;
-                    strideInts = posStride;
-                }
-
+                // Rendered outside the bitmap lock on purpose — see BitmapBlit.
                 _renderLoop(source, ctx.FrameIndices, targetPtr, strideInts,
-                            source.XCount, height, ctx.BlendMode);
+                            width, height, ctx.BlendMode);
+
+                using var fb = target.Lock();
+                BitmapBlit.Rows(pScratch, width, height, fb);
             }
+        }
+
+        /// <summary>
+        /// Returns the buffer the render loops write into, growing it when the frame size changes.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not an <see cref="System.Buffers.ArrayPool{T}"/> rental: the shared pool
+        /// does not retain arrays larger than 2^20 elements, so a 4000x3000 frame would allocate
+        /// 48 MB on the large object heap on every single render. One buffer per writer — and
+        /// there is one writer per <c>RenderSurface</c> — is both cheaper and simpler.
+        /// </remarks>
+        private int[] EnsureScratch(int width, int height)
+        {
+            int needed = width * height;
+            if (_scratch == null || _scratch.Length < needed)
+                _scratch = new int[needed];
+            return _scratch;
         }
 
         #endregion
@@ -550,9 +570,12 @@ namespace MxPlot.UI.Avalonia.Rendering
             int[] active = GetActiveIndices(frameIndices.Length, maps);
             if (active.Length == 0) return;
 
+            if (StructValueConverter is not Func<Complex, double> converter)
+                throw new InvalidOperationException(
+                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering.");
+
             var scales = _cachedScales!;
             var offsets = _cachedOffsets!;
-            var converters = _cachedConverters!;
             int lutMax = ScaleLutSize - 1;
 
             var memories = new ReadOnlyMemory<Complex>[frameIndices.Length];
@@ -568,7 +591,39 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int r = 0, g = 0, b = 0;
                     foreach (int a in active)
                     {
-                        double val = converters[a](memories[a].Span[rowOffset + ix]);
+                        double val = converter(memories[a].Span[rowOffset + ix]);
+                        if (double.IsNaN(val)) continue;
+                        int idx = Math.Clamp(
+                            (int)(val * scales[a] + offsets[a]), 0, lutMax);
+                        BlendPixel(blendMode, maps[a][idx], ref r, ref g, ref b);
+                    }
+                    pRow[ix] = ClampAndPackPixel(blendMode, r, g, b);
+                }
+            });
+        }
+
+        private unsafe void RenderFallbackComposite(
+            IMatrixData source, int[] frameIndices, int* targetPtr, int strideInts,
+            int width, int height, BlendMode blendMode)
+        {
+            var maps = _cachedScaleMaps!;
+            int[] active = GetActiveIndices(frameIndices.Length, maps);
+            if (active.Length == 0) return;
+
+            var scales = _cachedScales!;
+            var offsets = _cachedOffsets!;
+            int lutMax = ScaleLutSize - 1;
+
+            var pOpts = ParallelOptions ?? new ParallelOptions();
+            Parallel.For(0, height, pOpts, iy =>
+            {
+                int* pRow = targetPtr + iy * strideInts;
+                for (int ix = 0; ix < width; ix++)
+                {
+                    int r = 0, g = 0, b = 0;
+                    foreach (int a in active)
+                    {
+                        double val = source.GetValueAt(ix, iy, frameIndices[a]);
                         if (double.IsNaN(val)) continue;
                         int idx = Math.Clamp(
                             (int)(val * scales[a] + offsets[a]), 0, lutMax);

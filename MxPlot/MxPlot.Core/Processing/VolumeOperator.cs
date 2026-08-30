@@ -50,6 +50,124 @@ namespace MxPlot.Core.Processing
             };
         }
 
+        /// <summary>
+        /// Winner-take-all scan along the volume's depth axis, restricted to <c>[start, end]</c>
+        /// (inclusive): for every (x, y) pixel, finds the depth index holding the extreme value and
+        /// returns both that index and the value. See <see cref="ExtremumIndexOperation"/> for the
+        /// ColorCoded use case this exists for.
+        /// </summary>
+        /// <remarks>
+        /// Only supports the XY-plane (project-along-depth) case -- matches
+        /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.1's
+        /// decision to keep ColorCoded's live view to the MainView/XY case (no ViewFrom parameter,
+        /// unlike <see cref="CreateProjection{T}"/>, which also handles the X/Y orthogonal planes).
+        /// A straightforward per-row parallel scan, not the tiled/SIMD approach
+        /// <see cref="ProjectAlongZ_Tiled_Safe{T}"/> uses -- correctness first; revisit only if
+        /// profiling shows it matters for realistic slice counts.
+        /// </remarks>
+        public static (MatrixData<int> WinnerIndex, MatrixData<T> WinnerValue) CreateExtremumIndex<T>(
+            this VolumeAccessor<T> vol, ProjectionMode mode, int start, int end)
+            where T : unmanaged, INumber<T>
+        {
+            if (mode != ProjectionMode.Maximum && mode != ProjectionMode.Minimum)
+                throw new ArgumentException($"CreateExtremumIndex requires Maximum or Minimum, not {mode}.", nameof(mode));
+            if (start < 0 || end >= vol._depth || start > end)
+                throw new ArgumentOutOfRangeException(nameof(start), $"[{start}, {end}] is out of range for depth {vol._depth}.");
+
+            return ExtremumIndexScan(vol, mode, start, end);
+        }
+
+        // Kept unsafe (pointer scan) separate from the public extension method above: dynamic
+        // dispatch (Microsoft.CSharp.RuntimeBinder), used by ExtremumIndexOperation.Execute to
+        // resolve T at runtime, fails to bind an `unsafe`-marked method directly -- confirmed by
+        // ExtremumIndexOperationTest turning into a NotSupportedException for a perfectly ordinary
+        // int volume until the unsafe code was moved out of the publicly-dispatched method. Mirrors
+        // how CreateProjection above stays non-unsafe and delegates to ProjectAlongZ etc.
+        private static unsafe (MatrixData<int> WinnerIndex, MatrixData<T> WinnerValue) ExtremumIndexScan<T>(
+            VolumeAccessor<T> vol, ProjectionMode mode, int start, int end)
+            where T : unmanaged, INumber<T>
+        {
+            int width = vol._width;
+            int height = vol._height;
+            int sliceCount = end - start + 1;
+            var indexResult = new int[width * height];
+            var valueResult = new T[width * height];
+
+            var handles = new GCHandle[sliceCount];
+            var framePtrs = new T*[sliceCount];
+            try
+            {
+                for (int z = start; z <= end; z++)
+                {
+                    int lz = z - start;
+                    handles[lz] = GCHandle.Alloc(vol._frames[z], GCHandleType.Pinned);
+                    framePtrs[lz] = (T*)handles[lz].AddrOfPinnedObject();
+                }
+
+                fixed (int* idxBase = indexResult)
+                fixed (T* valBase = valueResult)
+                {
+                    nint idxAddr = (nint)idxBase;
+                    nint valAddr = (nint)valBase;
+                    bool wantMax = mode == ProjectionMode.Maximum;
+
+                    Parallel.For(0, height, y =>
+                    {
+                        int rowOffset = y * width;
+                        int* idxRow = (int*)idxAddr + rowOffset;
+                        T* valRow = (T*)valAddr + rowOffset;
+
+                        for (int x = 0; x < width; x++)
+                        {
+                            int pixelOffset = rowOffset + x;
+
+                            // Seed from slice 0 rather than a T.MinValue/MaxValue sentinel, so this
+                            // needs only INumber<T> (comparisons), not IMinMaxValue<T> too.
+                            T best = *(framePtrs[0] + pixelOffset);
+                            int bestZ = start;
+
+                            if (wantMax)
+                            {
+                                for (int lz = 1; lz < sliceCount; lz++)
+                                {
+                                    T val = *(framePtrs[lz] + pixelOffset);
+                                    if (val > best) { best = val; bestZ = start + lz; }
+                                }
+                            }
+                            else
+                            {
+                                for (int lz = 1; lz < sliceCount; lz++)
+                                {
+                                    T val = *(framePtrs[lz] + pixelOffset);
+                                    if (val < best) { best = val; bestZ = start + lz; }
+                                }
+                            }
+
+                            idxRow[x] = bestZ;
+                            valRow[x] = best;
+                        }
+                    });
+                }
+            }
+            finally
+            {
+                for (int i = 0; i < handles.Length; i++)
+                    if (handles[i].IsAllocated) handles[i].Free();
+            }
+
+            var mdIndex = new MatrixData<int>(width, height, indexResult);
+            mdIndex.SetXYScale(vol._scale.XMin, vol._scale.XMax, vol._scale.YMin, vol._scale.YMax);
+            mdIndex.XUnit = vol._scale.XUnit;
+            mdIndex.YUnit = vol._scale.YUnit;
+
+            var mdValue = new MatrixData<T>(width, height, valueResult);
+            mdValue.SetXYScale(vol._scale.XMin, vol._scale.XMax, vol._scale.YMin, vol._scale.YMax);
+            mdValue.XUnit = vol._scale.XUnit;
+            mdValue.YUnit = vol._scale.YUnit;
+
+            return (mdIndex, mdValue);
+        }
+
         public static (MatrixData<T> XZ, MatrixData<T> YZ) CreateOrthogonalProjections<T>(this VolumeAccessor<T> volume, ProjectionMode mode,
             int numThreads = -1, IMatrixData? dstXZ = null, int dstXZIndex = 0, IMatrixData? dstYZ = null, int dstYZIndex = 0)
             where T : unmanaged, INumber<T>, IMinMaxValue<T>

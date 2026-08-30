@@ -49,7 +49,12 @@ namespace MxPlot.UI.Avalonia.Views
         private static string? _lastTgtMin;
         private static string? _lastTgtMax;
 
-        internal ConvertValueTypeDialog(string srcTypeName, double lutMin, double lutMax, IMatrixData? srcData = null)
+        /// <param name="isLinkWindow">
+        /// Whether the owning window is itself being kept live by a Log Transform / Spatial
+        /// Filter sync — if so, "Replace current data" is disabled, since that window's content
+        /// is auto-recomputed from its source and would just be overwritten again on the next update.
+        /// </param>
+        internal ConvertValueTypeDialog(string srcTypeName, double lutMin, double lutMax, IMatrixData? srcData = null, bool isLinkWindow = false)
         {
             _srcTypeName = srcTypeName;
             _lutMin = lutMin;
@@ -72,6 +77,7 @@ namespace MxPlot.UI.Avalonia.Views
             _scaleCheck = ControlFactory.MakeCheckBox("Scale values during conversion", fontSize: 11);
             _replaceCheck = ControlFactory.MakeCheckBox("Replace current data", fontSize: 11,
                 hint: "If checked, replaces the current data in this window. If unchecked (default), result opens in a new window.");
+            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(_replaceCheck, isLinkWindow);
 
             _sizeText = new TextBlock { FontSize = 10, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center };
 

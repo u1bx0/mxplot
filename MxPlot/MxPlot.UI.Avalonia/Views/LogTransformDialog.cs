@@ -27,16 +27,21 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <param name="isMultiFrame">Whether the source data has more than one frame.</param>
         /// <param name="hasNegOrZero">Whether the current frame contains non-positive values.</param>
+        /// <param name="isLinkWindow">
+        /// Whether the owning window is itself being kept live by a Log Transform / Spatial
+        /// Filter sync — if so, "Replace data" is disabled (see <see cref="ProcessingDialogBase"/>
+        /// for why).
+        /// </param>
         internal static Task<LogTransformParameters?> ShowAsync(
-            Window owner, bool isMultiFrame, bool hasNegOrZero)
+            Window owner, bool isMultiFrame, bool hasNegOrZero, bool isLinkWindow = false)
         {
-            var dlg = new LogTransformDialog(isMultiFrame, hasNegOrZero);
+            var dlg = new LogTransformDialog(isMultiFrame, hasNegOrZero, isLinkWindow);
             return dlg.ShowDialog<LogTransformParameters?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
-        private LogTransformDialog(bool isMultiFrame, bool hasNegOrZero)
+        private LogTransformDialog(bool isMultiFrame, bool hasNegOrZero, bool isLinkWindow)
         {
             Title = "Log Transform";
             Width = 290;
@@ -161,12 +166,13 @@ namespace MxPlot.UI.Avalonia.Views
                 "Replace data",
                 hint: "Overwrite the current window instead of opening a new one");
             replaceCheck.Margin = new Thickness(0, 4, 0, -7);
+            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(replaceCheck, isLinkWindow);
 
-            // sync and replace are mutually exclusive
+            // sync and replace are mutually exclusive; a link window can never re-enable replace
             syncCheck.IsCheckedChanged += (_, _) =>
             {
                 if (syncCheck.IsChecked == true) replaceCheck.IsChecked = false;
-                replaceCheck.IsEnabled = syncCheck.IsChecked != true;
+                replaceCheck.IsEnabled = !isLinkWindow && syncCheck.IsChecked != true;
             };
 
             // ── Buttons ───────────────────────────────────────────────────────

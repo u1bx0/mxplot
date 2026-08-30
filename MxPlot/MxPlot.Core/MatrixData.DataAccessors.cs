@@ -519,48 +519,48 @@ namespace MxPlot.Core
                 return GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix];
             }
 
-            if (this is MatrixData<Complex>) //Special case for Complex type.
+            // With interpolation: bilinear interpolation
+            if (_isSupportedPrimitive)
             {
-                Complex[] array = (Complex[])(object)GetInternalArray(frameIndex, needsInvalidate:false);
-                if (array == null)
-                    throw new InvalidOperationException("Internal array is null");
-
-                // Calculate index (allowing out of range)
-                double iix = (x - _xmin) / XStep; // XStep = XRange * (_xcount - 1);
-                double iiy = (y - _ymin) / YStep; // YStep = YRange * (_ycount - 1);
-
-                // Clamp within range
-                iix = Math.Clamp(iix, 0.0, _xcount - 1.0);
-                iiy = Math.Clamp(iiy, 0.0, _ycount - 1.0);
-
-                int ix0 = (int)iix;
-                int iy0 = (int)iiy;
-                int ix1 = (ix0 < _xcount - 1) ? ix0 + 1 : ix0;
-                int iy1 = (iy0 < _ycount - 1) ? iy0 + 1 : iy0;
-
-                double dx = iix - ix0;
-                double dy = iiy - iy0;
-                var v00 = array[iy0 * _xcount + ix0]!;
-                var v10 = array[iy0 * _xcount + ix1]!;
-                var v01 = array[iy1 * _xcount + ix0]!;
-                var v11 = array[iy1 * _xcount + ix1]!;
-
-                double vr = v00.Real * (1 - dx) * (1 - dy)
-                          + v10.Real * dx * (1 - dy)
-                          + v01.Real * (1 - dx) * dy
-                          + v11.Real * dx * dy;
-
-                double vi = v00.Imaginary * (1 - dx) * (1 - dy)
-                          + v10.Imaginary * dx * (1 - dy)
-                          + v01.Imaginary * (1 - dx) * dy
-                          + v11.Imaginary * dx * dy;
-
-                return (T)(object)new Complex(vr, vi);
-            }
-            else
-            {
-                var v = GetValueAsDouble(x, y, frameIndex, true);
+                var v = GetValueAsDouble(x, y, frameIndex, interpolate: true);
                 return NumericConverter.FromDouble<T>(v);
+            }
+            else //Custom struct value types including Complex
+            {
+                if(_interpolator is not null)
+                {
+                    var array = GetInternalArray(frameIndex, needsInvalidate: false);
+                    if(array == null)
+                        throw new InvalidOperationException("Internal array is null.");
+
+                    // Calculate index (allowing out of range)
+                    double iix = (x - _xmin) / XStep; // XStep = XRange * (_xcount - 1);
+                    double iiy = (y - _ymin) / YStep; // YStep = YRange * (_ycount - 1);
+
+                    // Clamp within range
+                    iix = Math.Clamp(iix, 0.0, _xcount - 1.0);
+                    iiy = Math.Clamp(iiy, 0.0, _ycount - 1.0);
+
+                    int ix0 = (int)iix;
+                    int iy0 = (int)iiy;
+                    int ix1 = (ix0 < _xcount - 1) ? ix0 + 1 : ix0;
+                    int iy1 = (iy0 < _ycount - 1) ? iy0 + 1 : iy0;
+
+                    double dx = iix - ix0;
+                    double dy = iiy - iy0;
+                    var v00 = array[iy0 * _xcount + ix0]!;
+                    var v10 = array[iy0 * _xcount + ix1]!;
+                    var v01 = array[iy1 * _xcount + ix0]!;
+                    var v11 = array[iy1 * _xcount + ix1]!;
+                    return _interpolator.Interpolate(v00, v10, v01, v11, dx, dy);
+                }
+                else
+                {
+                    //fallback to nearest neighbor if no interpolator is provided for custom types
+                    int ix = XIndexOf(x, false);
+                    int iy = YIndexOf(y, false);
+                    return GetInternalArray(frameIndex, needsInvalidate: false)[iy * _xcount + ix];
+                }
             }
         }
 

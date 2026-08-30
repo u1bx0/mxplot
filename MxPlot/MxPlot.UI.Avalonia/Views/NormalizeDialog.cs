@@ -26,15 +26,15 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Factory ───────────────────────────────────────────────────────────
 
         internal static Task<NormalizeParameters?> ShowAsync(
-            Window owner, bool isMultiFrame, bool isVirtual)
+            Window owner, bool isMultiFrame, bool isVirtual, bool isLinkWindow = false)
         {
-            var dlg = new NormalizeDialog(isMultiFrame, isVirtual);
+            var dlg = new NormalizeDialog(isMultiFrame, isVirtual, isLinkWindow);
             return dlg.ShowDialog<NormalizeParameters?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
-        private NormalizeDialog(bool isMultiFrame, bool isVirtual) : base("Normalize")
+        private NormalizeDialog(bool isMultiFrame, bool isVirtual, bool isLinkWindow) : base("Normalize", isLinkWindow: isLinkWindow)
         {
             // ── "Normalize to:" row ───────────────────────────────────────────
             var targetNud = ControlFactory.MakeNumericUpDown(100m, 0.001m, 1_000_000m, 1m, width: 80);

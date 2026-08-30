@@ -62,10 +62,19 @@ namespace MxPlot.UI.Avalonia.Helpers
         internal static readonly StreamGeometry CreateNewData = StreamGeometry.Parse(
             "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15M5,15.91L11,19.29V12.58L5,9.21V15.91M19,15.91V9.21L13,12.58V19.29L19,15.91Z M20,0H22V2H24V4H22V6H20V4H18V2H20Z");
 
+        /// <summary>
+        /// Grayscale icon
+        /// </summary>
+        internal static readonly StreamGeometry Grayscale = StreamGeometry.Parse(
+           "M19,3 H5 A2,2 0 0,0 3,5 V19 A2,2 0 0,0 5,21 H19 A2,2 0 0,0 21,19 V5 A2,2 0 0,0 19,3 M5,4.5 H19 A0.5,0.5 0 0,1 19.5,5 V19 A0.5,0.5 0 0,1 19,19.5 H5 A0.5,0.5 0 0,1 4.5,19 V5 A0.5,0.5 0 0,1 5,4.5 Z M5,6.8 a1.5,1.5 0 1,1 3,0 a1.5,1.5 0 1,1 -3,0 M9.4,6.8 a1.1,1.1 0 1,1 2.2,0 a1.1,1.1 0 1,1 -2.2,0 M13.8,6.8 a0.7,0.7 0 1,1 1.4,0 a0.7,0.7 0 1,1 -1.4,0 M18.2,6.8 a0.3,0.3 0 1,1 0.6,0 a0.3,0.3 0 1,1 -0.6,0 M5,10.3 a1.5,1.5 0 1,1 3,0 a1.5,1.5 0 1,1 -3,0 M9.4,10.3 a1.1,1.1 0 1,1 2.2,0 a1.1,1.1 0 1,1 -2.2,0 M13.8,10.3 a0.7,0.7 0 1,1 1.4,0 a0.7,0.7 0 1,1 -1.4,0 M18.2,10.3 a0.3,0.3 0 1,1 0.6,0 a0.3,0.3 0 1,1 -0.6,0 M5,13.8 a1.5,1.5 0 1,1 3,0 a1.5,1.5 0 1,1 -3,0 M9.4,13.8 a1.1,1.1 0 1,1 2.2,0 a1.1,1.1 0 1,1 -2.2,0 M13.8,13.8 a0.7,0.7 0 1,1 1.4,0 a0.7,0.7 0 1,1 -1.4,0 M18.2,13.8 a0.3,0.3 0 1,1 0.6,0 a0.3,0.3 0 1,1 -0.6,0 M5,17.3 a1.5,1.5 0 1,1 3,0 a1.5,1.5 0 1,1 -3,0 M9.4,17.3 a1.1,1.1 0 1,1 2.2,0 a1.1,1.1 0 1,1 -2.2,0 M13.8,17.3 a0.7,0.7 0 1,1 1.4,0 a0.7,0.7 0 1,1 -1.4,0 M18.2,17.3 a0.3,0.3 0 1,1 0.6,0 a0.3,0.3 0 1,1 -0.6,0");
         // ── Property / Analysis ───────────────────────────────────────────────
 
         internal static readonly StreamGeometry Ruler = StreamGeometry.Parse(
             "M1,7V9H3V7H1M1,11V13H3V11H1M1,15V17H3V15H1M3,3H1V5H3V3M7,3H5V5H7V3M11,3H9V5H11V3M13,3H15V5H13V3M1,19V21H3V19H1M5,21V19H7V21H5M9,21V19H11V21H9M13,21V19H15V21H13M21,3H17V5H21V7H23V5V3H21M21,11H23V9H21V11M21,15H23V13H21V15M17,21V19H19V21H17M21,21V19H23V21H21M21,7H23V5H21V7Z");
+
+        /// <summary> The geometry of a vertical three-dot icon (Kebab menu / More-vert). Primarily used for "More actions" or option menus.</summary>
+        internal static readonly StreamGeometry DotsVertical = StreamGeometry.Parse(
+            "M12,16A2,2 0 0,1 14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18A2,2 0 0,1 12,16M12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12A2,2 0 0,1 12,10M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8A2,2 0 0,1 10,6A2,2 0 0,1 12,4Z");
 
         internal static readonly StreamGeometry Palette = StreamGeometry.Parse(
             "M12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2C17.5,2 22,6 22,11A6,6 0 0,1 16,17H14.2C13.9,17 13.7,17.2 13.7,17.5C13.7,17.6 13.8,17.7 13.8,17.8C14.2,18.3 14.4,18.9 14.4,19.5C14.5,20.9 13.4,22 12,22M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C12.3,20 12.5,19.8 12.5,19.5C12.5,19.3 12.4,19.2 12.4,19.1C12,18.6 11.8,18.1 11.8,17.5C11.8,16.1 12.9,15 14.3,15H16A4,4 0 0,0 20,11C20,7.1 16.4,4 12,4M6.5,10A1.5,1.5 0 0,1 8,11.5A1.5,1.5 0 0,1 6.5,13A1.5,1.5 0 0,1 5,11.5A1.5,1.5 0 0,1 6.5,10M9,6.5A1.5,1.5 0 0,1 10.5,8A1.5,1.5 0 0,1 9,9.5A1.5,1.5 0 0,1 7.5,8A1.5,1.5 0 0,1 9,6.5M15,6.5A1.5,1.5 0 0,1 16.5,8A1.5,1.5 0 0,1 15,9.5A1.5,1.5 0 0,1 13.5,8A1.5,1.5 0 0,1 15,6.5M18,10A1.5,1.5 0 0,1 19.5,11.5A1.5,1.5 0 0,1 18,13A1.5,1.5 0 0,1 16.5,11.5A1.5,1.5 0 0,1 18,10Z");
@@ -85,6 +94,8 @@ namespace MxPlot.UI.Avalonia.Helpers
             "M20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20M4,6V18H20V6H4M6,9H18V11H6V9M6,13H16V15H6V13Z");
 
         internal static readonly StreamGeometry Processing = StreamGeometry.Parse(
+            "M7,5 H17 A2,2 0 0,1 19,7 V17 A2,2 0 0,1 17,19 H7 A2,2 0 0,1 5,17 V7 A2,2 0 0,1 7,5 Z M17,17 V7 H7 V17 H17 Z M9,9 H15 V15 H9 Z M9,2 H11 V4 H9 Z M13,2 H15 V4 H13 Z M9,20 H11 V22 H9 Z M13,20 H15 V22 H13 Z M2,9 H4 V11 H2 Z M2,13 H4 V15 H2 Z M20,9 H22 V11 H20 Z M20,13 H22 V15 H20 Z");
+        internal static readonly StreamGeometry Gear = StreamGeometry.Parse(
             "M12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10M10,22C9.75,22 9.54,21.82 9.5,21.58L9.13,18.93C8.5,18.68 7.96,18.34 7.44,17.94L4.95,18.95C4.73,19.03 4.46,18.95 4.34,18.73L2.34,15.27C2.21,15.05 2.27,14.78 2.46,14.63L4.57,12.97C4.53,12.65 4.5,12.33 4.5,12C4.5,11.67 4.53,11.34 4.57,11L2.46,9.37C2.27,9.22 2.21,8.95 2.34,8.73L4.34,5.27C4.46,5.05 4.73,4.96 4.95,5.05L7.44,6.05C7.96,5.66 8.5,5.32 9.13,5.07L9.5,2.42C9.54,2.18 9.75,2 10,2H14C14.25,2 14.46,2.18 14.5,2.42L14.87,5.07C15.5,5.32 16.04,5.66 16.56,6.05L19.05,5.05C19.27,4.96 19.54,5.05 19.66,5.27L21.66,8.73C21.78,8.95 21.73,9.22 21.54,9.37L19.43,11C19.47,11.34 19.5,11.67 19.5,12C19.5,12.33 19.47,12.65 19.43,12.97L21.54,14.63C21.73,14.78 21.78,15.05 21.66,15.27L19.66,18.73C19.54,18.95 19.27,19.03 19.05,18.95L16.56,17.94C16.04,18.34 15.5,18.68 14.87,18.93L14.5,21.58C14.46,21.82 14.25,22 14,22H10Z");
 
         internal static readonly StreamGeometry AutoFix = StreamGeometry.Parse(
@@ -121,6 +132,34 @@ namespace MxPlot.UI.Avalonia.Helpers
 
         internal static readonly StreamGeometry ComplexZ = StreamGeometry.Parse(
             "M6,5 L18,5 L18,8 L11,16 L18,16 L18,19 L6,19 L6,16 L13,8 L6,8 Z");
+
+        internal static readonly StreamGeometry CubeLeftSolid = StreamGeometry.Parse(
+            "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15M19,15.91V9.21L13,12.58V19.29L19,15.91Z");
+
+        internal static readonly StreamGeometry CubeRightSolid = StreamGeometry.Parse(
+            "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15M5,15.91L11,19.29V12.58L5,9.21V15.91Z");
+
+        /// <summary>
+        /// Checked-checkbox state indicator, for a toggle-style menu entry that keeps a fixed
+        /// label (e.g. "Show Statistics") and reflects on/off state via the icon slot instead --
+        /// see <see cref="OverlayMenuEntry.Icon"/>'s remarks for why this is preferred over
+        /// <see cref="OverlayMenuEntry.IsChecked"/>'s Radio-style indicator for a plain independent
+        /// toggle. Solid rounded square with a checkmark punched out via the default (even-odd)
+        /// fill rule -- the checkmark reads in the menu's background colour, matching Material
+        /// Design Icons' "checkbox-marked" glyph (Apache 2.0). 24×24 coordinate space.
+        /// </summary>
+        internal static readonly StreamGeometry CheckboxChecked = StreamGeometry.Parse(
+            "M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M10,17L5,12L6.41,10.58L10,14.17L17.59,6.58L19,8L10,17Z");
+
+        /// <summary>
+        /// Unchecked-checkbox state indicator -- the off-state counterpart to
+        /// <see cref="CheckboxChecked"/>. Same outer square, hollow (border-only, via the same
+        /// even-odd inner/outer rectangle technique already used by <see cref="Metadata"/>), no
+        /// checkmark. Matches Material Design Icons' "checkbox-blank-outline" glyph (Apache 2.0).
+        /// 24×24 coordinate space.
+        /// </summary>
+        internal static readonly StreamGeometry CheckboxUnchecked = StreamGeometry.Parse(
+            "M19,3H5C3.89,3 3,3.89 3,5V19C3,20.1 3.89,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19Z");
 
         // ── Plugin system ─────────────────────────────────────────────────────
 
@@ -167,44 +206,52 @@ namespace MxPlot.UI.Avalonia.Helpers
 
         private static readonly Dictionary<StreamGeometry, IBrush> _defaultBrushes = new()
         {
-            [Folder]    = new SolidColorBrush(Color.Parse("#FFA726")),  // Orange 400
-            [Save]      = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
-            [Image]     = new SolidColorBrush(Color.Parse("#66BB6A")),  // Green 400
-            [Edit]      = new SolidColorBrush(Color.Parse("#FF7043")),  // Deep Orange 400
-            [Copy]      = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
-            [Paste]     = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
+            [Folder] = new SolidColorBrush(Color.Parse("#FFA726")),  // Orange 400
+            [Save] = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
+            [Image] = new SolidColorBrush(Color.Parse("#66BB6A")),  // Green 400
+            [Edit] = new SolidColorBrush(Color.Parse("#FF7043")),  // Deep Orange 400
+            [Copy] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
+            [Paste] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
             [Duplicate] = new SolidColorBrush(Color.Parse("#4DB6AC")),  // Teal 300
             [ConvertType] = new SolidColorBrush(Color.Parse("#7E57C2")),  // Deep Purple 400
-            [Refresh]   = new SolidColorBrush(Color.Parse("#9CCC65")),  // Light Green 400
-            [Info]      = new SolidColorBrush(Color.Parse("#29B6F6")),  // Light Blue 400
-            [Close]     = new SolidColorBrush(Color.Parse("#EF5350")),  // Red 400
+            [Refresh] = new SolidColorBrush(Color.Parse("#9CCC65")),  // Light Green 400
+            [Info] = new SolidColorBrush(Color.Parse("#29B6F6")),  // Light Blue 400
+            [Close] = new SolidColorBrush(Color.Parse("#EF5350")),  // Red 400
             [Lightning] = new SolidColorBrush(Color.Parse("#FFCA28")),  // Amber 400
-            [Ruler]     = new SolidColorBrush(Color.Parse("#AB47BC")),  // Purple 400
-            [Palette]   = new SolidColorBrush(Color.Parse("#EC407A")),  // Pink 400
-            [Magnify]   = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
-            [Cube]      = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
-            [Metadata]  = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [Ruler] = new SolidColorBrush(Color.Parse("#AB47BC")),  // Purple 400
+            [Palette] = new SolidColorBrush(Color.Parse("#EC407A")),  // Pink 400
+            [Magnify] = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
+            [Cube] = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
+            [Metadata] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
             [Processing] = new SolidColorBrush(Color.Parse("#8D6E63")),  // Brown 400
-            [AutoFix]    = new SolidColorBrush(Color.Parse("#CE93D8")),  // Purple 200
-            [Undo]       = new SolidColorBrush(Color.Parse("#FF8A65")),  // Deep Orange 300
-            [PushPin]    = new SolidColorBrush(Color.Parse("#FF7043")),  // Deep Orange 400
-            [TrashCan]   = new SolidColorBrush(Color.Parse("#EF5350")),  // Red 400
-            [Layers]     = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
-            [Plus]       = new SolidColorBrush(Color.Parse("#66BB6A")),  // Green 400
+            [Gear] = new SolidColorBrush(Color.Parse("#8D6E63")),  // Brown 400
+            [AutoFix] = new SolidColorBrush(Color.Parse("#CE93D8")),  // Purple 200
+            [Undo] = new SolidColorBrush(Color.Parse("#FF8A65")),  // Deep Orange 300
+            [PushPin] = new SolidColorBrush(Color.Parse("#FF7043")),  // Deep Orange 400
+            [TrashCan] = new SolidColorBrush(Color.Parse("#EF5350")),  // Red 400
+            [Layers] = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
+            [Plus] = new SolidColorBrush(Color.Parse("#66BB6A")),  // Green 400
             [SelectRect] = new SolidColorBrush(Color.Parse("#AB47BC")),  // Purple 400
-            [Eye]        = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
-            [EyeOff]     = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
-            [Plugin]     = new SolidColorBrush(Color.Parse("#26A69A")),  // Teal 400
-            [Sparkle]    = new SolidColorBrush(Color.Parse("#FFCA28")),  // Amber 400
-            [LineChart]  = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
+            [Eye] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [EyeOff] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
+            [Plugin] = new SolidColorBrush(Color.Parse("#26A69A")),  // Teal 400
+            [Sparkle] = new SolidColorBrush(Color.Parse("#FFCA28")),  // Amber 400
+            [LineChart] = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
             [SineWave] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
             [ComplexZ] = new SolidColorBrush(Color.Parse("#FFC107")),  // Amber 500 — Gold
-            [Lock]       = new SolidColorBrush(Color.Parse("#FFB74D")),  // Orange 300
-            [History]    = new SolidColorBrush(Color.Parse("#7E57C2")),  // Deep Purple 400
-            [Search]     = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
-            [Data]       = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [Lock] = new SolidColorBrush(Color.Parse("#FFB74D")),  // Orange 300
+            [History] = new SolidColorBrush(Color.Parse("#7E57C2")),  // Deep Purple 400
+            [Search] = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
+            [Data] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
             [OpenInNewWindow] = new SolidColorBrush(Color.Parse("#42A5F5")),  // Blue 400
-            [CreateNewData]   = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
+            [CreateNewData] = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
+            [Grayscale] = new SolidColorBrush(Color.Parse("#9E9E9E")),  // Grey 500
+            [CubeLeftSolid] = new SolidColorBrush(Color.Parse("#90A4AE")),  // Blue Grey 300
+            [CubeRightSolid] = new SolidColorBrush(Color.Parse("#90A4AE")),  // Blue Grey 300
+            // Same on/off colour pairing as Eye/EyeOff above -- an accent for "active", a neutral
+            // for "inactive" -- both already relied on for readable contrast in light and dark menus.
+            [CheckboxChecked] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [CheckboxUnchecked] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
         };
 
         /// <summary>Returns the default colour brush for the given icon geometry, or <c>null</c> if unknown.</summary>

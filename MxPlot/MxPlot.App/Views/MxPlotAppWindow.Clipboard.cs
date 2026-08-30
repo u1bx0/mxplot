@@ -263,23 +263,28 @@ namespace MxPlot.App.Views
             {
                 int w = bmp.PixelSize.Width, h = bmp.PixelSize.Height;
 
-                var mode = await ShowClipboardLoadModeAsync(w, h);
-                if (mode == null) return;
-
                 byte[] raw;
                 int stride;
                 using (var wb = new WriteableBitmap(bmp.PixelSize, bmp.Dpi,
                            PixelFormat.Rgba8888, AlphaFormat.Unpremul))
                 using (var fb = wb.Lock())
                 {
-                    bmp.CopyPixels(new PixelRect(0, 0, w, h),
-                        fb.Address, fb.RowBytes * h, fb.RowBytes);
+                    // Use the framebuffer overload, not CopyPixels(PixelRect, IntPtr, ...):
+                    // the IntPtr overload blits in the SOURCE bitmap's native pixel format
+                    // (Bgra8888 for Windows clipboard bitmaps) and ignores the format declared
+                    // on the destination WriteableBitmap, which silently swaps R and B.
+                    // This overload converts into the framebuffer's declared Rgba8888 layout,
+                    // so the byte offsets below really are R, G, B on every platform.
+                    bmp.CopyPixels(fb, AlphaFormat.Unpremul);
                     stride = fb.RowBytes;
                     raw = new byte[stride * h];
                     Marshal.Copy(fb.Address, raw, 0, raw.Length);
                 }
 
-                bool grayscale = mode.Value;
+                // No "grayscale or channels?" prompt: the pixels already answer it. A colour image
+                // arrives as R/G/B channels (and MatrixPlotter opens it in Composite), a gray one as
+                // a single channel. Turning a colour image gray afterwards is Edit ▸ Convert to Grayscale.
+                bool grayscale = await Task.Run(() => IsMonochrome(raw, stride, w, h));
                 var md = await Task.Run(() => ClipboardPixelsToMatrixData(raw, stride, w, h, grayscale));
 
                 var title = grayscale ? "Clipboard  (Grayscale)" : "Clipboard  (RGB)";
@@ -494,71 +499,6 @@ namespace MxPlot.App.Views
                 var title = $"Clipboard  ({sepLabel}  {series.Count} series)";
                 new ProfilePlotter(series, "X", "Y", title).Show();
             }
-        }
-
-        /// <summary>Shows a dialog asking whether to load the clipboard image as Grayscale or Color Channels.</summary>
-        /// <returns><c>true</c> = Grayscale, <c>false</c> = Color Channels, <c>null</c> = cancelled.</returns>
-        private async Task<bool?> ShowClipboardLoadModeAsync(int w, int h)
-        {
-            bool? result = null;
-
-            var grayBtn = new Button
-            {
-                Content = "Grayscale",
-                Width = 126,
-                HorizontalContentAlignment = HorizontalAlignment.Center
-            };
-            var colorBtn = new Button
-            {
-                Content = "Color Channels",
-                Width = 126,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0)
-            };
-            var cancelBtn = new Button
-            {
-                Content = "Cancel",
-                Width = 72,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Margin = new Thickness(0, 10, 0, 0)
-            };
-
-            var dlg = new Window
-            {
-                Title = "Open from Clipboard",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
-                WindowStartupLocation = WindowStartupLocation.CenterOwner,
-                FontSize = 11,
-            };
-
-            var stack = new StackPanel { Margin = new Thickness(16) };
-            stack.Children.Add(new TextBlock
-            {
-                Text = $"Image: {w} \u00d7 {h}",
-                Opacity = 0.6,
-                Margin = new Thickness(0, 0, 0, 4),
-            });
-            stack.Children.Add(new TextBlock
-            {
-                Text = "Load as:",
-                FontWeight = FontWeight.SemiBold,
-                Margin = new Thickness(0, 0, 0, 8),
-            });
-            var btnRow = new StackPanel { Orientation = Orientation.Horizontal };
-            btnRow.Children.Add(grayBtn);
-            btnRow.Children.Add(colorBtn);
-            stack.Children.Add(btnRow);
-            stack.Children.Add(cancelBtn);
-            dlg.Content = stack;
-
-            grayBtn.Click += (_, _) => { result = true; dlg.Close(); };
-            colorBtn.Click += (_, _) => { result = false; dlg.Close(); };
-            cancelBtn.Click += (_, _) => dlg.Close();
-
-            await WithTopmostSuspended(() => dlg.ShowDialog<object?>(this));
-            return result;
         }
 
         /// <summary>
@@ -786,6 +726,28 @@ namespace MxPlot.App.Views
         }
 
 
+        /// <summary>
+        /// Returns <c>true</c> when every pixel satisfies R == G == B, i.e. the clipboard image
+        /// carries no colour information. Mirrors the same test the image-file reader applies.
+        /// </summary>
+        /// <remarks>
+        /// A colour image bails out on its first coloured pixel, which is almost always immediate;
+        /// only a genuinely gray image pays for a full pass over the buffer.
+        /// </remarks>
+        private static bool IsMonochrome(byte[] raw, int stride, int w, int h)
+        {
+            for (int y = 0; y < h; y++)
+            {
+                int row = y * stride;
+                for (int x = 0; x < w; x++)
+                {
+                    int i = row + x * 4;
+                    if (raw[i] != raw[i + 1] || raw[i + 1] != raw[i + 2]) return false;
+                }
+            }
+            return true;
+        }
+
         private static MatrixData<byte> ClipboardPixelsToMatrixData(
             byte[] raw, int stride, int w, int h, bool grayscale)
         {
@@ -814,16 +776,8 @@ namespace MxPlot.App.Views
                         g[idx] = raw[i + 1];
                         b[idx] = raw[i + 2];
                     }
-                var cc = new ColorChannel(["R", "G", "B"]);
-                // Pure primaries are required: additive composite R*(1,0,0) + G*(0,1,0) + B*(0,0,1) = (R,G,B).
-                // Any desaturation introduces cross-channel bleeding and breaks composite reconstruction.
-                cc.AssignColors([
-                    unchecked((int)0xFFFF0000),   // R → pure red
-                    unchecked((int)0xFF00FF00),   // G → pure green
-                    unchecked((int)0xFF0000FF),   // B → pure blue
-                ]);
                 var md = new MatrixData<byte>(w, h, new List<byte[]> { r, g, b });
-                md.DefineDimensions(cc);
+                md.DefineDimensions(ColorAxis.CreateRgb());
                 return md;
             }
         }

@@ -7,11 +7,13 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using MxPlot.Core;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.ViewModels;
 using System;
 using System.Diagnostics;
+using Avalonia.Diagnostics;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -29,8 +31,13 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         public MatrixPlotter()
         {
-            Width = 420;
-            Height = 480;
+#if DEBUG
+            this.AttachDevTools();
+#endif
+
+
+            Width = 450;
+            Height = 520;
 
             InitializeOrthogonalPanel();
             InitializeTrackerPanel();
@@ -57,6 +64,9 @@ namespace MxPlot.UI.Avalonia.Views
             _view = _orthoPanel.MainView;
             _orthoController = new OrthogonalViewController(_orthoPanel);
             _orthoController.XYProjectionChanged += OnXYProjectionChanged;
+            _orthoController.ColorCodedComputeFailed += () => _xyProjectionWindow?.SetColorCodedBusy(false);
+            _orthoPanel.ProjectionSelector.CreateProjectedDataRequested +=
+                (_, e) => _ = InvokeCreateProjectedDataAsync(e.Plane, e.Mode);
 
             _view.EnableBuiltInContextMenu = true;
             _orthoPanel.BottomView.EnableBuiltInContextMenu = true;
@@ -67,9 +77,11 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.BottomView.ExportFormatsProvider = () => GetExportFormatsForView(_orthoPanel.BottomView);
             _orthoPanel.RightView.ExportFormatsProvider = () => GetExportFormatsForView(_orthoPanel.RightView);
 
-            // Side-view context menu providers
-            _orthoPanel.BottomView.SideViewMenuItemsProvider = BuildSideViewContextMenuItems;
-            _orthoPanel.RightView.SideViewMenuItemsProvider = BuildSideViewContextMenuItems;
+            // Side-view context menu providers.
+            // BottomView shows XZ (sliced/projected along Y) -- its natural Restack direction is Y.
+            // RightView shows YZ (sliced/projected along X) -- its natural Restack direction is X.
+            _orthoPanel.BottomView.SideViewMenuItemsProvider = () => BuildSideViewContextMenuItems(ViewFrom.Y);
+            _orthoPanel.RightView.SideViewMenuItemsProvider = () => BuildSideViewContextMenuItems(ViewFrom.X);
         }
 
         /// <summary>
@@ -193,6 +205,24 @@ namespace MxPlot.UI.Avalonia.Views
                 IsVisible = false,
             };
 
+            _progressCancelBtn = new Button
+            {
+                Content = "\u2715",
+                FontSize = 9,
+                Width = 16,
+                Height = 16,
+                Padding = new Thickness(0),
+                MinWidth = 0,
+                MinHeight = 0,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 6, 0),
+                IsVisible = false,
+                [ToolTip.TipProperty] = "Cancel the running operation",
+            };
+            _progressCancelBtn.Click += (_, _) => OnProgressCancelClick();
+
             var statusPanel = new StackPanel { Orientation = Orientation.Horizontal };
             statusPanel.Children.Add(_dirtyBadge);
             statusPanel.Children.Add(_infoText);
@@ -202,14 +232,16 @@ namespace MxPlot.UI.Avalonia.Views
             statusPanel.Children.Add(_progressSep);
             statusPanel.Children.Add(_progressBar);
             statusPanel.Children.Add(_progressText);
+            statusPanel.Children.Add(_progressCancelBtn);
 
-            return new Border
+            _statusBarBorder = new Border
             {
                 Child = statusPanel,
                 BorderBrush = Brushes.Gray,
                 BorderThickness = new Thickness(0, 1, 0, 0),
                 Padding = new Thickness(0, 2),
             };
+            return _statusBarBorder;
         }
 
         private Border BuildToastPanel()
@@ -255,14 +287,15 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Creates the top toolbar: hamburger button, LUT/VR revert button, and
-        /// settings toggle button. Assembles them into a <see cref="DockPanel"/>
+        /// Creates the top header row: hamburger button, LUT/VR revert button, and
+        /// settings toggle button for LUT mode. 
+        /// Assembles them into a <see cref="DockPanel"/>
         /// together with the already-constructed <see cref="_lutSelector"/> and
         /// <see cref="_rangeBar"/>, stored in a local variable consumed by
         /// <see cref="BuildRootLayout"/>.
         /// Event wiring for buttons is deferred to <see cref="WireLutSettingsPanelEvents"/>.
         /// </summary>
-        private DockPanel BuildToolbar()
+        private DockPanel BuildLutModeHeader()
         {
             _hamburgerBtn = new Button
             {
@@ -308,8 +341,8 @@ namespace MxPlot.UI.Avalonia.Views
                 Margin = new Thickness(1, 0),
                 IsVisible = false,
             };
-            ToolTip.SetTip(_lutVrRevertBtn, "Revert LUT / Value Range to initial settings");
-            _lutVrRevertBtn.Click += (_, _) => RevertLutVr();
+            ToolTip.SetTip(_lutVrRevertBtn, "Revert display settings (LUT / Composite / Value Range) to initial state");
+            _lutVrRevertBtn.Click += (_, _) => RevertRenderState();
 
             _settingsBtn = new Button
             {
@@ -328,7 +361,13 @@ namespace MxPlot.UI.Avalonia.Views
 
             _rangeBar = new ValueRangeBar();
 
-            var topRow = new DockPanel { LastChildFill = true };
+            var topRow = new DockPanel
+            {
+                Margin = new Thickness(2, 0),
+                LastChildFill = true,
+            };
+            
+            ToolTip.SetTip(_settingsBtn, "Show / hide detailed display settings");
             DockPanel.SetDock(_settingsBtn, Dock.Right);
             DockPanel.SetDock(_lutVrRevertBtn, Dock.Right);
             DockPanel.SetDock(_hamburgerBtn, Dock.Left);
@@ -360,7 +399,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// spinner, invert toggle, and histogram
         /// Event wiring is deferred to <see cref="WireLutSettingsPanelEvents"/>.
         /// </summary>
-        private Border BuildLutSettingsPanel()
+        private Border BuildLutModeDetails()
         {
             _levelNud = new NumericUpDown
             {
@@ -460,24 +499,32 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Stores the <see cref="Border"/> instances returned by
-        /// <see cref="BuildStatusBar"/>, <see cref="BuildToolbar"/>, and
-        /// <see cref="BuildLutSettingsPanel"/> into their backing fields, then
+        /// <see cref="BuildStatusBar"/>, <see cref="BuildLutModeHeader"/>, and
+        /// <see cref="BuildLutModeDetails"/> into their backing fields, then
         /// assembles the root <see cref="DockPanel"/> and sets it as
         /// <see cref="Window.Content"/> wrapped in <see cref="_contentBorder"/>.
         /// </summary>
         private void BuildRootLayout()
         {
             var statusBar = BuildStatusBar();
-            var topRow = BuildToolbar();
-            _settingsPanel = BuildLutSettingsPanel();
+            _lutHeaderRow = BuildLutModeHeader();
+            _lutModeDetails = BuildLutModeDetails();
             var toast = BuildToastPanel();
 
+            // Wrap the LUT header/panel in swappable containers so RenderingMode.Composite
+            // can swap in its own header/panel (see MatrixPlotter.Composite.cs) without
+            // touching BuildLutModeHeader()/BuildLutModeDetails() or any of their event wiring.
+            _headerContainer = new ContentControl { Content = _lutHeaderRow };
+            _detailsContainer = new ContentControl { Content = _lutModeDetails };
+
+            _headerContainer.Height = 30;
+
             var dock = new DockPanel();
-            DockPanel.SetDock(topRow, Dock.Top);
-            DockPanel.SetDock(_settingsPanel, Dock.Top);
+            DockPanel.SetDock(_headerContainer, Dock.Top);
+            DockPanel.SetDock(_detailsContainer, Dock.Top);
             DockPanel.SetDock(statusBar, Dock.Bottom);
-            dock.Children.Add(topRow);
-            dock.Children.Add(_settingsPanel);
+            dock.Children.Add(_headerContainer);
+            dock.Children.Add(_detailsContainer);
             dock.Children.Add(statusBar);
             dock.Children.Add(_orthoPanel);
 
@@ -509,6 +556,59 @@ namespace MxPlot.UI.Avalonia.Views
                 if (_reentrancy.IsActive(GuardContext.Initializing)) return;
                 SetMatrixData(data);
             };
+            // MxView.Refresh() is a public entry point in its own right (MxView supports standalone
+            // use), so a caller holding MainView directly can call it without going through
+            // MatrixPlotter.Refresh(). Routing that back into our own Refresh() keeps derived state
+            // (histogram, overlay analysis, the Refreshed event for linked windows/sync-source
+            // consumers) consistent regardless of which entry point was used. Refresh()'s own
+            // _isRefreshing guard absorbs the reentrant case where this fires because we ourselves
+            // just called _view.Refresh() from DoRefresh().
+            _view.RefreshRequested += (_, _) => Refresh();
+            // Upsync for external-control pattern 3 (plotter.MainView.Xxx = value set directly):
+            // push the change into the ViewModel so Facade properties and UI chrome stay in sync
+            // the same way plotter.ViewModel.Xxx = value already does.
+            _view.RenderingPropertyChanged += (_, change) =>
+            {
+                // Deliberately NOT excluding GuardContext.SyncApply here: this handler must still
+                // update vm.Xxx when this plotter is the RECEIVING end of a cross-plotter Linked
+                // Sync application (SyncApplyLut/SyncApplyRangeMode/etc. wrap SyncApply while
+                // pushing an inbound value into _view/chrome) — otherwise the VM (and hence the
+                // external-control Facade) would silently go stale the moment a sync group applies
+                // anything. Loop prevention against re-entrantly re-applying back down is already
+                // handled at the OnDataContextChanged switch-case level (which does check SyncApply),
+                // not here.
+                //
+                // GuardContext.UiSync IS excluded: it marks a multi-statement _view mutation (e.g.
+                // WireRangeBarEvents' ModeChanged handler) still in progress via
+                // ApplyViewMutationAtomically — reacting mid-mutation would read/write half-updated
+                // VM state. ApplyViewMutationAtomically calls SyncViewModelFromView() once the
+                // mutation completes, so the VM still ends up correct afterward.
+                if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.Initializing)) return;
+                if (DataContext is not MatrixPlotterViewModel vm) return;
+                if (change.Property == MxView.LutProperty) { if (_view.Lut != null) vm.Lut = _view.Lut; }
+                else if (change.Property == MxView.IsFixedRangeProperty) vm.IsFixedRange = _view.IsFixedRange;
+                else if (change.Property == MxView.FixedMinProperty) vm.FixedMin = _view.FixedMin;
+                else if (change.Property == MxView.FixedMaxProperty) vm.FixedMax = _view.FixedMax;
+                else if (change.Property == MxView.IsInvertedColorProperty) vm.IsInvertedColor = _view.IsInvertedColor;
+                else if (change.Property == MxView.LutDepthProperty) vm.LutDepth = _view.LutDepth;
+                else if (change.Property == MxView.FrameIndexProperty)
+                {
+                    // Push into MatrixData.ActiveIndex (the single source of truth) rather than
+                    // vm.ActiveIndex directly, so this goes through the same _activeIndexHandler
+                    // cascade (ortho views, Composite frame indices, histogram) that an AxisTracker-
+                    // driven frame change already does — not just a narrower View/VM-only update.
+                    if (_currentData != null)
+                    {
+                        int clampedIndex = Math.Clamp(_view.FrameIndex, 0, _currentData.FrameCount - 1);
+                        _currentData.ActiveIndex = clampedIndex;
+                        // Same stranded-value hazard as the vm.ActiveIndex case: if the clamped value
+                        // already equals MatrixData.ActiveIndex's current value, the line above is a
+                        // no-op and never cascades back to correct _view.FrameIndex itself.
+                        if (_view.FrameIndex != clampedIndex)
+                            _view.FrameIndex = clampedIndex;
+                    }
+                }
+            };
             _view.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
             _view.OverlayManager.ObjectRemoved += OnOverlayObjectRemoved;
             _view.OverlayManager.GhostUpdated += (_, g) =>
@@ -523,10 +623,7 @@ namespace MxPlot.UI.Avalonia.Views
             _view.SyncComplexValueModeRequested += (_, mode) =>
             {
                 _view.ComplexValueMode = mode;
-                if (_rangeBar.Mode == ValueRangeMode.All)
-                    ApplyAllModeRange();
-                _orthoController.SyncRenderSettings();
-                UpdateStatusBar();
+                SyncComplexValueModeChanged();
             };
 
             // ── Bottom orthogonal view ────────────────────────────────────────
@@ -542,10 +639,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.BottomView.SyncComplexValueModeRequested += (_, mode) =>
             {
                 _view.ComplexValueMode = mode;
-                if (_rangeBar.Mode == ValueRangeMode.All)
-                    ApplyAllModeRange();
-                _orthoController.SyncRenderSettings();
-                UpdateStatusBar();
+                SyncComplexValueModeChanged();
             };
 
             // ── Right orthogonal view ─────────────────────────────────────────
@@ -561,10 +655,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.RightView.SyncComplexValueModeRequested += (_, mode) =>
             {
                 _view.ComplexValueMode = mode;
-                if (_rangeBar.Mode == ValueRangeMode.All)
-                    ApplyAllModeRange();
-                _orthoController.SyncRenderSettings();
-                UpdateStatusBar();
+                SyncComplexValueModeChanged();
             };
 
             // ── Dirty badge ───────────────────────────────────────────────────
@@ -586,28 +677,39 @@ namespace MxPlot.UI.Avalonia.Views
             _lutSelector.SelectedLutChanged += (_, lut) =>
             {
                 if (lut == null) return;
+                // ColorCoded projection child: this selects the depth palette, not a value→colour
+                // LUT -- TrueColorBitmapWriter ignores _view.Lut entirely, so report the change
+                // upward instead of applying it here (see MatrixPlotter.ColorCoded.cs).
+                if (IsColorCodedProjectionChild)
+                {
+                    RaiseColorCodedParamsChanged();
+                    // Same window-icon tracking as ordinary LUT mode below (UpdateWindowIcon() ->
+                    // _lutSelector.SelectedIcon) -- here that's the depth palette's gradient.
+                    UpdateWindowIcon();
+                    return;
+                }
                 _view.Lut = lut;
                 _orthoController.SyncRenderSettings();
                 if (DataContext is MatrixPlotterViewModel vm)
                     vm.Lut = lut;
-                Icon = _lutSelector.SelectedIcon;
+                UpdateWindowIcon();
                 SaveViewSettings();
 
                 // If the selected LUT matches the snapshot the state is clean — not dirty.
                 // This also suppresses Avalonia's deferred SelectionChanged re-fire on
                 // TemplateApplied, which would otherwise produce a false-positive revert
                 // button for non-default LUTs like BSMod.
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && string.Equals(lut.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted;
+                bool lutMatchesSnapshot = _renderSnapshot != null
+                    && string.Equals(lut.Name, _renderSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
+                    && _view.LutDepth == _renderSnapshot.LutLevel
+                    && _view.IsInvertedColor == _renderSnapshot.Inverted;
                 SetLutDirty(!lutMatchesSnapshot);
 
-                // Update histogram LUT if settings panel is expanded
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
-                {
-                    UpdateHistogram();
-                }
+                // Recolor the histogram if settings panel is expanded. A palette swap changes only
+                // which colors the bars are tinted with -- bin count and data/view range are
+                // unaffected -- so this stays on the cheap path (no pixel rescan).
+                if (_lutModeDetails?.IsVisible == true)
+                    UpdateHistogramColors();
 
                 if (!_reentrancy.IsActive(GuardContext.SyncApply))
                     SyncLutChanged?.Invoke(this, lut);
@@ -623,17 +725,23 @@ namespace MxPlot.UI.Avalonia.Views
         private void WireLutSettingsPanelEvents()
         {
             // ── Settings panel open/close toggle ─────────────────────────────
+            // Reads/animates ActiveDetailsPanel (MatrixPlotter.ColorCoded.cs), not a hardcoded
+            // _lutModeDetails, so this keeps working after a ColorCoded details-panel swap --
+            // always _lutModeDetails for an ordinary window, so behaviour there is unchanged.
             _settingsBtn.Click += (_, _) =>
             {
-                bool opening = !_settingsPanel.IsVisible;
-                double panelH = _settingsPanel.Bounds.Height;
+                var panel = ActiveDetailsPanel;
+                if (panel == null) return;
+                bool opening = !panel.IsVisible;
+                double panelH = panel.Bounds.Height;
 
-                _settingsPanel.IsVisible = opening;
+                panel.IsVisible = opening;
                 _settingsBtn.Content = opening ? "▴" : "▾";
                 _settingsBtn.Background = opening ? Brushes.LightGray : Brushes.Transparent;
 
-                // Refresh histogram when opening settings panel
-                if (opening && _histogramPlot != null)
+                // Refresh histogram when opening settings panel (meaningless for the ColorCoded
+                // details panel, which has no histogram control at all).
+                if (opening && _histogramPlot != null && !IsColorCodedProjectionChild)
                     UpdateHistogram();
 
                 if (WindowState == WindowState.Maximized) return;
@@ -646,7 +754,7 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     Dispatcher.UIThread.Post(() =>
                     {
-                        double h = _settingsPanel.Bounds.Height;
+                        double h = panel.Bounds.Height;
                         if (h > 0) Height += h;
                     }, DispatcherPriority.Background);
                 }
@@ -658,14 +766,14 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.LutDepth = (int)(_levelNud.Value ?? 256);
                 _orthoController.SyncRenderSettings();
                 SaveViewSettings();
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel
-                    && string.Equals(_view.Lut?.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted;
+                bool lutMatchesSnapshot = _renderSnapshot != null
+                    && _view.LutDepth == _renderSnapshot.LutLevel
+                    && string.Equals(_view.Lut?.Name, _renderSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
+                    && _view.IsInvertedColor == _renderSnapshot.Inverted;
                 SetLutDirty(!lutMatchesSnapshot);
 
                 // Update histogram LUT if settings panel is expanded
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+                if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
                     UpdateHistogram();
 
                 if (!_reentrancy.IsActive(GuardContext.SyncApply))
@@ -678,15 +786,16 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.IsInvertedColor = _invertLutChk.IsChecked == true;
                 _orthoController.SyncRenderSettings();
                 SaveViewSettings();
-                bool lutMatchesSnapshot = _lutVrSnapshot != null
-                    && _view.IsInvertedColor == _lutVrSnapshot.Inverted
-                    && string.Equals(_view.Lut?.Name, _lutVrSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
-                    && _view.LutDepth == _lutVrSnapshot.LutLevel;
+                bool lutMatchesSnapshot = _renderSnapshot != null
+                    && _view.IsInvertedColor == _renderSnapshot.Inverted
+                    && string.Equals(_view.Lut?.Name, _renderSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
+                    && _view.LutDepth == _renderSnapshot.LutLevel;
                 SetLutDirty(!lutMatchesSnapshot);
 
-                // Update histogram LUT when invert is toggled (if settings panel is expanded)
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
-                    UpdateHistogram();
+                // Recolor the histogram when invert is toggled (if settings panel is expanded).
+                // Inversion only reverses the color array -- no pixel rescan needed.
+                if (_lutModeDetails?.IsVisible == true)
+                    UpdateHistogramColors();
 
                 if (!_reentrancy.IsActive(GuardContext.SyncApply))
                     SyncInvertedChanged?.Invoke(this, _view.IsInvertedColor);
@@ -733,51 +842,69 @@ namespace MxPlot.UI.Avalonia.Views
 
             _rangeBar.ModeChanged += (_, mode) =>
             {
-                _view.IsFixedRange = mode != ValueRangeMode.Current;
-
-                if (mode == ValueRangeMode.Fixed)
+                // ColorCoded projection child: Fixed/Auto here means "pin the intensity range" vs
+                // "re-derive it from the winner values every recompute", both handled entirely on
+                // the parent's OrthogonalViewController -- report upward instead of touching
+                // _view.IsFixedRange/FixedMin/FixedMax, which TrueColorBitmapWriter ignores.
+                if (IsColorCodedProjectionChild)
                 {
-                    if (!double.IsNaN(_rangeBar.DisplayedMinValue))
+                    RaiseColorCodedParamsChanged();
+                    return;
+                }
+                // Wrapped: this block sets IsFixedRange/FixedMin/FixedMax across several separate
+                // statements. Without ApplyViewMutationAtomically, the very first assignment could
+                // reentrantly cascade (View -> VM upsync -> OnDataContextChanged switch -> back into
+                // View/RangeBar) using the ViewModel's stale prior values, corrupting a property this
+                // block hasn't gotten to setting yet — this is exactly how the first Fixed-mode
+                // transition after opening a plotter used to reset FixedMax to its unset default.
+                ApplyViewMutationAtomically(() =>
+                {
+                    _view.IsFixedRange = mode != ValueRangeMode.Current;
+
+                    if (mode == ValueRangeMode.Fixed)
                     {
-                        _view.FixedMin = _rangeBar.DisplayedMinValue;
-                        _view.FixedMax = _rangeBar.DisplayedMaxValue;
+                        if (!double.IsNaN(_rangeBar.DisplayedMinValue))
+                        {
+                            _view.FixedMin = _rangeBar.DisplayedMinValue;
+                            _view.FixedMax = _rangeBar.DisplayedMaxValue;
+                        }
+                        else
+                        {
+                            var (min, max) = _view.ScanCurrentFrameRange();
+                            _rangeBar.SetRange(min, max);
+                            _view.FixedMin = min;
+                            _view.FixedMax = max;
+                        }
                     }
-                    else
+                    else if (mode == ValueRangeMode.All)
+                    {
+                        ApplyAllModeRange();
+                        Debug.WriteLine($"[ModeChanged] All mode: _rangeBar.DisplayedMin={_rangeBar.DisplayedMinValue:F3}, Max={_rangeBar.DisplayedMaxValue:F3}");
+                    }
+                    else if (mode == ValueRangeMode.Roi)
+                    {
+                        _view.IsFixedRange = true;
+                        RefreshRoiValueRange();
+                    }
+                    else // Current
                     {
                         var (min, max) = _view.ScanCurrentFrameRange();
                         _rangeBar.SetRange(min, max);
-                        _view.FixedMin = min;
-                        _view.FixedMax = max;
                     }
-                }
-                else if (mode == ValueRangeMode.All)
-                {
-                    ApplyAllModeRange();
-                    Debug.WriteLine($"[ModeChanged] All mode: _rangeBar.DisplayedMin={_rangeBar.DisplayedMinValue:F3}, Max={_rangeBar.DisplayedMaxValue:F3}");
-                }
-                else if (mode == ValueRangeMode.Roi)
-                {
-                    _view.IsFixedRange = true;
-                    RefreshRoiValueRange();
-                }
-                else // Current
-                {
-                    var (min, max) = _view.ScanCurrentFrameRange();
-                    _rangeBar.SetRange(min, max);
-                }
+                });
 
                 _orthoController.SyncRenderSettings();
                 SaveViewSettings();
 
-                bool vrMatchesSnapshot = _lutVrSnapshot != null
-                    && mode == _lutVrSnapshot.VrMode
+                bool vrMatchesSnapshot = _renderSnapshot != null
+                    && mode == _renderSnapshot.VrMode
                     && (mode != ValueRangeMode.Fixed
-                        || (_view.FixedMin == _lutVrSnapshot.VrMin
-                            && _view.FixedMax == _lutVrSnapshot.VrMax));
+                        || (_view.FixedMin == _renderSnapshot.VrMin
+                            && _view.FixedMax == _renderSnapshot.VrMax));
                 SetVrDirty(!vrMatchesSnapshot);
 
                 // Update histogram when mode changes (if settings panel is open)
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+                if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
                 {
                     // Rebuild histogram with new mode-specific ranges
                     // UpdateHistogram() will read the correct viewRange from _rangeBar
@@ -799,17 +926,22 @@ namespace MxPlot.UI.Avalonia.Views
 
             _rangeBar.RangeChanged += (_, args) =>
             {
+                if (IsColorCodedProjectionChild)
+                {
+                    RaiseColorCodedParamsChanged();
+                    return;
+                }
                 _view.FixedMin = args.Min;
                 _view.FixedMax = args.Max;
                 _orthoController.SyncRenderSettings();
                 SaveViewSettings();
-                bool vrMatchesSnapshot = _lutVrSnapshot != null
-                    && _lutVrSnapshot.VrMode == ValueRangeMode.Fixed
-                    && _view.FixedMin == _lutVrSnapshot.VrMin
-                    && _view.FixedMax == _lutVrSnapshot.VrMax;
+                bool vrMatchesSnapshot = _renderSnapshot != null
+                    && _renderSnapshot.VrMode == ValueRangeMode.Fixed
+                    && _view.FixedMin == _renderSnapshot.VrMin
+                    && _view.FixedMax == _renderSnapshot.VrMax;
                 SetVrDirty(!vrMatchesSnapshot);
 
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+                if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
                 {
                     if (!_reentrancy.IsActive(GuardContext.UiSync))
                     {
@@ -830,17 +962,30 @@ namespace MxPlot.UI.Avalonia.Views
 
             _rangeBar.SearchMinRequested += (_, _) =>
             {
-                var (min, _) = _view.ScanCurrentFrameRange();
-                _view.FixedMin = min;
-                _rangeBar.SetRange(min, _view.FixedMax);
+                // ColorCoded projection child: this window's "current frame" is the packed-ARGB
+                // image itself -- scanning it as a value range would be meaningless. Search instead
+                // reuses the natural (winnerValue) range the parent already computed every recompute.
+                if (IsColorCodedProjectionChild) { SearchColorCodedMin(); return; }
+                // Wrapped: this reads back _view.FixedMax after setting FixedMin, so it's vulnerable
+                // to the same reentrant-corruption hazard as ModeChanged above (see its comment).
+                ApplyViewMutationAtomically(() =>
+                {
+                    var (min, _) = _view.ScanCurrentFrameRange();
+                    _view.FixedMin = min;
+                    _rangeBar.SetRange(min, _view.FixedMax);
+                });
                 _orthoController.SyncRenderSettings();
             };
 
             _rangeBar.SearchMaxRequested += (_, _) =>
             {
-                var (_, max) = _view.ScanCurrentFrameRange();
-                _view.FixedMax = max;
-                _rangeBar.SetRange(_view.FixedMin, max);
+                if (IsColorCodedProjectionChild) { SearchColorCodedMax(); return; }
+                ApplyViewMutationAtomically(() =>
+                {
+                    var (_, max) = _view.ScanCurrentFrameRange();
+                    _view.FixedMax = max;
+                    _rangeBar.SetRange(_view.FixedMin, max);
+                });
                 _orthoController.SyncRenderSettings();
             };
         }

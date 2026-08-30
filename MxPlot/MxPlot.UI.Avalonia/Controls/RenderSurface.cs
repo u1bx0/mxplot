@@ -9,6 +9,7 @@ using MxPlot.Core;
 using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Rendering;
+using MxPlot.UI.Avalonia.Utils;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -30,7 +31,8 @@ namespace MxPlot.UI.Avalonia.Controls
 
     /// <summary>
     /// Core rendering surface for <see cref="IMatrixData"/> display.
-    /// Handles bitmap generation via <see cref="BitmapWriter"/>, and manages
+    /// Handles bitmap generation via <see cref="LutBitmapWriter"/> or 
+    /// <see cref="CompositeBitmapWriter"/> implemeting <see cref="IBitmapWriter"/>,  and manages
     /// pan (left-button drag) and zoom (mouse wheel) interactions.
     /// </summary>
     /// <remarks>
@@ -69,6 +71,8 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── State ────────────────────────────────────────────────────────────
         private WriteableBitmap? _bitmap;
         private IBitmapWriter? _writer;
+        private bool _refreshing;         // a render is in flight; see RefreshBitmap
+        private bool _refreshRequested;   // a nested request arrived while it was
         private EventHandler? _scaleChangedHandler;
         private double _zoom = 1.0;
         private double _transX = 0.0;
@@ -270,6 +274,10 @@ namespace MxPlot.UI.Avalonia.Controls
             AvaloniaProperty.Register<RenderSurface, int[]?>(
                 nameof(CompositeFrameIndices));
 
+        public static readonly StyledProperty<ColorCodedRenderInfo?> ColorCodedInfoProperty =
+            AvaloniaProperty.Register<RenderSurface, ColorCodedRenderInfo?>(
+                nameof(ColorCodedInfo));
+
         public IMatrixData? MatrixData
         {
             get => GetValue(MatrixDataProperty);
@@ -319,6 +327,11 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             get => GetValue(CompositeFrameIndicesProperty);
             set => SetValue(CompositeFrameIndicesProperty, value);
+        }
+        public ColorCodedRenderInfo? ColorCodedInfo
+        {
+            get => GetValue(ColorCodedInfoProperty);
+            set => SetValue(ColorCodedInfoProperty, value);
         }
 
         /// <summary>
@@ -448,6 +461,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 (s, _) => s.RebuildAndInvalidate());
             CompositeFrameIndicesProperty.Changed.AddClassHandler<RenderSurface>(
                 (s, _) => s.RebuildAndInvalidate());
+            ColorCodedInfoProperty.Changed.AddClassHandler<RenderSurface>(
+                (s, _) => s.RebuildAndInvalidate());
             // Redraw debug overlay when focus changes (IsFocused is a built-in AvaloniaObject property)
             IsFocusedProperty.Changed.AddClassHandler<RenderSurface>(
                 (s, _) => s.InvalidateVisual());
@@ -515,6 +530,16 @@ namespace MxPlot.UI.Avalonia.Controls
 
         internal void RebuildAndInvalidate()
         {
+            // Guarded for the same reason as RefreshBitmap, and for one more: AllocateBitmap may
+            // dispose and replace _bitmap, which must not happen underneath a render that is
+            // already writing for it. The deferred request is picked up by the loop below.
+            if (_refreshing)
+            {
+                _refreshRequested = true;
+                InvalidateVisual();
+                return;
+            }
+
             AllocateBitmap();
             RefreshBitmap();
             InvalidateVisual();
@@ -561,7 +586,11 @@ namespace MxPlot.UI.Avalonia.Controls
                 {
                     RenderingMode.Lut => new LutBitmapWriter(data.ValueType),
                     RenderingMode.Composite => new CompositeBitmapWriter(data.ValueType),
-                    RenderingMode.ColorCoded => new CompositeBitmapWriter(data.ValueType),
+                    // The ColorCoded live child window's data is the winner *value* matrix itself --
+                    // an ordinary projection-shaped result, same type as the source data -- combined
+                    // at render time with the winner-index/depth-palette data in ColorCodedInfo.
+                    // See ColorCoded_View_InitialDesign.md section 3.3.
+                    RenderingMode.ColorCoded => new ColorCodedBitmapWriter(data.ValueType),
                     _ => throw new NotSupportedException($"RenderingMode {mode} is not supported.")
                 };
             }
@@ -578,7 +607,7 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 RenderingMode.Lut => writer is LutBitmapWriter,
                 RenderingMode.Composite => writer is CompositeBitmapWriter,
-                RenderingMode.ColorCoded => writer is CompositeBitmapWriter,
+                RenderingMode.ColorCoded => writer is ColorCodedBitmapWriter,
                 _ => false
             };
 
@@ -588,13 +617,43 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         private void RefreshBitmap()
         {
-            var data = MatrixData;
-            if (data == null || _bitmap == null || _writer == null) return;
+            // The writers keep per-instance state (colour maps, scratch buffer), so re-entering
+            // one mid-render corrupts the frame being produced. That is not hypothetical: their
+            // parallel loops block on a wait that pumps Win32 messages, and the pumped loop runs
+            // dispatcher jobs — any of which may write a styled property and land back here.
+            //
+            // Serialising alone would not do: the nested request carries newer state, so dropping
+            // it would leave a stale frame on screen. Remember it and render again instead.
+            if (_refreshing)
+            {
+                _refreshRequested = true;
+                return;
+            }
 
-            var context = BuildContext(data);
-            if (context == null) return;
+            _refreshing = true;
+            try
+            {
+                do
+                {
+                    _refreshRequested = false;
 
-            _writer.Render(data, _bitmap, context);
+                    // Re-read every input — a nested request may have changed any of them.
+                    var data = MatrixData;
+                    if (data == null || _bitmap == null || _writer == null) return;
+
+                    var context = BuildContext(data);
+                    if (context == null) return;
+
+                    _writer.Render(data, _bitmap, context);
+                }
+                while (_refreshRequested);
+            }
+            finally
+            {
+                _refreshing = false;
+            }
+
+            // Fired once, for the settled state — nested passes are an implementation detail.
             BitmapRefreshed?.Invoke(this, EventArgs.Empty);
         }
 
@@ -602,8 +661,8 @@ namespace MxPlot.UI.Avalonia.Controls
             => RenderingMode switch
             {
                 RenderingMode.Lut => BuildLutContext(data, Lut),
-                RenderingMode.Composite => BuildCompositeContext(),
-                RenderingMode.ColorCoded => BuildCompositeContext(),
+                RenderingMode.Composite => BuildCompositeContext(data),
+                RenderingMode.ColorCoded => BuildColorCodedContext(data),
                 _ => null
             };
 
@@ -631,11 +690,41 @@ namespace MxPlot.UI.Avalonia.Controls
             return new LutRenderingContext(FrameIndex, effectiveLut, min, max, IsInvertedColor);
         }
 
-        private CompositeRenderingContext? BuildCompositeContext()
+        /// <summary>
+        /// Builds the ColorCoded context, or <c>null</c> when <see cref="ColorCodedInfo"/> has not
+        /// been set yet, or its WinnerIndex's dimensions do not (yet) match <paramref name="data"/> --
+        /// MatrixData and ColorCodedInfo are separate styled properties updated one after another by
+        /// the parent, so a render triggered in between briefly disagrees. Skipping that frame is
+        /// harmless, mirroring <see cref="BuildCompositeContext"/>'s identical guard.
+        /// </summary>
+        private ColorCodedRenderingContext? BuildColorCodedContext(IMatrixData data)
+        {
+            var info = ColorCodedInfo;
+            if (info == null) return null;
+            if (info.WinnerIndex.XCount != data.XCount || info.WinnerIndex.YCount != data.YCount) return null;
+            return new ColorCodedRenderingContext(FrameIndex, info);
+        }
+
+        /// <summary>
+        /// Builds the composite context, or <c>null</c> when the current property set is not yet
+        /// self-consistent.
+        /// <para>
+        /// MatrixData, CompositeRecipes and CompositeFrameIndices are separate styled properties,
+        /// and each assignment re-renders synchronously, so a caller updating all of them passes
+        /// through intermediate states where they disagree - N frame indices against the previous
+        /// single-frame slice, or an index list that is temporarily longer than the recipe list.
+        /// Rendering those would throw out of <see cref="CompositeBitmapWriter"/>. Skipping the
+        /// frame instead is harmless: the assignment that completes the set renders immediately.
+        /// </para>
+        /// </summary>
+        private CompositeRenderingContext? BuildCompositeContext(IMatrixData data)
         {
             var recipes = CompositeRecipes;
             var indices = CompositeFrameIndices;
             if (recipes is not { Count: > 0 } || indices is not { Length: > 0 }) return null;
+            if (recipes.Count != indices.Length) return null;
+            foreach (int frameIndex in indices)
+                if (frameIndex < 0 || frameIndex >= data.FrameCount) return null;
             return new CompositeRenderingContext(indices, recipes, CompositeBlendMode);
         }
 
@@ -1222,15 +1311,8 @@ namespace MxPlot.UI.Avalonia.Controls
         /// Returns a projection function from Complex to double
         /// corresponding to the current ComplexValueMode.
         /// </summary>
-        private Func<Complex, double> GetComplexConverter() => _complexValueMode switch
-        {
-            ComplexValueMode.Magnitude => c => c.Magnitude,
-            ComplexValueMode.Real => c => c.Real,
-            ComplexValueMode.Imaginary => c => c.Imaginary,
-            ComplexValueMode.Phase => c => c.Phase,
-            ComplexValueMode.Power => c => c.Real * c.Real + c.Imaginary * c.Imaginary,
-            _ => c => c.Magnitude,
-        };
+        private Func<Complex, double> GetComplexConverter() =>
+            ComplexValueModeConverter.GetConverter(_complexValueMode);
 
         private void ClampTranslation()
         {
@@ -1383,14 +1465,26 @@ namespace MxPlot.UI.Avalonia.Controls
             };
         }
 
+        /// <summary>
+        /// Draws the cursor read-out box.
+        /// <para>
+        /// The text is built as a list of coloured runs rather than one string, because in
+        /// <see cref="RenderingMode.Composite"/> every visible channel contributes a value and each
+        /// is tinted with that channel's own colour. That keeps the read-out compact and tied to the
+        /// blended image, instead of spelling out channel names that would push the box off-screen
+        /// once the names are real ("DAPI", "mCherry", ...). Outside Composite mode the list holds a
+        /// single white run, exactly as before.
+        /// </para>
+        /// </summary>
         private void DrawPositionOverlay(DrawingContext ctx)
         {
             if (!ShowDataPosition) return;
 
-            string label;
+            var runs = new List<(string Text, IBrush Brush)>();
+
             if (OverlayInfoText is { } overlayInfo)
             {
-                label = overlayInfo;
+                runs.Add((overlayInfo, Brushes.White));
             }
             else
             {
@@ -1419,45 +1513,66 @@ namespace MxPlot.UI.Avalonia.Controls
                         : md.YMin + (fby - 0.5) * md.YStep;
                     string xu = md.XUnit.Length > 0 ? $" {md.XUnit}" : "";
                     string yu = md.YUnit.Length > 0 ? $" {md.YUnit}" : "";
-                    double value;
-                    string cmplxValue = "";
-                    if (md.ValueType == typeof(Complex)
-                        && _writer?.StructValueConverter is Func<Complex, double> conv)
-                    {
-                        var typedData = (MatrixData<Complex>)md;
-                        var span = typedData.AsSpan(FrameIndex);
+                    string prefix = $"({dx:F2}{xu}, {dy:F2}{yu}) [{rawIx},{rawIy}] = ";
 
-                        var z = span[rawIy * md.XCount + rawIx];
-                        value = conv(z);
-                        cmplxValue = $" ({z.Real:G5}{(z.Imaginary >= 0 ? "+" : "-")}{Math.Abs(z.Imaginary):G5}i)";
-                    }
-                    else
+                    if (RenderingMode == RenderingMode.ColorCoded && ColorCodedInfo is { } info)
                     {
-                        value = md.GetValueAt(rawIx, rawIy, FrameIndex);
+                        // md is now the winner *value* matrix itself (an ordinary projection-shaped
+                        // result -- see ColorCodedBitmapWriter's doc comment), so its GetValueAt below
+                        // is already the real value. Only the depth position needs the auxiliary
+                        // winner-index matrix and Axis that ColorCodedInfo carries.
+                        int depthIndex = (int)Math.Round(info.WinnerIndex.GetValueAt(rawIx, rawIy, 0));
+                        double depthValue = md.GetValueAt(rawIx, rawIy, FrameIndex);
+                        string axisUnit = info.Axis.Unit.Length > 0 ? $" {info.Axis.Unit}" : "";
+                        string depthLabel = $"{info.Axis.Name}={info.Axis.ValueAt(depthIndex):G4}{axisUnit}";
+                        runs.Add((prefix + $"{depthLabel}, value={FormatCursorValue(md.ValueType, depthValue)}",
+                            Brushes.White));
                     }
-                    string valStr = md.ValueType == typeof(float) ? value.ToString("G5", CultureInfo.InvariantCulture) :
-                                    (md.ValueType == typeof(double) || md.ValueType == typeof(Complex)) ? value.ToString("G6", CultureInfo.InvariantCulture) :
-                                    value.ToString(CultureInfo.InvariantCulture);
-                    label = $"({dx:F2}{xu}, {dy:F2}{yu}) [{rawIx},{rawIy}] = {valStr}{cmplxValue}";
+                    else if (!TryAddCompositeValueRuns(runs, md, rawIx, rawIy, prefix))
+                    {
+                        double value;
+                        string cmplxValue = "";
+                        if (md.ValueType == typeof(Complex)
+                            && _writer?.StructValueConverter is Func<Complex, double> conv)
+                        {
+                            var typedData = (MatrixData<Complex>)md;
+                            var span = typedData.AsSpan(FrameIndex);
+
+                            var z = span[rawIy * md.XCount + rawIx];
+                            value = conv(z);
+                            cmplxValue = $" ({z.Real:G5}{(z.Imaginary >= 0 ? "+" : "-")}{Math.Abs(z.Imaginary):G5}i)";
+                        }
+                        else
+                        {
+                            value = md.GetValueAt(rawIx, rawIy, FrameIndex);
+                        }
+                        runs.Add((prefix + FormatCursorValue(md.ValueType, value) + cmplxValue, Brushes.White));
+                    }
                 }
                 else
                 {
-                    label = $"[{rawIx},{rawIy}]";
+                    runs.Add(($"[{rawIx},{rawIy}]", Brushes.White));
                 }
             }
 
-            var ft = new FormattedText(
-                label,
-                CultureInfo.CurrentCulture,
-                FlowDirection.LeftToRight,
-                new Typeface("Consolas"),
-                12.0,
-                Brushes.White);
+            if (runs.Count == 0) return;
+
+            var typeface = new Typeface("Consolas");
+            var texts = new List<FormattedText>(runs.Count);
+            double textWidth = 0, textHeight = 0;
+            foreach (var (text, brush) in runs)
+            {
+                var run = new FormattedText(
+                    text, CultureInfo.CurrentCulture, FlowDirection.LeftToRight, typeface, 12.0, brush);
+                texts.Add(run);
+                textWidth += run.Width;
+                textHeight = Math.Max(textHeight, run.Height);
+            }
 
             const double pad = 4.0;
             const double margin = 0.0;
-            double bw = ft.Width + pad * 2;
-            double bh = ft.Height + pad * 2;
+            double bw = textWidth + pad * 2;
+            double bh = textHeight + pad * 2;
 
             double ox, oy;
             if (OverlayInfoText != null && OverlayInfoTextAnchor == OverlayInfoTextAnchor.TopRight)
@@ -1479,7 +1594,71 @@ namespace MxPlot.UI.Avalonia.Controls
                 new SolidColorBrush(Color.FromArgb(160, 48, 48, 48)),
                 new Rect(ox, oy, bw, bh),
                 3.0f);
-            ctx.DrawText(ft, new Point(ox + pad, oy + pad));
+
+            double penX = ox + pad;
+            foreach (var run in texts)
+            {
+                ctx.DrawText(run, new Point(penX, oy + pad));
+                penX += run.Width;
+            }
+        }
+
+        /// <summary>
+        /// Appends one colour-tinted run per visible composite channel to <paramref name="runs"/>.
+        /// Returns <c>false</c> when Composite rendering is not active (or carries no usable recipe
+        /// set), leaving <paramref name="runs"/> untouched so the caller can fall back to the
+        /// single-value read-out.
+        /// </summary>
+        private bool TryAddCompositeValueRuns(
+            List<(string Text, IBrush Brush)> runs, IMatrixData md, int rawIx, int rawIy, string prefix)
+        {
+            if (RenderingMode is not (RenderingMode.Composite or RenderingMode.ColorCoded)) return false;
+
+            var recipes = CompositeRecipes;
+            var indices = CompositeFrameIndices;
+            if (recipes is not { Count: > 0 } || indices is not { Length: > 0 }) return false;
+
+            int count = Math.Min(recipes.Count, indices.Length);
+            var separator = new SolidColorBrush(Color.FromRgb(150, 150, 150));
+            bool any = false;
+
+            runs.Add((prefix, Brushes.White));
+            for (int i = 0; i < count; i++)
+            {
+                if (!recipes[i].IsVisible) continue;   // hidden channels contribute nothing to the image
+                if (any) runs.Add((" / ", separator));
+
+                double value = md.GetValueAt(rawIx, rawIy, indices[i]);
+                runs.Add((FormatCursorValue(md.ValueType, value),
+                          new SolidColorBrush(BrightenForText(recipes[i].ColorArgb))));
+                any = true;
+            }
+
+            if (!any) runs.Clear();   // every channel hidden: fall back rather than show a bare "="
+            return any;
+        }
+
+        private static string FormatCursorValue(Type valueType, double value) =>
+            valueType == typeof(float) ? value.ToString("G5", CultureInfo.InvariantCulture)
+            : (valueType == typeof(double) || valueType == typeof(Complex))
+                ? value.ToString("G6", CultureInfo.InvariantCulture)
+                : value.ToString(CultureInfo.InvariantCulture);
+
+        /// <summary>
+        /// Lifts a channel colour to a minimum luminance so the value stays legible on the dark
+        /// read-out background. Pure blue in particular is close to unreadable at 12 px otherwise.
+        /// The hue is preserved; only the overall level is raised.
+        /// </summary>
+        private static Color BrightenForText(int argb)
+        {
+            var c = Color.FromUInt32(unchecked((uint)argb));
+            double luma = (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
+            const double minLuma = 0.55;
+            if (luma >= minLuma || luma <= 0.0) return Color.FromRgb(c.R, c.G, c.B);
+
+            double gain = minLuma / luma;
+            byte Lift(byte v) => (byte)Math.Clamp(v * gain, 0, 255);
+            return Color.FromRgb(Lift(c.R), Lift(c.G), Lift(c.B));
         }
 
         // ── Elastic pan ──────────────────────────────────────────────────────

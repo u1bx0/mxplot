@@ -70,6 +70,16 @@ namespace MxPlot.App.Views
                 menu.Items.Add(renameItem);
             }
 
+            // ── Sort by Name (scoped to the clicked item's sibling group only) ─────
+            if (ViewModel.CanSortSiblings(clicked))
+            {
+                bool ascending = ViewModel.NextSortIsAscending(clicked);
+                var sortItem = new MenuItem { Header = $"Sort by Name {(ascending ? "↑" : "↓")}" };
+                sortItem.Click += (_, _) => ViewModel.SortSiblingsByName(clicked);
+                menu.Items.Add(sortItem);
+                menu.Items.Add(new Separator());
+            }
+
             // ── Hide / Show ───────────────────────────────────────────────
             if (!multi)
             {

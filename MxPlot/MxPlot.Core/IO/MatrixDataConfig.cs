@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 
 namespace MxPlot.Core.IO
 {
@@ -12,7 +13,22 @@ namespace MxPlot.Core.IO
     /// </summary>
     public record class MatrixDataConfig
     {
-        public const int CurrentVersion = 1;
+        /// <summary>
+        /// Header schema version written into every <c>.mxd</c> file.
+        /// <list type="bullet">
+        ///   <item><c>1</c> — initial layout. <c>FovAxis.TileLayout</c> was a <c>(int, int, int)</c>
+        ///         tuple, serialized through <c>IncludeFields</c> as
+        ///         <c>{"Item1":..,"Item2":..,"Item3":..}</c>, and the origins array was written from
+        ///         a <c>[JsonInclude]</c> private field.</item>
+        ///   <item><c>2</c> — <c>TileLayout</c> is a <see cref="TileGrid"/> record struct
+        ///         (<c>{"X":..,"Y":..,"Z":..}</c>) and the origins array is written from the public
+        ///         <c>FovAxis.Origins</c> property.</item>
+        /// </list>
+        /// Nothing branches on this value today; it exists so that a file predating the change can
+        /// still be identified. A version-1 file that carries a <c>FovAxis</c> will load with an
+        /// empty tile grid, because the reader no longer looks for the old member names.
+        /// </summary>
+        public const int CurrentVersion = 2;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MatrixDataConfig"/> class.
@@ -167,10 +183,20 @@ namespace MxPlot.Core.IO
         {
             WriteIndented = false,
             DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            // Required for ValueTuple fields (Item1, Item2, Item3) used by FovAxis.TileLayout
-            IncludeFields = true,
             // FAIL-SAFE: Allow NaN/Infinity for custom types that cannot provide valid numeric statistics
-            NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals
+            NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+
+            // Names the reflection-based resolver that JsonSerializer would otherwise pick up
+            // implicitly. Hosts that build with trimming/AOT settings turn the implicit pick-up off
+            // (the runtime switch System.Text.Json.JsonSerializer.IsReflectionEnabledByDefault),
+            // and options without an explicit resolver then throw InvalidOperationException on
+            // first use — which is what .NET 10 file-based apps ("dotnet run app.cs") hit, since
+            // they default to those settings even while running under the JIT.
+            //
+            // This is the same resolver and the same on-disk result; it only states the choice
+            // rather than inheriting it. It does NOT make the header trim- or AOT-safe: a real
+            // NativeAOT build still needs a source-generated JsonSerializerContext.
+            TypeInfoResolver = new DefaultJsonTypeInfoResolver()
         };
 
         /// <summary>

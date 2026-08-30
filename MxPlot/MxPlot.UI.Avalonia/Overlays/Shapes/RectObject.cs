@@ -23,6 +23,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public OverlayMenuEntry CopyData { get; } = new("Copy Data", icon: null, tooltip: "Copy data within the rect as image/ascii");
         public bool ShowStatistics { get; set; } = false;
         public RegionStatistics? CachedStatistics { get; set; }
+        public string? CachedStatisticsLabel { get; set; }
         public bool IsValueRangeRoi { get; set; } = false;
 
         public bool ContainsWorldPoint(Point worldPoint) =>
@@ -74,8 +75,11 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             var (color, dash) = GetDrawingPen();
             g.DrawRectangle(color, PenWidth, dash, X, Y, Width, Height, IsScaledPenWidth);
             DrawHandles(g);
-            if (ShowStatistics && CachedStatistics.HasValue)
-                DrawStatisticsLabel(g, CachedStatistics.Value);
+            if (ShowStatistics)
+            {
+                var label = CachedStatisticsLabel ?? CachedStatistics?.ToLabel();
+                if (label != null) DrawStatisticsLabel(g, label);
+            }
             if (IsValueRangeRoi)
                 DrawRoiLabel(g);
         }

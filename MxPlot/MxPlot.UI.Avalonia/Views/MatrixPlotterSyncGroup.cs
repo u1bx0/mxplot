@@ -129,6 +129,10 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 foreach (var p in _plotters)
                 {
+                    // Same reasoning as OnScaleChanged below: RestoreSnapshot can rewrite Lut/Scale/
+                    // Range values that an already-open menu panel's InfoTab won't live-refresh to
+                    // reflect, so close it rather than leave it showing stale numbers.
+                    p.CloseMenuPanelIfOpen();
                     p.RevertCrop();
                     if (_snapshots.TryGetValue(p, out var snap))
                         p.RestoreSnapshot(snap);

@@ -75,7 +75,7 @@ namespace MxPlot.App.ViewModels
 
         private static string GetAxisCode(Axis axis)
         {
-            if (axis is ColorChannel) return "C";
+            if (axis is ColorAxis) return "C";
             return axis.Name switch
             {
                 "Channel" => "C",

@@ -80,7 +80,7 @@ namespace MxPlot.UI.Avalonia.UITest
         private PathIcon? _allWarningIcon;     // ⚠ shown when All range is imperfect
 
         // ── TrackerPanel（MatrixPlotterと同じ構造）──
-        private Dictionary<string, AxisTracker> _axisTrackers = [];
+        private Dictionary<string, AxisTracker> _axisTrackers = new(StringComparer.OrdinalIgnoreCase);
         private StackPanel _trackerPanel;
 
         // ── Composite専用（新規）──
@@ -114,7 +114,7 @@ namespace MxPlot.UI.Avalonia.UITest
             _view = _orthoPanel.MainView;
 
             var dummyData = new MatrixData<ushort>(Scale2D.Pixels(64, 64),
-                new ColorChannel("Ch1", "Ch2", "Ch3"),
+                new ColorAxis("Ch1", "Ch2", "Ch3"),
                 Axis.Z(40, 0, 1),
                 Axis.Time(11, 0, 5));
             _view.MatrixData = dummyData;
@@ -564,34 +564,34 @@ namespace MxPlot.UI.Avalonia.UITest
             };
         }
 
-        private ColorChannel? ExtractColorChannel(IMatrixData data)
+        private ColorAxis? ExtractColorAxis(IMatrixData data)
         {
             if (data == null) return null;
 
-            var channels = data["Channel"] ?? data.Axes.First(a => a is ColorChannel);
+            var channels = data["Channel"] ?? data.Axes.First(a => a is ColorAxis);
             if(channels is null)  return null;
-            if (channels is ColorChannel cc)
+            if (channels is ColorAxis cc)
             {
                 return cc;
             }
             else
             {
-                //Upgrade to ColorChannel from a normal axis    
+                //Upgrade to ColorAxis from a normal axis    
                 var tags = new string[channels.Count];
                 for (int i = 0; i < channels.Count; i++)
                 {
                     tags[i] = $"Ch{i + 1}";
                 }
-                var c2 = new ColorChannel(tags);
+                var c2 = new ColorAxis(tags);
                 return c2;
             }
         }
 
         private Control BuildCompositeModeHeader()
         {
-            //Check availability of composite mode (Channel axis or ColorChannel axis must exist)
+            //Check availability of composite mode (Channel axis or ColorAxis axis must exist)
             if(_currentData is null) throw new InvalidOperationException("No data available to render as composite mode.");
-            ColorChannel chAxis = ExtractColorChannel(_currentData) ?? throw new InvalidOperationException("No axis available for composite mode.");
+            ColorAxis chAxis = ExtractColorAxis(_currentData) ?? throw new InvalidOperationException("No axis available for composite mode.");
 
             var compositeMenuBtn = new Button
             {

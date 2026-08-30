@@ -187,20 +187,13 @@ namespace MxPlot.Core.Processing
 
             var result = src.Reorder(order, deepCopy);
 
-            // Rebuild axis array: shrink the target axis, leave all others as-is.
+            // Rebuild axis array: shrink the target axis via Slice() (narrows tags/colours for a
+            // TaggedAxis/ColorAxis instead of dropping them; degrades a FovAxis to a plain Axis -
+            // see Axis.Slice's doc comment), leave all others as a plain Clone().
             var newAxes = src.Dimensions.Axes
-                .Select(a =>
-                {
-                    if (a.Name != axisName) return a.Clone();
-                    double newMin = a.Min;
-                    double newMax = a.Max;
-                    if (a.Step != 0)
-                    {
-                        newMin = a.Min + start * a.Step;
-                        newMax = newMin + (count - 1) * a.Step;
-                    }
-                    return new Axis(count, newMin, newMax, a.Name, a.Unit, a.IsIndexBased);
-                })
+                .Select(a => string.Equals(a.Name, axisName, StringComparison.OrdinalIgnoreCase)
+                    ? a.Slice(start, count)
+                    : a.Clone())
                 .ToArray();
             result.DefineDimensions(newAxes);
 
@@ -929,13 +922,26 @@ namespace MxPlot.Core.Processing
         /// If set to <c>true</c> (default), executes processing in parallel for high performance. 
         /// Set to <c>false</c> if the reducer function is not thread-safe.
         /// </param>
+        /// <param name="progress">
+        /// Optional progress reporter. Reports <c>-N</c> once to declare the number of output frames,
+        /// then <c>0 … N-1</c> as each output frame completes (the protocol MatrixPlotter's status-bar
+        /// reporter expects). One output frame is produced per combination of the surviving axes, so
+        /// collapsing the only axis yields a single step.
+        /// </param>
+        /// <param name="cancellationToken">
+        /// Cancels the operation. Checked once per output frame and, in parallel mode, per pixel row,
+        /// so a single large frame is still interruptible.
+        /// </param>
         /// <returns>A new <see cref="MatrixData{T}"/> instance with the target axis removed.</returns>
         /// <exception cref="ArgumentException">Thrown when the specified target axis does not exist.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is signalled.</exception>
          public static MatrixData<T> Reduce<T>(
             this MatrixData<T> src,
             string targetAxisName,
             ReducerFunc<T> reducer,
-            bool useParallel = true) 
+            bool useParallel = true,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default) 
             where T : unmanaged
         {
             var dims = src.Dimensions;
@@ -943,43 +949,13 @@ namespace MxPlot.Core.Processing
                 throw new ArgumentException($"Axis '{targetAxisName}' not found.");
 
             int targetOrder = dims.GetAxisOrder(targetAxisName);
-            var targetAxis = dims[targetOrder];
 
             // --- 1. Create mapping ---
-            var orders = Enumerable.Range(0, dims.AxisCount).ToList();
-            orders.Remove(targetOrder);
-            orders.Add(targetOrder);
-
-            var groups = new List<(int[] Frames, int[] Coords)>();
-            var pos = new int[dims.AxisCount];
-
-            void RecursiveLoop(int depth)
-            {
-                if (depth == orders.Count - 1)
-                {
-                    int count = targetAxis.Count;
-                    var frames = new int[count];
-                    for (int i = 0; i < count; i++)
-                    {
-                        pos[targetOrder] = i;
-                        frames[i] = dims.GetFrameIndexAt(pos);
-                    }
-                    groups.Add((frames, (int[])pos.Clone()));
-                    return;
-                }
-
-                int axisIndex = orders[depth];
-                int axisCount = dims[axisIndex].Count;
-                for (int i = 0; i < axisCount; i++)
-                {
-                    pos[axisIndex] = i;
-                    RecursiveLoop(depth + 1);
-                }
-            }
-            RecursiveLoop(0);
+            var groups = EnumerateCollapseGroups(dims, targetOrder);
 
             // --- 2. Execute reduce ---
 
+            progress?.Report(-groups.Count);
 
             int width = src.XCount;
             int height = src.YCount;
@@ -988,8 +964,13 @@ namespace MxPlot.Core.Processing
             var srcArrays = new T[src.FrameCount][];
             for (int i = 0; i < src.FrameCount; i++) srcArrays[i] = src.GetArray(i);
 
-            foreach (var (sourceIndices, coords) in groups)
+            var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken };
+
+            for (int g = 0; g < groups.Count; g++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var (sourceIndices, coords) = groups[g];
                 var resultPixels = new T[width * height];
                 var contextCoords = coords;
 
@@ -997,7 +978,7 @@ namespace MxPlot.Core.Processing
                 if (useParallel)
                 {
                     // [Parallel Mode]
-                    Parallel.For(0, height, y =>
+                    Parallel.For(0, height, parallelOptions, y =>
                     {
                         // Allocate stack space per thread
                         Span<T> valueSpan = stackalloc T[sourceIndices.Length];
@@ -1027,6 +1008,8 @@ namespace MxPlot.Core.Processing
 
                     for (int y = 0; y < height; y++)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
+
                         int rowOffset = y * width;
                         for (int x = 0; x < width; x++)
                         {
@@ -1044,6 +1027,7 @@ namespace MxPlot.Core.Processing
                 }
 
                 resultFrames.Add(resultPixels);
+                progress?.Report(g);
             }
 
             // --- 3. Build result ---
@@ -1055,6 +1039,60 @@ namespace MxPlot.Core.Processing
             resultMatrix.YUnit = src.YUnit;
 
             return resultMatrix;
+        }
+
+        /// <summary>
+        /// Enumerates every combination of the axes that survive when the axis at
+        /// <paramref name="targetOrder"/> is collapsed.
+        /// <para>
+        /// Each returned group carries the source frame indices along the collapsed axis
+        /// (<c>Frames</c>) plus the full axis-index vector of that combination (<c>Coords</c>).
+        /// </para>
+        /// </summary>
+        /// <remarks>
+        /// The group order is the contract: <c>Axes[0]</c> is the fastest-varying axis
+        /// (stride 1, see <see cref="DimensionStructure"/>), so the surviving axes must be
+        /// advanced with the first survivor varying fastest. That makes <c>groups[g]</c> line
+        /// up with the frame layout that <see cref="DimensionStructure.CreateAxesWithout"/>
+        /// produces, which is what every caller feeds into <c>DefineDimensions</c>.
+        /// Getting this backwards transposes the surviving axes whenever two or more of them
+        /// remain.
+        /// </remarks>
+        internal static List<(int[] Frames, int[] Coords)> EnumerateCollapseGroups(
+            DimensionStructure dims, int targetOrder)
+        {
+            var targetAxis = dims[targetOrder];
+
+            var survivors = new List<int>(dims.AxisCount - 1);
+            for (int i = 0; i < dims.AxisCount; i++)
+                if (i != targetOrder) survivors.Add(i);
+
+            int groupCount = 1;
+            foreach (int s in survivors) groupCount *= dims[s].Count;
+
+            var groups = new List<(int[] Frames, int[] Coords)>(groupCount);
+            var pos = new int[dims.AxisCount];
+
+            for (int g = 0; g < groupCount; g++)
+            {
+                int rem = g;
+                foreach (int s in survivors)   // survivors[0] varies fastest
+                {
+                    int count = dims[s].Count;
+                    pos[s] = rem % count;
+                    rem /= count;
+                }
+
+                var frames = new int[targetAxis.Count];
+                for (int i = 0; i < targetAxis.Count; i++)
+                {
+                    pos[targetOrder] = i;
+                    frames[i] = dims.GetFrameIndexAt(pos);
+                }
+                groups.Add((frames, (int[])pos.Clone()));
+            }
+
+            return groups;
         }
 
 

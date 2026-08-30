@@ -34,7 +34,11 @@ namespace MxPlot.Core.IO
 
         public WritableVirtualStrippedFrames(string filePath,
             int w, int h, long[][] offsets, long[][] bytesCounts, bool isYFlipped, bool isTemporary)
-            : base(filePath, w, h, offsets, bytesCounts, isYFlipped, MemoryMappedFileAccess.ReadWrite)
+            // Writable frames are only ever used for MxPlot's own output (temp vessels, clones,
+            // direct .mxd/OME-TIFF writes) -- never for reading a pre-existing external file --
+            // and MxPlot always writes host-native (little-endian) byte order, so this is never
+            // a big-endian source. Not exposed as a constructor parameter for that reason.
+            : base(filePath, w, h, offsets, bytesCounts, isYFlipped, isBigEndian: false, MemoryMappedFileAccess.ReadWrite)
         {
             IsTemporary = isTemporary;
         }

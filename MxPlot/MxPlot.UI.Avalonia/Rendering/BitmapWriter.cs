@@ -27,6 +27,7 @@ namespace MxPlot.UI.Avalonia.Rendering
     /// No conversion is required.
     /// </para>
     /// </remarks>
+    [Obsolete("Use LutBitmapWriter instead.")]
     public class BitmapWriter
     {
         #region Fields

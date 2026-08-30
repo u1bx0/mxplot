@@ -53,6 +53,28 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double ItemH = 20;        // textbox height (MinHeight=0 required)
 
         private const double BaseFontSize = 11; // base font size for labels and mode button; 
+
+        // Everything in the row except the two value boxes: mode button (+ its right margin),
+        // the Min/Max labels, the two search buttons, the column spacing and the grid margin.
+        private const double FixedPartsWidth = 52 + 6 + 26 + 26 + BtnSize * 2 + 6 * 2 + 4 * 2;
+
+        /// <summary>
+        /// Narrowest width at which the bar is still fully usable, i.e. both value boxes at
+        /// <see cref="MinBoxWidth"/>.
+        /// </summary>
+        public static double MinUsefulWidth => FixedPartsWidth + MinBoxWidth * 2;
+
+        /// <summary>
+        /// Width at which both value boxes reach <see cref="BoxWidth"/>; anything beyond this is
+        /// wasted space, because the boxes stop growing.
+        /// <para>
+        /// A host that places the bar in a proportional slot should clamp that slot to
+        /// [<see cref="MinUsefulWidth"/>, <see cref="PreferredWidth"/>]. An auto-sized slot must be
+        /// avoided: it measures the bar with unbounded width, which makes the star-sized value
+        /// boxes fall back to sizing on their content and visibly jump as the digit count changes.
+        /// </para>
+        /// </summary>
+        public static double PreferredWidth => FixedPartsWidth + BoxWidth * 2;
         // ── Controls ──────────────────────────────────────────────────────────
         private readonly Button _modeBtn;     // shows mode-picker flyout on click
         private readonly TextBox _minBox;
@@ -67,6 +89,7 @@ namespace MxPlot.UI.Avalonia.Controls
         private bool _isImperfect;          // true when All range is only partially scanned
         private int _invalidCount;          // number of frames not yet scanned
         private bool _roiAvailable;         // true when an ROI overlay is designated
+        private bool _forceReadOnly;        // Composite Channel-wise header: read-only even in Fixed
         private bool _updating;
         private double _lastMin = double.NaN;
         private double _lastMax = double.NaN;
@@ -216,7 +239,19 @@ namespace MxPlot.UI.Avalonia.Controls
         public void SetMode(ValueRangeMode mode)
         {
             _mode = mode;
-            bool editable = mode == ValueRangeMode.Fixed;
+            ApplyEditableState();
+            UpdateModeBtnLabel();
+            ModeChanged?.Invoke(this, mode);
+        }
+
+        /// <summary>
+        /// Applies the readonly / grayed / search-enabled visual state implied by the current
+        /// mode and <see cref="_forceReadOnly"/>. Split out of <see cref="SetMode"/> so that
+        /// <see cref="SetRangeEditable"/> can refresh it without firing <see cref="ModeChanged"/>.
+        /// </summary>
+        private void ApplyEditableState()
+        {
+            bool editable = _mode == ValueRangeMode.Fixed && !_forceReadOnly;
             _minBox.IsReadOnly = !editable;
             _maxBox.IsReadOnly = !editable;
             _minBox.Classes.Remove("grayed");
@@ -224,8 +259,9 @@ namespace MxPlot.UI.Avalonia.Controls
             if (!editable) { _minBox.Classes.Add("grayed"); _maxBox.Classes.Add("grayed"); }
             _searchMinBtn.IsEnabled = editable;
             _searchMaxBtn.IsEnabled = editable;
-            UpdateModeBtnLabel();
-            ModeChanged?.Invoke(this, mode);
+            // The mode menu is suppressed only by the explicit read-only override. In normal
+            // (LUT) use it must stay reachable whatever the current mode is.
+            _modeBtn.IsEnabled = !_forceReadOnly;
         }
 
         /// <summary>Convenience overload: <c>false</c> → Current, <c>true</c> → Fixed.</summary>
@@ -233,6 +269,13 @@ namespace MxPlot.UI.Avalonia.Controls
             => SetMode(isFixed ? ValueRangeMode.Fixed : ValueRangeMode.Current);
 
         /// <summary>Update the displayed min/max without firing <see cref="RangeChanged"/>.</summary>
+        /// <remarks>
+        /// <c>_updating</c> alone cannot deliver that guarantee: Avalonia raises
+        /// <see cref="TextBox.TextChanged"/> through the dispatcher, so the callback arrives after
+        /// this method has already cleared the flag. <see cref="_lastMin"/>/<see cref="_lastMax"/>
+        /// are therefore written *before* the boxes, and the handler drops any event whose parsed
+        /// value already matches them — see <see cref="RegisterBoxEvents"/>.
+        /// </remarks>
         public void SetRange(double min, double max)
         {
             _updating = true;
@@ -287,6 +330,11 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 if (!IsFixedRange || _updating) return;
                 if (!double.TryParse(box.Text, NumberStyles.Any, CultureInfo.InvariantCulture, out double v)) return;
+                // TextChanged is dispatched, not raised inline, so a programmatic SetRange lands
+                // here with _updating already cleared. The value it stored is the authority: an
+                // event that only restates it is an echo of our own write, not a user edit.
+                // (double.Equals treats NaN as equal to NaN, which is what we want here.)
+                if (v.Equals(isMin ? _lastMin : _lastMax)) return;
                 if (isMin) _lastMin = v; else _lastMax = v;
                 RangeChanged?.Invoke(this, (_lastMin, _lastMax));
             };
@@ -342,6 +390,21 @@ namespace MxPlot.UI.Avalonia.Controls
             _isImperfect = imperfect;
             _invalidCount = invalidCount;
             UpdateModeBtnLabel();
+        }
+
+        /// <summary>
+        /// Makes the whole range control non-interactive: the mode menu, the Min/Max boxes and the
+        /// search buttons.
+        /// Used by Composite mode's header bar in Channel-wise scope, where the displayed range is a
+        /// read-only union of the per-channel ranges and is therefore never edited directly.
+        /// LUT mode never calls this, so its behaviour is unchanged: the flag defaults to
+        /// <c>false</c> and <see cref="SetMode"/> is otherwise untouched.
+        /// </summary>
+        public void SetRangeEditable(bool editable)
+        {
+            if (_forceReadOnly == !editable) return;
+            _forceReadOnly = !editable;
+            ApplyEditableState();
         }
 
         /// <summary>

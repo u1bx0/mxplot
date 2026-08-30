@@ -197,6 +197,8 @@ namespace MxPlot.Extensions.Tiff
                     md = ushortData.ImageStack switch
                     {
                         VirtualFrames<ushort> vList => MatrixData<ushort>.CreateAsVirtualFrames(ushortData.Width, ushortData.Height, vList),
+                        List<ushort[]> mList when ushortData.MinValues != null && ushortData.MaxValues != null
+                            => new MatrixData<ushort>(ushortData.Width, ushortData.Height, mList, ushortData.MinValues, ushortData.MaxValues),
                         List<ushort[]> mList => new MatrixData<ushort>(ushortData.Width, ushortData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for ushort.")
                     };
@@ -206,6 +208,8 @@ namespace MxPlot.Extensions.Tiff
                     md = shortData.ImageStack switch
                     {
                         VirtualFrames<short> vList => MatrixData<short>.CreateAsVirtualFrames(shortData.Width, shortData.Height, vList),
+                        List<short[]> mList when shortData.MinValues != null && shortData.MaxValues != null
+                            => new MatrixData<short>(shortData.Width, shortData.Height, mList, shortData.MinValues, shortData.MaxValues),
                         List<short[]> mList => new MatrixData<short>(shortData.Width, shortData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for short.")
                     };
@@ -215,6 +219,8 @@ namespace MxPlot.Extensions.Tiff
                     md = floatData.ImageStack switch
                     {
                         VirtualFrames<float> vList => MatrixData<float>.CreateAsVirtualFrames(floatData.Width, floatData.Height, vList),
+                        List<float[]> mList when floatData.MinValues != null && floatData.MaxValues != null
+                            => new MatrixData<float>(floatData.Width, floatData.Height, mList, floatData.MinValues, floatData.MaxValues),
                         List<float[]> mList => new MatrixData<float>(floatData.Width, floatData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for float.")
                     };
@@ -224,6 +230,8 @@ namespace MxPlot.Extensions.Tiff
                     md = doubleData.ImageStack switch
                     {
                         VirtualFrames<double> vList => MatrixData<double>.CreateAsVirtualFrames(doubleData.Width, doubleData.Height, vList),
+                        List<double[]> mList when doubleData.MinValues != null && doubleData.MaxValues != null
+                            => new MatrixData<double>(doubleData.Width, doubleData.Height, mList, doubleData.MinValues, doubleData.MaxValues),
                         List<double[]> mList => new MatrixData<double>(doubleData.Width, doubleData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for double.")
                     };
@@ -233,6 +241,8 @@ namespace MxPlot.Extensions.Tiff
                     md = byteData.ImageStack switch
                     {
                         VirtualFrames<byte> vList => MatrixData<byte>.CreateAsVirtualFrames(byteData.Width, byteData.Height, vList),
+                        List<byte[]> mList when byteData.MinValues != null && byteData.MaxValues != null
+                            => new MatrixData<byte>(byteData.Width, byteData.Height, mList, byteData.MinValues, byteData.MaxValues),
                         List<byte[]> mList => new MatrixData<byte>(byteData.Width, byteData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for byte.")
                     };
@@ -242,6 +252,8 @@ namespace MxPlot.Extensions.Tiff
                     md = sbyteData.ImageStack switch
                     {
                         VirtualFrames<sbyte> vList => MatrixData<sbyte>.CreateAsVirtualFrames(sbyteData.Width, sbyteData.Height, vList),
+                        List<sbyte[]> mList when sbyteData.MinValues != null && sbyteData.MaxValues != null
+                            => new MatrixData<sbyte>(sbyteData.Width, sbyteData.Height, mList, sbyteData.MinValues, sbyteData.MaxValues),
                         List<sbyte[]> mList => new MatrixData<sbyte>(sbyteData.Width, sbyteData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for sbyte.")
                     };
@@ -251,6 +263,8 @@ namespace MxPlot.Extensions.Tiff
                     md = intData.ImageStack switch
                     {
                         VirtualFrames<int> vList => MatrixData<int>.CreateAsVirtualFrames(intData.Width, intData.Height, vList),
+                        List<int[]> mList when intData.MinValues != null && intData.MaxValues != null
+                            => new MatrixData<int>(intData.Width, intData.Height, mList, intData.MinValues, intData.MaxValues),
                         List<int[]> mList => new MatrixData<int>(intData.Width, intData.Height, mList),
                         _ => throw new InvalidDataException("Unknown ImageStack type for int.")
                     };
@@ -301,6 +315,31 @@ namespace MxPlot.Extensions.Tiff
             return builder.CreateWritable<T>(filePath);
         }
 
+        /// <summary>
+        /// Builds the Channel axis. When the OME-XML supplied per-channel names, colours or
+        /// emission wavelengths, the axis becomes a <see cref="ColorAxis"/> carrying them, so
+        /// the viewer can show real channel names and composite them in the acquisition colours.
+        /// Otherwise it stays a plain <see cref="Axis.Channel(int, string)"/> exactly as before.
+        /// </summary>
+        private static Axis BuildChannelAxis(int channels, HyperstackMetadata meta)
+        {
+            bool hasNames = meta.ChannelNames is { Length: > 0 } n && n.Length == channels;
+            bool hasColors = meta.ChannelColors is { Length: > 0 } c && c.Length == channels;
+            bool hasWaves = meta.ChannelWavelengths is { Length: > 0 } w && w.Length == channels;
+            if (!hasNames && !hasColors && !hasWaves)
+                return Axis.Channel(channels);
+
+            // ColorAxis needs a tag per channel even when the file only supplied colours.
+            var tags = hasNames
+                ? meta.ChannelNames!
+                : Enumerable.Range(0, channels).Select(i => $"Ch{i + 1}").ToArray();
+
+            var axis = new ColorAxis(tags);
+            if (hasColors) axis.AssignColors(meta.ChannelColors!);
+            if (hasWaves) axis.AssignWavelengths(meta.ChannelWavelengths!);
+            return axis;
+        }
+
         // =====================================================================
         // Shared helper: apply HyperstackMetadata → IMatrixData (scale / axis / unit)
         // Used by both Load() and CreateWritable<T>().
@@ -335,7 +374,7 @@ namespace MxPlot.Extensions.Tiff
                 var str = order.Substring(order.Length - 3, 3).ToArray();
                 foreach (var a in str)
                 {
-                    if (a == 'C' && channels > 1) axes.Add(Axis.Channel(channels));
+                    if (a == 'C' && channels > 1) axes.Add(BuildChannelAxis(channels, meta));
                     else if (a == 'Z' && zSlices > 1) axes.Add(Axis.Z(zSlices, originZ, originZ + (zSlices - 1) * pixelSizeZ, meta.UnitZ));
                     else if (a == 'T' && timePoints > 1) axes.Add(Axis.Time(timePoints, meta.StartTime, meta.StartTime + (timePoints - 1) * meta.TimeStep, meta.UnitTime));
                 }

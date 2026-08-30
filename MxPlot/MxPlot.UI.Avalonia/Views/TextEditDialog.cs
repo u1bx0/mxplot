@@ -86,7 +86,7 @@ namespace MxPlot.UI.Avalonia.Views
             fontRow.Children.Add(fontCombo);
             fontRow.Children.Add(new TextBlock
             {
-                Text = "Size:",
+                Text = "Size (px):",
                 FontSize = 11,
                 VerticalAlignment = VerticalAlignment.Center,
             });

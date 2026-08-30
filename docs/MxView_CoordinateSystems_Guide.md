@@ -1,7 +1,7 @@
 # MxView Coordinate Systems Guide
 
 **Created**: 2026-04-30  
-**Updated**: 2026-04-30  
+**Updated**: 2026-08-20  
 **Target**: `MxPlot.UI.Avalonia` — `MxView`, `RenderSurface`, `OverlayManager`
 
 ---
@@ -40,7 +40,7 @@ _mview.PointerMoved += (s, e) =>
 
 ## Layer 2 — World Coordinates (Bitmap-pixel Space)
 
-The coordinate system of the raw bitmap produced by `BitmapWriter<T>`.
+The coordinate system of the raw bitmap produced by the bitmap writer (`LutBitmapWriter`, or `CompositeBitmapWriter` in Composite mode).
 
 - **Origin**: top-left corner of the bitmap, `(0, 0)`.
 - **Axis direction**: X right, Y **down** (screen convention).

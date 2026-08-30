@@ -1,7 +1,7 @@
 ﻿# WinForms / WPF から Avalonia MxPlotter を使う手順
 
 **作成日**: 2026-4-19  
-**更新日**: 2026-07-16  
+**更新日**: 2026-08-20  
 **対象バージョン**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 10
 
 ---
@@ -439,6 +439,37 @@ arr[iy * width + ix] = newValue;    // → キャッシュが stale になる
 data.Invalidate();                  // このケースのみ明示的 Invalidate が必要
 plotter.Refresh();
 ```
+
+### データを差し替える場合
+
+`Refresh()` は現在のデータを再描画するものです。**別の** `IMatrixData` インスタンスに差し替える
+場合は、UI スレッド上で代入します。
+
+```csharp
+await Dispatcher.UIThread.InvokeAsync(() => plotter.MainView.MatrixData = newData);
+```
+
+形状が変わらないライブ更新では `Refresh()` を使ってください。データの差し替えはウィンドウの
+chrome（軸トラッカー・メニュー・レンジバー）を作り直し、オーバーレイの状態もリセットします。
+
+### 表示の制御（LUT・値範囲）
+
+WinForms/WPF ホストは自前の ViewModel を持たないため、`MatrixPlotter` の Facade プロパティを
+使います。
+
+```csharp
+await Dispatcher.UIThread.InvokeAsync(() =>
+{
+    plotter.Lut = ColorThemes.Jet;
+    plotter.RangeMode = ValueRangeMode.Fixed;
+    plotter.FixedRange = new RangeInfo(0, 4095);
+});
+```
+
+プロパティの全一覧、フレーム位置の API（`plotter.MatrixData.ActiveIndex`）、および現時点で
+`MainView` 経由が必要なプロパティについては、Usage Guide の
+[Controlling the Display from Code](./MatrixPlotter_Usage_Guide.md#controlling-the-display-from-code)
+を参照してください。
 
 ---
 

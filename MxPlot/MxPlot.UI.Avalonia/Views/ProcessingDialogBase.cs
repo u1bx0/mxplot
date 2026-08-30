@@ -30,12 +30,18 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>The "Replace data" checkbox. Visible by default; hide if not applicable.</summary>
         protected readonly CheckBox ReplaceDataCheckBox;
 
-        protected ProcessingDialogBase(string title, double width = 280)
+        /// <param name="isLinkWindow">
+        /// Pass <see langword="true"/> when the owning window is itself being kept live by a
+        /// Log Transform / Spatial Filter sync. "Replace data" is disabled in that case — since
+        /// that window's content is auto-recomputed from its source, overwriting it in place
+        /// would just get silently clobbered again the next time the source refreshes.
+        /// </param>
+        protected ProcessingDialogBase(string title, double width = 280, bool isLinkWindow = false)
         {
             Title = title;
             Width = width;
             SizeToContent = SizeToContent.Height;
-            CanResize = false;
+            CanResize = true;
             ShowInTaskbar = false;
             WindowStartupLocation = WindowStartupLocation.CenterOwner;
 
@@ -43,6 +49,31 @@ namespace MxPlot.UI.Avalonia.Views
                 "Replace data",
                 hint: "Overwrite the current data instead of opening a new window");
             ReplaceDataCheckBox.Margin = new Thickness(0, 0, 0, -7);
+            LockReplaceCheckBoxForLinkWindow(ReplaceDataCheckBox, isLinkWindow);
+        }
+
+        /// <summary>
+        /// Disables <paramref name="replaceCheckBox"/> and swaps in a tooltip explaining why,
+        /// when <paramref name="isLinkWindow"/> is <see langword="true"/>. Shared by every
+        /// "Replace data" checkbox in the app — <see cref="ProcessingDialogBase"/> subclasses
+        /// call it above; standalone dialogs that build their own checkbox instead of going
+        /// through this base class (<c>LogTransformDialog</c>, <c>ConvertValueTypeDialog</c>,
+        /// <c>ConvertComplexDialog</c>) call it directly too, so the disable-and-explain logic
+        /// only ever lives in this one place.
+        /// <para>
+        /// A plain <c>IsEnabled = false</c> alone would silently swallow the explanatory tooltip
+        /// — Avalonia (like most XAML frameworks) skips pointer/tooltip handling on disabled
+        /// controls by default. <see cref="ToolTip.ShowOnDisabledProperty"/> opts back in.
+        /// </para>
+        /// </summary>
+        internal static void LockReplaceCheckBoxForLinkWindow(CheckBox replaceCheckBox, bool isLinkWindow)
+        {
+            if (!isLinkWindow) return;
+            replaceCheckBox.IsEnabled = false;
+            replaceCheckBox.IsChecked = false;
+            ToolTip.SetTip(replaceCheckBox,
+                "Disabled: this window is itself kept live by a sync, so its content would be overwritten again on the next update");
+            ToolTip.SetShowOnDisabled(replaceCheckBox, true);
         }
 
         /// <summary>

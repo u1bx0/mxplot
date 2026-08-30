@@ -13,6 +13,7 @@ using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
+using MxPlot.UI.Avalonia.Utils;
 using MxPlot.UI.Avalonia.ViewModels;
 using System;
 using System.Collections.Generic;
@@ -38,66 +39,80 @@ namespace MxPlot.UI.Avalonia.Views
         // For managing the ActiveIndexChanged subscription across MatrixData swaps
         private IMatrixData? _currentData;
         private EventHandler? _activeIndexHandler;
+        private EventHandler? _dataScaleChangedHandler;
 
-        // ── LinkedSource: delegate UI features to a parent plotter ───────────
+        // Per-axis Sync-broadcast subscriptions (Axis.IndexChanged/ScaleChanged), keyed by the
+        // Axis instance itself rather than re-derived from _currentData.Axes at teardown time,
+        // since DefineDimensions can swap Axis instances out from under a live MatrixData.
+        private readonly Dictionary<Axis, (EventHandler IndexHandler, EventHandler ScaleHandler)> _axisSyncHandlers = new();
 
-        private MatrixPlotter? _linkedSource;
+        // ── Overlay axis context ─────────────────────────────────────────────
 
         /// <summary>
-        /// When non-null, this plotter is a derived view (e.g. XY projection) of the source.
-        /// Export menus, overlay token resolution, and FrameCount checks delegate to the source
-        /// rather than to this plotter's own <see cref="_currentData"/>.
-        /// Set by the parent on window creation; cleared on parent or child close.
-        /// Subscribes to the parent's <see cref="Refreshed"/> event so that overlay analysis
-        /// (line profiles, region statistics, ROI value range) updates when the parent changes frame.
+        /// The plotter whose axis positions overlay text tokens (<c>{N:p}</c> / <c>{N:i}</c>) should
+        /// read, when this window's own data has no axes of its own.
+        /// Set by the XY-projection window's owner; <c>null</c> for ordinary windows.
         /// </summary>
-        public MatrixPlotter? LinkedSource
-        {
-            get => _linkedSource;
-            internal set
-            {
-                if (_linkedSource != null)
-                    _linkedSource.Refreshed -= OnLinkedSourceRefreshed;
-                _linkedSource = value;
-                if (_linkedSource != null)
-                    _linkedSource.Refreshed += OnLinkedSourceRefreshed;
-            }
-        }
-
-        private void OnLinkedSourceRefreshed(object? sender, EventArgs e)
-        {
-            // Skip: XYProjection windows receive their data update via UpdateProjectionData
-            // (called from OnXYProjectionChanged after the new projection is computed).
-            // Calling RefreshAllOverlayAnalysis here would run against the stale MatrixData
-            // instance that has already been replaced by the time this event fires.
-        }
+        /// <remarks>
+        /// This is deliberately narrow: it feeds exactly one binding in
+        /// <c>MatrixPlotter.Overlays.cs</c> and never influences menus, export, or frame counts.
+        /// </remarks>
+        internal MatrixPlotter? OverlayAxisSource { get; set; }
 
         /// <summary>
         /// Updates the projection data displayed by this window without triggering a full
         /// <see cref="SetMatrixData"/> re-initialization.  Intended for XY-projection child
         /// windows whose <see cref="IMatrixData"/> instance changes on every parent frame
         /// navigation but whose overlay state (line profiles, ROI, statistics) must survive.
-        /// Only updates <see cref="_view"/> and then refreshes all overlay analysis.
+        /// Updates <see cref="_view"/> and <see cref="_currentData"/>, then refreshes all
+        /// derived state (overlay analysis, histograms).
         /// </summary>
         internal void UpdateProjectionData(IMatrixData data)
         {
-            _view.SetMatrixDataInternal(data);
+            // The Initializing scope is what makes this lightweight, and it is not optional:
+            // assigning MxView.MatrixData raises MxView.MatrixDataChanged, whose handler in
+            // WireViewEvents calls the full SetMatrixData unless that scope is held. Without it
+            // this method rebuilds the whole window - trackers, menu, range bar - on every call,
+            // which both defeats its purpose and makes the chrome flicker under a live feed.
+            using (_reentrancy.Begin(GuardContext.Initializing))
+                _view.SetMatrixDataInternal(data);
+
+            // _currentData - not _view.MatrixData - is what almost everything outside rendering
+            // itself reads (histogram/Composite bookkeeping below, the public MatrixData property
+            // that Sync sources and LinkedView recomputes read from). A plain field write has none
+            // of the cost the Initializing scope above is avoiding (no event, no rebuild), so there
+            // is no reason to leave it stale: doing so left the LUT-mode XY-projection window's
+            // histogram pinned to whatever frame was on screen when the window was first opened,
+            // since that window's only other _currentData sync (SyncCurrentDataFromView, in
+            // ApplyCompositeStateToProjectionWindow) is gated to the Composite-mode branch.
+            _currentData = data;
+
+            // Derived state that the suppressed re-init used to refresh as a side effect. Same set
+            // and same visibility gating as DoRefresh, since this is the other way a window's
+            // content changes without its own Refresh running.
             RefreshAllOverlayAnalysis();
+            RefreshHistograms();
+
+            // This window's content just changed, which is all Refreshed claims to mean - and
+            // windows live-derived from this one have nothing else to listen to. Without it a
+            // filter/log sync opened on an orthogonal Extract window never updates.
+            RaiseRefreshed();
         }
 
         /// <summary>
-        /// Names of axes in <see cref="LinkedSource"/> that are "consumed" by this derived view
-        /// and therefore excluded from delegation (e.g. <c>"Z"</c> for XY projection).
-        /// Used by export hosts to name the excluded axis in <see cref="Plugins.IRenderHost.ExcludedAxisName"/>.
+        /// Re-syncs <see cref="_currentData"/> with <see cref="_view"/>'s <c>MatrixData</c>.
+        /// <see cref="UpdateProjectionData"/> now keeps <c>_currentData</c> current on its own, so
+        /// callers that already go through it only need this for cases where <c>_view.MatrixData</c>
+        /// was assigned some other way (e.g. directly, bypassing <see cref="UpdateProjectionData"/>).
+        /// Existing calls right after <see cref="UpdateProjectionData"/> are harmless no-ops kept for
+        /// now rather than churned across every call site.
         /// </summary>
-        public IReadOnlyList<string>? LinkedSourceExcludedAxes { get; internal set; }
+        internal void SyncCurrentDataFromView()
+        {
+            _currentData = _view.MatrixData;
+        }
 
-        /// <summary>
-        /// The effective data for UI decisions (Export menus, FrameCount, overlay tokens).
-        /// When <see cref="LinkedSource"/> is set, returns its current data instead of this plotter's own.
-        /// </summary>
-        private IMatrixData? EffectiveData => LinkedSource?._currentData ?? _currentData;
-        private Dictionary<string, AxisTracker> _axisTrackers = [];
+        private Dictionary<string, AxisTracker> _axisTrackers = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Closes the hamburger menu panel if it is currently open.
@@ -126,6 +141,9 @@ namespace MxPlot.UI.Avalonia.Views
         private TextBlock _progressSep;  // "|" separator before progress area
         private TextBlock _progressText; // "Saving… 3/100"
         private ProgressBar _progressBar;
+        private Button _progressCancelBtn;       // "✕", visible only while the running operation is cancellable
+        private CancellationTokenSource? _progressCts;  // owned by the caller of BeginProgress, not by us
+        private Border _statusBarBorder;         // the input blocker stops above this so Cancel stays clickable
         private Border? _inputBlocker;           // transparent hit-test blocker during blocking operations
         private Action? _inputBlockerCleanup;    // removes the OverlayLayer.PropertyChanged handler
         private CancellationTokenSource? _toastCts;
@@ -139,11 +157,24 @@ namespace MxPlot.UI.Avalonia.Views
         // Value range bar + inline settings panel
         private ValueRangeBar _rangeBar;
         private Button _settingsBtn;
-        private Border _settingsPanel;
+        private Border _lutModeDetails;
+
+        // Mode-swappable header/details containers (RenderingMode.Lut vs .Composite).
+        // _headerContainer.Content / _detailsContainer.Content point at either the LUT
+        // toolbar/settings-panel (_lutHeaderRow / _settingsPanel, built once and never
+        // mutated) or the Composite header/panel (see MatrixPlotter.Composite.cs).
+        private ContentControl? _headerContainer;
+        private ContentControl? _detailsContainer;
+        private Control? _lutHeaderRow;
         private ToggleButton? _invertLutChk;
         private NumericUpDown? _levelNud;
         private HistogramPlotControl? _histogramPlot;
-        private CancellationTokenSource? _histogramCts;  // Cancel pending histogram calculation
+        // Separate from MatrixPlotter.Composite.cs's _compositeHistogramCts: the two histogram
+        // computations were once sharing a single field, so cancelling one could silently discard
+        // the other's in-flight pixel scan whenever both fired in the same tick (e.g. a stale
+        // _lutModeDetails.IsVisible flag from a prior LUT-mode session let UpdateHistogram() run
+        // -- and cancel this -- while in Composite mode; see EnterCompositeMode's IsVisible reset).
+        private CancellationTokenSource? _lutHistogramCts;  // Cancel pending LUT histogram calculation
 
         // Hamburger menu panel (OverlayLayer — renders inside the window's Skia surface
         // so alpha transparency correctly shows the underlying view content)
@@ -187,6 +218,12 @@ namespace MxPlot.UI.Avalonia.Views
             Scale = 1 << 2,
             Overlay = 1 << 3,
             Data = 1 << 4,
+            /// <summary>
+            /// Composite rendering state: the rendering mode itself plus the blend recipes,
+            /// range scope and per-channel range modes. Never set while Composite mode has not
+            /// been used, so LUT-only sessions behave exactly as before.
+            /// </summary>
+            Composite = 1 << 5,
         }
         private DirtyFlags _dirty;
         private bool _neverSaved;        // true when data has no SourcePath and has never been saved
@@ -212,17 +249,44 @@ namespace MxPlot.UI.Avalonia.Views
         // ── LUT/VR revert state ─────────────────────────────────────────────
         private Button? _lutVrRevertBtn;
 
-        /// <summary>Immutable snapshot of LUT/VR settings captured when data is loaded or last saved.</summary>
-        private sealed record LutVrSnapshot(
+        /// <summary>
+        /// Composite-mode half of <see cref="RenderSnapshot"/>. Captured only while Composite mode
+        /// is active, so it is <c>null</c> whenever the snapshot was taken in LUT mode.
+        /// </summary>
+        private sealed record CompositeSnapshot(
+            CompositeRangeScope Scope,
+            ValueRangeMode GlobalMode,
+            Rendering.BlendMode Blend,
+            Rendering.BlendRecipe[] Recipes,
+            ValueRangeMode[] ChannelModes,
+            string AxisName);
+
+        /// <summary>
+        /// Immutable snapshot of the whole display state — rendering mode, LUT, value range and
+        /// (when active) the Composite settings — captured when data is loaded or last saved.
+        /// <para>
+        /// <see cref="Mode"/> is what makes "which mode does this file open in?" and "revert to the
+        /// initial settings" the same question: reverting restores the mode the file was saved in,
+        /// which is exactly what <c>mxplot.render.mode</c> persists.
+        /// </para>
+        /// </summary>
+        private sealed record RenderSnapshot(
             string LutName, int LutLevel, bool Inverted,
-            ValueRangeMode VrMode, double VrMin, double VrMax);
-        private LutVrSnapshot? _lutVrSnapshot;
+            ValueRangeMode VrMode, double VrMin, double VrMax,
+            Rendering.RenderingMode Mode,
+            CompositeSnapshot? Composite);
+        private RenderSnapshot? _renderSnapshot;
 
         // ── Scale/Axis revert state ─────────────────────────────────────────
         private Button? _scaleRevertBtn;
 
-        /// <summary>Snapshot of X/Y scale and per-axis scale/unit captured when data is loaded or last saved.</summary>
-        private sealed record AxisSnapshot(double Min, double Max, string Unit, string Name);
+        /// <summary>
+        /// Snapshot of X/Y scale and per-axis scale/unit captured when data is loaded or last saved.
+        /// <paramref name="Tags"/> is the <see cref="TaggedAxis"/> element names (channel names) when
+        /// the axis carries them, else <c>null</c> — a plain axis has none. Renaming a channel from
+        /// the Composite panel edits those tags, so they have to be part of the revert state.
+        /// </summary>
+        private sealed record AxisSnapshot(double Min, double Max, string Unit, string Name, string[]? Tags, bool IsIndexBased);
         private sealed record ScaleSnapshot(
             double XMin, double XMax, string XUnit,
             double YMin, double YMax, string YUnit,
@@ -259,7 +323,7 @@ namespace MxPlot.UI.Avalonia.Views
         private IMatrixData? _cropUndoData;
         private DirtyFlags _cropUndoDirty;
         private string? _cropUndoTitle;
-        private LutVrSnapshot? _cropUndoLutVrSnapshot;
+        private RenderSnapshot? _cropUndoRenderSnapshot;
         private ScaleSnapshot? _cropUndoScaleSnapshot;
 
         // Active interactive action (Crop, etc.)
@@ -307,8 +371,10 @@ namespace MxPlot.UI.Avalonia.Views
         /// <param name="sourcePath">
         /// Optional path or sentinel value that controls save/close behavior:
         /// <list type="bullet">
-        ///   <item><c>null</c> (default) — no file association; close confirmation is suppressed
-        ///         and Save always opens a file picker.</item>
+        ///   <item><c>null</c> (default) — no file association, so Save always opens a file picker.
+        ///         Data that has never been written anywhere still counts as unsaved, so closing
+        ///         does ask to save first; set <see cref="SuppressCloseConfirmation"/> to skip that
+        ///         (an unattended script closing its own windows will want to).</item>
         ///   <item>A real file path — enables direct overwrite on Save and triggers a
         ///         "Save changes?" dialog on close when the data has been modified.</item>
         ///   <item>A colon-prefixed sentinel such as <c>":measurement"</c> — marks the window
@@ -331,9 +397,11 @@ namespace MxPlot.UI.Avalonia.Views
             string? title = null,
             string? sourcePath = null)
         {
+
             var vm = MatrixPlotterViewModel.Create(data, lut, title, sourcePath);
             var plotter = new MatrixPlotter { DataContext = vm };
             PlotWindowNotifier.NotifyCreated(plotter, data);
+
             return plotter;
         }
 
@@ -388,8 +456,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Raised on the UI thread whenever the plotter’s displayed content changes —
-        /// both when <see cref="Refresh"/> is called explicitly and when
-        /// <see cref="SetMatrixData"/> replaces the underlying data.
+        /// when <see cref="Refresh"/> is called explicitly, when <see cref="SetMatrixData"/>
+        /// replaces the underlying data, and when <see cref="UpdateProjectionData"/> swaps in a
+        /// newly derived frame.
         /// Used by <see cref="LinkRefresh"/> to propagate refresh across linked plotters
         /// that share underlying <c>T[]</c> frame data, and by filter sync windows
         /// to trigger downstream re-computation.
@@ -512,7 +581,7 @@ namespace MxPlot.UI.Avalonia.Views
         public void DiscardChanges()
         {
             ClearAllDirty();
-            if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
+            UpdateRenderRevertButtons();
             UpdateScaleRevertButton();
         }
 
@@ -554,23 +623,26 @@ namespace MxPlot.UI.Avalonia.Views
             if (_dirty.HasFlag(DirtyFlags.Scale)) parts.Append("\n  \u2022 Scale / Axes");
             if (_dirty.HasFlag(DirtyFlags.Overlay)) parts.Append("\n  \u2022 Overlays");
             if (_dirty.HasFlag(DirtyFlags.Data)) parts.Append("\n  \u2022 Data / Metadata");
+            if (_dirty.HasFlag(DirtyFlags.Composite)) parts.Append("\n  \u2022 Composite / Channels");
             ToolTip.SetTip(_dirtyBadge, parts.ToString());
         }
 
-        private void CaptureLutVrSnapshot()
+        private void CaptureRenderSnapshot()
         {
             if (_currentData == null)
             {
-                _lutVrSnapshot = null;
+                _renderSnapshot = null;
                 return;
             }
-            _lutVrSnapshot = new LutVrSnapshot(
+            _renderSnapshot = new RenderSnapshot(
                 LutName: _view.Lut?.Name ?? "",
                 LutLevel: _view.LutDepth,
                 Inverted: _view.IsInvertedColor,
                 VrMode: _rangeBar.Mode,
                 VrMin: _rangeBar.Mode == ValueRangeMode.Fixed ? _view.FixedMin : double.NaN,
-                VrMax: _rangeBar.Mode == ValueRangeMode.Fixed ? _view.FixedMax : double.NaN);
+                VrMax: _rangeBar.Mode == ValueRangeMode.Fixed ? _view.FixedMax : double.NaN,
+                Mode: _isCompositeMode ? Rendering.RenderingMode.Composite : Rendering.RenderingMode.Lut,
+                Composite: CaptureCompositeSnapshot());
         }
 
         private void CaptureScaleSnapshot(IMatrixData? data)
@@ -583,7 +655,10 @@ namespace MxPlot.UI.Avalonia.Views
             var axes = data.Axes;
             var axSnaps = new AxisSnapshot[axes.Count];
             for (int i = 0; i < axes.Count; i++)
-                axSnaps[i] = new AxisSnapshot(axes[i].Min, axes[i].Max, axes[i].Unit ?? "", axes[i].Name ?? "");
+                axSnaps[i] = new AxisSnapshot(
+                    axes[i].Min, axes[i].Max, axes[i].Unit ?? "", axes[i].Name ?? "",
+                    axes[i] is TaggedAxis tagged ? tagged.Tags.ToArray() : null,
+                    axes[i].IsIndexBased);
             _scaleSnapshot = new ScaleSnapshot(
                 data.XMin, data.XMax, data.XUnit ?? "",
                 data.YMin, data.YMax, data.YUnit ?? "",
@@ -595,7 +670,7 @@ namespace MxPlot.UI.Avalonia.Views
         private void SetLutDirty(bool dirty)
         {
             SetDirty(DirtyFlags.Lut, dirty);
-            UpdateLutVrRevertButton();
+            UpdateRenderRevertButtons();
         }
 
         /// <summary>Marks VR properties (mode, fixed min/max) dirty/clean and updates the revert button.
@@ -603,14 +678,25 @@ namespace MxPlot.UI.Avalonia.Views
         private void SetVrDirty(bool dirty)
         {
             SetDirty(DirtyFlags.Vr, dirty);
-            UpdateLutVrRevertButton();
+            UpdateRenderRevertButtons();
         }
 
-        private void UpdateLutVrRevertButton()
+        /// <summary>
+        /// Shows or hides the revert button in whichever header is currently mounted. LUT mode and
+        /// Composite mode each own an instance, in the same toolbar slot, driven by one condition —
+        /// there is a single "revert the display state" concept, not one per mode.
+        /// <para>
+        /// <see cref="DirtyFlags.Composite"/> can only be set once Composite mode has been used, so
+        /// a session that never leaves LUT mode sees exactly the previous behaviour.
+        /// </para>
+        /// </summary>
+        private void UpdateRenderRevertButtons()
         {
             if (_reentrancy.IsActive(GuardContext.Initializing)) return;
-            if (_lutVrRevertBtn != null)
-                _lutVrRevertBtn.IsVisible = (_dirty & (DirtyFlags.Lut | DirtyFlags.Vr)) != 0 && _lutVrSnapshot != null;
+            bool show = _renderSnapshot != null
+                     && (_dirty & (DirtyFlags.Lut | DirtyFlags.Vr | DirtyFlags.Composite)) != 0;
+            if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = show;
+            if (_compositeRevertBtn != null) _compositeRevertBtn.IsVisible = show;
         }
 
         /// <summary>Shows or hides the Scale revert button in the Scale tab. Refreshes the tab to add/remove it.</summary>
@@ -666,12 +752,137 @@ namespace MxPlot.UI.Avalonia.Views
             _scaleTabBody.Children.Add(_scaleRevertBtn);
         }
 
-        private void RevertLutVr()
+        /// <summary>
+        /// Restores the whole display state — rendering mode, LUT, value range, Composite settings
+        /// and channel names — to the snapshot taken when the data was loaded or last saved.
+        /// <para>
+        /// Because <see cref="RenderSnapshot.Mode"/> is part of the snapshot, reverting can also
+        /// switch modes: a file saved in LUT mode comes back to LUT even if the user is currently in
+        /// Composite, and vice versa. That is the same fact <c>mxplot.render.mode</c> records, so
+        /// "revert" and "which mode does this file open in" stay consistent by construction.
+        /// </para>
+        /// <para>
+        /// The whole body runs under <see cref="GuardContext.Initializing"/>, which suppresses the
+        /// <see cref="SetDirty"/> and <c>SaveViewSettings</c> calls that the re-entered
+        /// <see cref="EnterCompositeMode"/>/<see cref="ExitCompositeMode"/> would otherwise make.
+        /// </para>
+        /// </summary>
+        private void RevertRenderState()
         {
-            var snap = _lutVrSnapshot;
+            var snap = _renderSnapshot;
             if (snap == null || _currentData == null) return;
 
-            using var _ini  = _reentrancy.Begin(GuardContext.Initializing);
+            using (_reentrancy.Begin(GuardContext.Initializing))
+            {
+                RestoreLutAndVr(snap);
+                RestoreChannelTags();
+                RestoreRenderMode(snap);
+                _orthoController.SyncRenderSettings();
+            }
+
+            SaveViewSettings();
+            SetDirty(DirtyFlags.Lut | DirtyFlags.Vr | DirtyFlags.Composite, false);
+            // Entering Composite can promote the Channel axis and rename channels, both of which
+            // mark Scale dirty. Reverting undoes them, but other Scale edits may still be pending,
+            // so ask the data rather than clearing the flag outright.
+            if (ScaleMatchesSnapshot()) SetDirty(DirtyFlags.Scale, false);
+            UpdateRenderRevertButtons();
+            UpdateScaleRevertButton();
+        }
+
+        /// <summary>
+        /// Whether the live X/Y scale and every axis (scale, unit, name and element tags) still
+        /// equal <see cref="_scaleSnapshot"/>. Values are compared with exact equality because the
+        /// revert paths assign the snapshot's values verbatim.
+        /// </summary>
+        private bool ScaleMatchesSnapshot()
+        {
+            var snap = _scaleSnapshot;
+            if (snap == null || _currentData == null) return false;
+
+            if (_currentData.XMin != snap.XMin || _currentData.XMax != snap.XMax
+                || (_currentData.XUnit ?? "") != snap.XUnit
+                || _currentData.YMin != snap.YMin || _currentData.YMax != snap.YMax
+                || (_currentData.YUnit ?? "") != snap.YUnit) return false;
+
+            var axes = _currentData.Axes;
+            if (axes.Count != snap.Axes.Length) return false;
+            for (int i = 0; i < axes.Count; i++)
+            {
+                var a = axes[i];
+                var s = snap.Axes[i];
+                if (a.Min != s.Min || a.Max != s.Max
+                    || (a.Unit ?? "") != s.Unit || (a.Name ?? "") != s.Name) return false;
+
+                var liveTags = a is TaggedAxis tagged ? tagged.Tags : null;
+                if ((liveTags == null) != (s.Tags == null)) return false;
+                if (liveTags != null && s.Tags != null && !liveTags.SequenceEqual(s.Tags)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Puts the rendering mode back to the snapshot's, restoring the Composite recipes/scope/modes
+        /// on the way in. Entering is delegated to <see cref="EnterCompositeMode"/> rather than
+        /// duplicated: it is idempotent and already rebuilds the header, the channel rows and the
+        /// orthogonal views from the fields set here.
+        /// </summary>
+        private void RestoreRenderMode(RenderSnapshot snap)
+        {
+            if (snap.Mode == Rendering.RenderingMode.Composite && snap.Composite is { } comp)
+            {
+                var channelAxis = _currentData?.Axes.FindAxis(comp.AxisName);
+                if (channelAxis == null) return;
+
+                // The panel is rebuilt wholesale below; keep it open if it was open.
+                bool panelWasOpen = _compositeSettingsPanel?.IsVisible == true;
+
+                _compositeRecipes = comp.Recipes.ToList();
+                _compositeBlendMode = comp.Blend;
+                _compositeScope = comp.Scope;
+                _compositeGlobalMode = comp.GlobalMode;
+                _compositeRestoredModes = comp.ChannelModes;
+                EnterCompositeMode(channelAxis);
+
+                if (panelWasOpen && _compositeSettingsPanel != null && _compositeSettingsBtn != null)
+                {
+                    _compositeSettingsPanel.IsVisible = true;
+                    _compositeSettingsBtn.Content = "▴";
+                    _compositeSettingsBtn.Background = Brushes.LightGray;
+                    UpdateCompositeHistograms();
+                }
+            }
+            else
+            {
+                ExitCompositeMode();
+                DemoteColorAxisIfPromoted();
+            }
+        }
+
+        /// <summary>
+        /// Rewrites the <see cref="TaggedAxis"/> element names (channel names) from
+        /// <see cref="_scaleSnapshot"/>. Shared by <see cref="RevertRenderState"/> and
+        /// <see cref="RevertScale"/>: a channel rename is reachable from the Composite panel but is
+        /// axis metadata, so both reverts have to undo it.
+        /// </summary>
+        private void RestoreChannelTags()
+        {
+            var snap = _scaleSnapshot;
+            if (snap == null || _currentData == null) return;
+
+            var axes = _currentData.Axes;
+            for (int i = 0; i < snap.Axes.Length && i < axes.Count; i++)
+            {
+                var tags = snap.Axes[i].Tags;
+                if (tags == null || axes[i] is not TaggedAxis tagged) continue;
+                if (tagged.Tags.Count != tags.Length) continue;
+                for (int j = 0; j < tags.Length; j++)
+                    if (tagged.Tags[j] != tags[j]) tagged.SetTag(j, tags[j]);
+            }
+        }
+
+        private void RestoreLutAndVr(RenderSnapshot snap)
+        {
             // LUT
             if (!string.IsNullOrEmpty(snap.LutName))
             {
@@ -680,7 +891,7 @@ namespace MxPlot.UI.Avalonia.Views
                     var lut = ColorThemes.Get(snap.LutName);
                     _view.Lut = lut;
                     _lutSelector.SelectLut(lut);
-                    Icon = _lutSelector.SelectedIcon;
+                    UpdateWindowIcon();
                     if (DataContext is ViewModels.MatrixPlotterViewModel vm) vm.Lut = lut;
                 }
                 catch { }
@@ -710,12 +921,6 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 _rangeBar.SetMode(snap.VrMode);
             }
-            _orthoController.SyncRenderSettings();
-            SaveViewSettings();
-
-            SetDirty(DirtyFlags.Lut, false);
-            SetDirty(DirtyFlags.Vr, false);
-            if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
         }
 
         private void RevertScale()
@@ -739,6 +944,7 @@ namespace MxPlot.UI.Avalonia.Views
                 axes[i].Unit = snap.Axes[i].Unit;
                 axes[i].Name = snap.Axes[i].Name;
             }
+            RestoreChannelTags();
 
             if (_view.IsFitToView) _view.FitToView(); else _view.InvalidateSurface();
             _orthoController.RefreshCrosshairAndSlices();
@@ -813,6 +1019,12 @@ namespace MxPlot.UI.Avalonia.Views
                 _isRefreshing = true;
                 try
                 {
+                    // A range derived from pixel content has to follow a content change, the same
+                    // way the overlay analysis and histogram below do. Settled before anything
+                    // renders so a single pass shows the new range, and so the side views rebuilt
+                    // further down are cut against it rather than against the previous one.
+                    RefreshAllModeRange();
+
                     _view.Refresh();
 
                     if (rebuildOrthogonalData && (_orthoPanel.ShowBottom || _orthoPanel.ShowRight))
@@ -838,6 +1050,16 @@ namespace MxPlot.UI.Avalonia.Views
                     }
 
                     RefreshAllOverlayAnalysis();
+
+                    // The histogram is derived from current-frame pixel data, same category as
+                    // overlay analysis above -- keep it in sync with whatever triggered this
+                    // Refresh (explicit data-content change, or the MxView.RefreshRequested bypass
+                    // when MainView.Refresh() is called directly). Each call still gates on its own
+                    // panel's visibility so a collapsed panel costs nothing.
+                    if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
+                        UpdateHistogram();
+                    UpdateCompositeHistograms();
+
                     Refreshed?.Invoke(this, EventArgs.Empty);
                 }
                 finally { _isRefreshing = false; }
@@ -904,8 +1126,37 @@ namespace MxPlot.UI.Avalonia.Views
             var child = Create(data, lut ?? _view.Lut, title);
             child.IsSecondaryWindow = true;
             PlotWindowNotifier.SetParentLink(child, this);
+            PositionBesideParent(child, this);
             if (linkRefresh) LinkRefresh(child);
             return child;
+        }
+
+        /// <summary>
+        /// Places <paramref name="child"/> beside <paramref name="parent"/> so a newly opened
+        /// linked/derived window doesn't land directly on top of the window that spawned it.
+        /// Prefers the right side, clamped to the desktop's own right edge - so it never spills
+        /// off-screen, overlapping the parent more instead when there isn't enough room. Only
+        /// switches to the left side (clamped the same way) when the right side would place the
+        /// window off-screen entirely.
+        /// </summary>
+        internal static void PositionBesideParent(MatrixPlotter child, MatrixPlotter parent)
+        {
+            var screen = parent.Screens?.ScreenFromWindow(parent);
+            if (screen == null) return;
+
+            double scaling = screen.Scaling;
+            var area = screen.WorkingArea;
+            int gap = (int)Math.Round(8 * scaling);
+            int parentWidthPx = (int)Math.Round(parent.Width * scaling);
+            int childWidthPx = (int)Math.Round(child.Width * scaling);
+
+            int rightX = parent.Position.X + parentWidthPx + gap;
+            int x = rightX < area.Right
+                ? Math.Min(rightX, area.Right - childWidthPx)
+                : Math.Max(parent.Position.X - childWidthPx - gap, area.X);
+
+            child.WindowStartupLocation = WindowStartupLocation.Manual;
+            child.Position = new PixelPoint(x, parent.Position.Y);
         }
 
         private void OnLinkedChildRefreshed(object? sender, EventArgs e) => Refresh();
@@ -966,17 +1217,13 @@ namespace MxPlot.UI.Avalonia.Views
 
         protected override void OnClosed(EventArgs e)
         {
+            // Stops any in-flight OrthogonalViewController background compute (ComputeXYProjectionAsync,
+            // UpdateSlicesAsync) from posting its result back once this window is gone -- a completion
+            // that raced past Close() used to go on to touch now-disposed window-level state (e.g.
+            // PositionBesideParent's Screens access threw ObjectDisposedException).
+            _orthoController.CancelPendingWork();
             base.OnClosed(e);
             CloseXYProjectionWindow();
-            // Clear LinkedSource back-reference so children don't hold stale parent refs
-            foreach (var child in _linkedChildren.ToArray())
-            {
-                if (child.LinkedSource == this)
-                {
-                    child.LinkedSource = null;
-                    child.LinkedSourceExcludedAxes = null;
-                }
-            }
             CloseLinkedChildren();
             CloseAllLineProfiles();
             CloseCacheMonitor();
@@ -992,7 +1239,7 @@ namespace MxPlot.UI.Avalonia.Views
                 Title = vm.Title;
                 _view.Lut = vm.Lut;
                 _lutSelector.SelectLut(vm.Lut);
-                Icon = _lutSelector.SelectedIcon;
+                UpdateWindowIcon();
                 SetMatrixData(vm.MatrixData);
 
                 vm.PropertyChanged += (_, pe) =>
@@ -1007,8 +1254,46 @@ namespace MxPlot.UI.Avalonia.Views
                             _view.Lut = vm.Lut;
                             _lutSelector.SelectLut(vm.Lut);
                             break;
-                        case nameof(vm.ActiveFrame):
-                            _view.FrameIndex = vm.ActiveFrame;
+                        case nameof(vm.RangeMode):
+                            // Calls the layer-sync primitive directly (not the SyncApply* wrapper),
+                            // so this still propagates to any Linked Plotter Sync group — see
+                            // ApplyRangeModeToLayers's doc comment. Initializing is excluded too:
+                            // SyncViewModelFromView (called at the end of SetMatrixData, still inside
+                            // its Initializing scope) pushes the already-finalized View state into the
+                            // VM, and that push should not turn around and re-apply the same value
+                            // back onto View/RangeBar a second time.
+                            if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.SyncApply | GuardContext.Initializing)) break;
+                            // The same push also arrives outside every guard, right after a
+                            // RangeBar-driven mode change (ApplyViewMutationAtomically's closing
+                            // sync), when the layers already hold this mode. ValueRangeBar.SetMode
+                            // has no equality guard, so re-applying it would run the whole
+                            // ModeChanged handler a second time for no reason.
+                            if (_rangeBar.Mode == vm.RangeMode) break;
+                            ApplyRangeModeToLayers(vm.RangeMode);
+                            break;
+                        case nameof(vm.IsFixedRange):
+                            if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.SyncApply | GuardContext.Initializing)) break;
+                            // IsFixedRange cannot name a mode — Fixed, All and Roi all read true —
+                            // so it may only act when it genuinely disagrees with the mode in
+                            // effect. Without this test, entering All or Roi (both of which set
+                            // IsFixedRange true) would upsync to the VM and be collapsed straight
+                            // back to Fixed. Set vm.RangeMode to ask for a specific mode.
+                            if (vm.IsFixedRange == (_rangeBar.Mode != ValueRangeMode.Current)) break;
+                            ApplyRangeModeToLayers(vm.IsFixedRange ? ValueRangeMode.Fixed : ValueRangeMode.Current);
+                            if (vm.IsFixedRange) ApplyFixedRangeToLayers(vm.FixedMin, vm.FixedMax);
+                            break;
+                        case nameof(vm.FixedMin):
+                        case nameof(vm.FixedMax):
+                            if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.SyncApply | GuardContext.Initializing)) break;
+                            ApplyFixedRangeToLayers(vm.FixedMin, vm.FixedMax);
+                            break;
+                        case nameof(vm.IsInvertedColor):
+                            if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.SyncApply | GuardContext.Initializing)) break;
+                            ApplyInvertedToLayers(vm.IsInvertedColor);
+                            break;
+                        case nameof(vm.LutDepth):
+                            if (_reentrancy.IsActive(GuardContext.UiSync | GuardContext.SyncApply | GuardContext.Initializing)) break;
+                            ApplyLutDepthToLayers(vm.LutDepth);
                             break;
                         case nameof(vm.Title):
                             Title = vm.Title;
@@ -1027,8 +1312,66 @@ namespace MxPlot.UI.Avalonia.Views
         /// and wires <c>ActiveIndexChanged</c> so tracker interactions update <see cref="MxView.FrameIndex"/>.
         /// Called internally whenever <see cref="MxView.MatrixData"/> or <c>ViewModel.MatrixData</c> changes.
         /// </summary>
-        private void SetMatrixData(IMatrixData? data)
+        /// <summary>
+        /// Pushes the current, already-finalized View/Core display state into the ViewModel.
+        /// Called at the end of <see cref="SetMatrixData"/> (still inside its
+        /// <see cref="GuardContext.Initializing"/> scope), because <see cref="SetMatrixData"/>
+        /// establishes initial display defaults (e.g. "All" range mode for in-memory multi-frame
+        /// data, or values restored from <c>IMatrixData.Metadata</c> via
+        /// <see cref="RestoreViewSettings"/>) by writing directly to <c>_view</c>/<c>_rangeBar</c>,
+        /// never through the VM. Without this, a freshly constructed <see cref="MatrixPlotter"/>'s
+        /// ViewModel — and therefore the external-control Facade — would report stale
+        /// <c>[ObservableProperty]</c> defaults instead of the data's actual initial display state.
+        /// </summary>
+        private void SyncViewModelFromView()
         {
+            if (DataContext is not MatrixPlotterViewModel vm) return;
+            if (_view.Lut != null) vm.Lut = _view.Lut;
+            // RangeMode before IsFixedRange: the bar owns the mode, the View only mirrors the
+            // pinned/unpinned half of it, so the specific value has to land first for the
+            // IsFixedRange case's agreement test to see the mode that is actually in effect.
+            vm.RangeMode = _rangeBar.Mode;
+            vm.IsFixedRange = _view.IsFixedRange;
+            vm.ApplyFixedRange(_view.FixedMin, _view.FixedMax);
+            vm.IsInvertedColor = _view.IsInvertedColor;
+            vm.LutDepth = _view.LutDepth;
+        }
+
+        /// <summary>
+        /// Runs <paramref name="mutate"/> under <see cref="GuardContext.UiSync"/> so that any
+        /// individual <c>_view.Lut</c>/<c>IsFixedRange</c>/<c>FixedMin</c>/<c>FixedMax</c>
+        /// assignment inside it cannot trigger a reentrant round-trip (View → VM upsync →
+        /// <see cref="OnDataContextChanged"/>'s switch → back down into View/RangeBar) while
+        /// <paramref name="mutate"/> is still in the middle of setting several of these in
+        /// sequence — that reentrant write can otherwise stomp a property <paramref name="mutate"/>
+        /// hasn't gotten to yet with the ViewModel's stale prior value (the exact mechanism behind
+        /// a bug where the first Fixed-mode transition after opening a plotter reset FixedMax to
+        /// its unset default instead of the real auto-computed max). Once <paramref name="mutate"/>
+        /// completes, <see cref="SyncViewModelFromView"/> pushes the final, correct state into the
+        /// ViewModel explicitly (the UiSync guard suppressed the reactive upsync during the call).
+        /// </summary>
+        private void ApplyViewMutationAtomically(Action mutate)
+        {
+            using (_reentrancy.Begin(GuardContext.UiSync))
+            {
+                mutate();
+            }
+            SyncViewModelFromView();
+        }
+
+        /// <param name="data">The data to display.</param>
+        /// <param name="closeSyncFollowers">
+        /// Pass <see langword="true"/> when this call is a deliberate "Replace data" user action
+        /// (Log Transform / Normalize / Convert / Crop / Grayscale / Extract / Reverse Stack, etc.)
+        /// rather than a routine internal refresh. Closes every window currently syncing its
+        /// content from this one first — see <see cref="CloseSyncFollowers"/> for why a follower's
+        /// subscriptions would otherwise silently go stale. Leave <see langword="false"/> (default)
+        /// for internal recompute ticks (sync followers refreshing themselves, orthogonal live-extract
+        /// refresh) where the "same logical view, new data" relationship should be preserved.
+        /// </param>
+        private void SetMatrixData(IMatrixData? data, bool closeSyncFollowers = false)
+        {
+            if (closeSyncFollowers) CloseSyncFollowers();
             using var _ = _reentrancy.Begin(GuardContext.Initializing);
 
             // Capture current state before replacing so we can decide whether to preserve view settings.
@@ -1040,7 +1383,7 @@ namespace MxPlot.UI.Avalonia.Views
             ResumeSnapshot? resume = null;
             if (ResumeSettingsEnabled && _currentData != null)
             {
-                var axisIndices = new System.Collections.Generic.Dictionary<string, int>();
+                var axisIndices = new System.Collections.Generic.Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in _axisTrackers)
                     axisIndices[kv.Key] = kv.Value.Axis.Index;
                 string? frozenAxis = null;
@@ -1055,6 +1398,11 @@ namespace MxPlot.UI.Avalonia.Views
                 _currentData.ActiveIndexChanged -= _activeIndexHandler;
                 _activeIndexHandler = null;
             }
+            if (_currentData != null && _dataScaleChangedHandler != null)
+            {
+                _currentData.ScaleChanged -= _dataScaleChangedHandler;
+                _dataScaleChangedHandler = null;
+            }
 
             // Dispose any active action — its ROIs were created for the old data context.
             if (_activeAction != null)
@@ -1066,17 +1414,33 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             _currentData = data;
+            if (data != null)
+            {
+                _dataScaleChangedHandler = (_, _) =>
+                {
+                    if (_reentrancy.IsActive(GuardContext.SyncApply | GuardContext.Initializing)) return;
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Min, data.XMin));
+                    SyncScaleChanged?.Invoke(this, ("X", ScaleParameter.Max, data.XMax));
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Min, data.YMin));
+                    SyncScaleChanged?.Invoke(this, ("Y", ScaleParameter.Max, data.YMax));
+                };
+                data.ScaleChanged += _dataScaleChangedHandler;
+            }
 
             // Invalidate menu panel so it rebuilds with correct save label on next open
-            if (_menuPanel?.Parent is Panel parent)
-                parent.Children.Remove(_menuPanel);
-            _menuPanel = null;
+            InvalidateMenuPanel();
 
             // Clearing removes children from the visual tree → OnDetachedFromVisualTree
             // stops any running animations cleanly.
             _orthoController.Deactivate();
+            UnwireAllAxisSync();
             _trackerPanel.Children.Clear();
             _axisTrackers.Clear();
+
+            // A fresh dataset never inherits a stale Composite chrome/state from the
+            // previous one; RestoreViewSettings (below) re-enters Composite mode explicitly
+            // if the new data's metadata calls for it.
+            ResetCompositeUiState();
 
             // Reset FrameIndex to 0 BEFORE swapping MatrixData.
             // If the new data has fewer frames than the current FrameIndex (e.g. single-frame
@@ -1093,9 +1457,7 @@ namespace MxPlot.UI.Avalonia.Views
             // Sync multi-frame UI first so SetMode sees the correct _isMultiFrame state
             bool isMultiFrame = data is { FrameCount: > 1 };
             _rangeBar.SetMultiFrame(isMultiFrame);
-            _view.ExtractFrameAllowed = isMultiFrame;
-            _orthoPanel.BottomView.ExtractFrameAllowed = isMultiFrame;
-            _orthoPanel.RightView.ExtractFrameAllowed = isMultiFrame;
+            UpdateExtractFrameAllowed();
             bool isHyperstack = data is { Axes.Count: > 1 };
             _view.ExtractDimensionAllowed = isHyperstack;
 
@@ -1110,20 +1472,32 @@ namespace MxPlot.UI.Avalonia.Views
                     ? ValueRangeMode.All
                     : ValueRangeMode.Current;
                 _rangeBar.SetMode(defaultMode);
+
+                // SetMode's ModeChanged handler (MatrixPlotter.Initialization.cs) only calls
+                // ApplyAllModeRange -- which is what seeds the "unscanned frame count" badge via
+                // SetImperfect -- on its All-mode branch; the Current branch just scans the current
+                // frame's own range and never touches it. So when defaultMode resolves to Current
+                // (any virtual dataset, per the condition above), the badge is left at its unset
+                // default and stays blank until the user happens to switch to All mode once. Seed
+                // it explicitly here regardless of which mode won (a no-op for non-virtual data).
+                if (data != null)
+                    RefreshAllModeImperfectBadge(data);
             }
 
             if (data == null || data.Axes.Count == 0) //no data or single-frame data
             {
                 _trackerPanel.IsVisible = false;
                 CloseCacheMonitor();
-                if (data != null) RestoreViewSettings(data, restoreVR);
-                CaptureLutVrSnapshot();
+                if (data != null) RestoreViewSettings(data, restoreVR, isFirstLoad);
+                CaptureRenderSnapshot();
                 CaptureScaleSnapshot(data);
                 ClearAllDirty();
                 if (data != null && SourcePath == null) { _neverSaved = true; IsModifiedChanged?.Invoke(this, EventArgs.Empty); }
-                if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
+                UpdateRenderRevertButtons();
                 UpdateScaleRevertButton();
                 RefreshInfoTab();
+                SyncViewModelFromView();
+                RefreshHistograms();
                 RaiseRefreshed();
                 return;
             }
@@ -1133,23 +1507,18 @@ namespace MxPlot.UI.Avalonia.Views
             _activeIndexHandler = (_, _) =>
             {
                 _view.FrameIndex = data.ActiveIndex;
+                if (_isCompositeMode) ApplyCompositeFrameIndices();
                 _orthoController.UpdateFrameIndicator();
-                _orthoController.RefreshSlices();
+                // Fires for every axis uniformly, the frozen/orthogonal axis's own AxisTracker/
+                // AxisIndicator included -- RefreshSlicesIfAxisChanged skips the recompute when
+                // that's the only axis that moved, since it can't change what XZ/YZ/the XY-
+                // projection window show (see its doc comment).
+                _orthoController.RefreshSlicesIfAxisChanged();
                 RefreshAllOverlayAnalysis();
-                // All mode: update the displayed global range whenever the active frame changes.
-                // Virtual: pre-populate the cache for this frame via MMF — in All mode IsFixedRange=true
-                //          so MxView's render never calls GetValueRange; we must trigger it manually.
-                // InMemory: GetArray() invalidates a frame's min/max cache on write, so dirty frames
-                //           are rescanned by GetGlobalValueRange() — forceRefresh only touches invalid
-                //           entries, so this is O(dirty frames) and safe to call on every index change.
-                if (_rangeBar.Mode == ValueRangeMode.All)
-                {
-                    if (data.IsVirtual)
-                        data.GetValueRange(data.ActiveIndex); // caches this frame's range (MMF access, usually fast)
-                    ApplyAllModeRange();
-                }
+                // All mode: the displayed global range must follow the new frame too.
+                RefreshAllModeRange();
                 // Current mode: update range bar to reflect the new frame's range
-                else if (_rangeBar.Mode == ValueRangeMode.Current)
+                if (_rangeBar.Mode == ValueRangeMode.Current)
                 {
                     var (min, max) = data.GetValueRange(data.ActiveIndex);
                     using (_reentrancy.Begin(GuardContext.SyncApply))
@@ -1157,58 +1526,13 @@ namespace MxPlot.UI.Avalonia.Views
                 }
 
                 // Update histogram when frame changes (if settings panel is open)
-                if (_settingsPanel?.IsVisible == true && _histogramPlot != null)
+                if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
                     UpdateHistogram();
             };
             data.ActiveIndexChanged += _activeIndexHandler;
 
             foreach (var axis in data.Axes)
-            {
-                if (false && axis is ColorChannel cc)
-                {
-                    var ctracker = new ColorAxisTracker(cc);
-                    _trackerPanel.Children.Add(ctracker);
-                }
-                else
-                {
-                    var tracker = new AxisTracker(axis);
-                    if (axis.Name.Equals("Time", StringComparison.OrdinalIgnoreCase) && axis.Step > 0)
-                    {
-                        //Special case for time axis: convert step to milliseconds and set AnimationInterval
-                        string unit = axis.Unit.ToLowerInvariant();
-                        int ms = unit switch
-                        {
-                            "s" => (int)Math.Round(axis.Step * 1000.0),
-                            "ms" => (int)Math.Round(axis.Step),
-                            _ => 0
-                        };
-                        if (ms > 0)
-                            tracker.AnimationInterval = ms;
-                    }
-
-
-                    _trackerPanel.Children.Add(tracker);
-                    _axisTrackers[axis.Name] = tracker;
-                    WireFreezeButton(tracker, axis);
-                    var capturedAxis = axis;
-                    tracker.IndexChanged += (_, idx) =>
-                    {
-                        if (!_reentrancy.IsActive(GuardContext.SyncApply)) SyncAxisIndexChanged?.Invoke(this, (capturedAxis.Name, idx));
-                    };
-                    tracker.SliderDragStarted += (_, _) => UpdateAxisDragOverlay(tracker);
-                    tracker.IndexChanged += (_, _) =>
-                    {
-                        if (_isDraggingAxisTracker) UpdateAxisDragOverlay(tracker);
-                    };
-                    tracker.SliderDragEnded += (_, _) =>
-                    {
-                        _isDraggingAxisTracker = false;
-                        _view.OverlayInfoText = null;
-                        _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.BottomLeft;
-                    };
-                    
-                }
-            }
+                CreateAndWireAxisTracker(data, axis);
 
             _trackerPanel.IsVisible = true;
             CloseCacheMonitor();
@@ -1228,7 +1552,7 @@ namespace MxPlot.UI.Avalonia.Views
                     SetOrthogonalView(resume.FrozenAxisName);
             }
 
-            RestoreViewSettings(data, restoreVR);
+            RestoreViewSettings(data, restoreVR, isFirstLoad);
 
             // Apply resumed VR settings on top of RestoreViewSettings (resume takes priority
             // over metadata-stored defaults when ResumeSettingsEnabled is true).
@@ -1248,15 +1572,31 @@ namespace MxPlot.UI.Avalonia.Views
                 }
             }
 
-            CaptureLutVrSnapshot();
+            CaptureRenderSnapshot();
             CaptureScaleSnapshot(data);
             ClearAllDirty();
             if (SourcePath == null) { _neverSaved = true; IsModifiedChanged?.Invoke(this, EventArgs.Empty); }
-            if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = false;
+            UpdateRenderRevertButtons();
             UpdateScaleRevertButton();
             UpdateStatusBar();
             RefreshInfoTab();
+            SyncViewModelFromView();
+            RefreshHistograms();
             RaiseRefreshed();
+        }
+
+        /// <summary>
+        /// Recomputes the histogram panels for the data now on screen, gated on the panel actually
+        /// being open. Called from every path that changes a window's content - <see cref="Refresh"/>,
+        /// <see cref="SetMatrixData"/> and <see cref="UpdateProjectionData"/> - since none of the
+        /// others refresh it: in a mode where the value range never moves (Fixed), the range-change
+        /// handler that would otherwise cover it never fires, and the histogram sits on stale data.
+        /// </summary>
+        private void RefreshHistograms()
+        {
+            if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
+                UpdateHistogram();
+            UpdateCompositeHistograms();
         }
 
         /// <summary>
@@ -1272,6 +1612,114 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
+        /// Subscribes to <see cref="Axis.IndexChanged"/>/<see cref="Axis.ScaleChanged"/> so that
+        /// programmatic changes to <paramref name="axis"/> — not just AxisTracker slider drags or
+        /// InfoTab text-box edits — broadcast to an active <see cref="MatrixPlotterSyncGroup"/>.
+        /// <see cref="GuardContext.SyncApply"/> is excluded so an inbound sync application doesn't
+        /// re-broadcast; <see cref="GuardContext.Initializing"/> is excluded so internal setup
+        /// (resume-restore, metadata-restore, scale revert) never spuriously broadcasts. Paired
+        /// with <see cref="UnwireAllAxisSync"/>.
+        /// </summary>
+        private void WireAxisSync(Axis axis)
+        {
+            EventHandler indexHandler = (_, _) =>
+            {
+                if (_reentrancy.IsActive(GuardContext.SyncApply | GuardContext.Initializing)) return;
+                SyncAxisIndexChanged?.Invoke(this, (axis.Name, axis.Index));
+            };
+            EventHandler scaleHandler = (_, _) =>
+            {
+                if (_reentrancy.IsActive(GuardContext.SyncApply | GuardContext.Initializing)) return;
+                if (axis.IsIndexBased) return; // Min/Max meaningless; SyncApplyScale rejects these anyway.
+                SyncScaleChanged?.Invoke(this, (axis.Name, ScaleParameter.Min, axis.Min));
+                SyncScaleChanged?.Invoke(this, (axis.Name, ScaleParameter.Max, axis.Max));
+            };
+            axis.IndexChanged += indexHandler;
+            axis.ScaleChanged += scaleHandler;
+            _axisSyncHandlers[axis] = (indexHandler, scaleHandler);
+        }
+
+        /// <summary>
+        /// AxisTracker の … AxisConfig メニューから発火するイベントをワイヤリングする。
+        /// <list type="bullet">
+        /// <item><see cref="AxisTracker.RenameAxisRequested"/> → <see cref="RenameAxisAsync"/></item>
+        /// <item><see cref="AxisTracker.ScaleSettingRequested"/> → ハンバーガーメニューの Scale タブを開く</item>
+        /// <item><see cref="AxisTracker.CompositeModeRequested"/> → <see cref="EnterCompositeMode"/>（全軸で到達可能。
+        /// 実数スケールを持つ軸（<c>!axis.IsIndexBased</c>）の場合はスケール喪失の確認ダイアログを先に出す。
+        /// さらに、別の軸が既にComposite recipeを持っている（保存済みメタデータ、または一度Composite
+        /// してLUTに戻った後の生存中フィールド、のいずれか）場合は<see cref="CompositeAxisOverwriteConfirmDialog"/>
+        /// でrecipe破棄の確認を挟む——<c>mxplot.composite.*</c>キーは軸名で名前空間化されていないため、
+        /// 切り替えは無条件に前の軸のrecipeを消す。詳細は<see cref="FindConflictingCompositeAxisName"/>）</item>
+        /// </list>
+        /// </summary>
+        private void WireAxisConfigButtons(AxisTracker tracker, IMatrixData data, Axis axis)
+        {
+            tracker.RenameAxisRequested   += async (_, _) => await RenameAxisAsync(data, axis);
+            tracker.ScaleSettingRequested  += (_, _) => ShowMenuPanelOnScaleTab();
+            tracker.CompositeModeRequested += async (_, _) =>
+            {
+                if (!axis.IsIndexBased && !await ScaleLossConfirmDialog.ShowAsync(this, axis.Name))
+                    return;
+                string? conflictAxisName = FindConflictingCompositeAxisName(axis.Name);
+                if (conflictAxisName != null
+                    && !await CompositeAxisOverwriteConfirmDialog.ShowAsync(this, conflictAxisName, axis.Name))
+                    return;
+                EnterCompositeMode(axis);
+            };
+        }
+
+        /// <summary>
+        /// Returns the name of another axis whose Composite recipe would be discarded by
+        /// compositing <paramref name="newAxisName"/> next, or <c>null</c> if there is none.
+        /// <para>
+        /// Two independent sources can hold "another axis's recipe", and only one may apply at a
+        /// time (metadata is only populated while live Composite state is absent, see below):
+        /// </para>
+        /// <list type="bullet">
+        /// <item><b>Saved metadata</b> (<c>mxplot.composite.axis</c>) -- set when a file was loaded
+        /// with saved Composite state that has not yet been superseded this session.</item>
+        /// <item><b>Live in-memory state</b> (<c>_compositeRecipes</c> / <c>_compositeAxisDimIndex</c>)
+        /// -- once <see cref="EnterCompositeMode"/> runs for some axis, <see cref="ExitCompositeMode"/>
+        /// (switching back to LUT) does <b>not</b> clear these fields, only <c>ResetCompositeUiState</c>
+        /// does (a full data swap). So "Composite axis A, exit to LUT, Composite axis B" still silently
+        /// overwrites A's recipe unless caught here -- and by the time this runs, <c>SaveViewSettings</c>
+        /// has already wiped the metadata key for A on exit, so only the live fields still know about it.</item>
+        /// </list>
+        /// <c>internal</c> (not <c>private</c>) so headless tests can exercise this decision directly
+        /// without going through the confirmation dialog itself.
+        /// </summary>
+        internal string? FindConflictingCompositeAxisName(string newAxisName)
+        {
+            if (_currentData == null) return null;
+
+            if (_currentData.Metadata.TryGetValue(KeyCompositeAxis, out string? savedAxisName)
+                && !string.IsNullOrEmpty(savedAxisName)
+                && !string.Equals(savedAxisName, newAxisName, StringComparison.OrdinalIgnoreCase))
+                return savedAxisName;
+
+            if (_compositeRecipes.Count > 0 && _compositeAxisDimIndex >= 0
+                && _compositeAxisDimIndex < _currentData.Dimensions.AxisCount)
+            {
+                string liveAxisName = _currentData.Dimensions[_compositeAxisDimIndex].Name;
+                if (!string.Equals(liveAxisName, newAxisName, StringComparison.OrdinalIgnoreCase))
+                    return liveAxisName;
+            }
+
+            return null;
+        }
+
+        /// <summary>Unsubscribes every handler registered via <see cref="WireAxisSync"/> and clears the map.</summary>
+        private void UnwireAllAxisSync()
+        {
+            foreach (var kv in _axisSyncHandlers)
+            {
+                kv.Key.IndexChanged -= kv.Value.IndexHandler;
+                kv.Key.ScaleChanged -= kv.Value.ScaleHandler;
+            }
+            _axisSyncHandlers.Clear();
+        }
+
+        /// <summary>
         /// Clears and rebuilds the axis tracker panel from <paramref name="data"/>.
         /// Called after <see cref="IMatrixData.DefineDimensions"/> replaces axis objects
         /// (e.g. when a specialized axis is downgraded to a plain <see cref="Axis"/> on rename).
@@ -1279,21 +1727,68 @@ namespace MxPlot.UI.Avalonia.Views
         private void RebuildTrackerPanel(IMatrixData data)
         {
             _orthoController.Deactivate();
+            UnwireAllAxisSync();
             _trackerPanel.Children.Clear();
             _axisTrackers.Clear();
+            ResetCompositeUiState();
             foreach (var axis in data.Axes)
-            {
-                var tracker = new AxisTracker(axis);
-                _trackerPanel.Children.Add(tracker);
-                _axisTrackers[axis.Name] = tracker;
-                WireFreezeButton(tracker, axis);
-                var capturedAxis = axis;
-                tracker.IndexChanged += (_, idx) =>
-                {
-                    if (!_reentrancy.IsActive(GuardContext.SyncApply)) SyncAxisIndexChanged?.Invoke(this, (capturedAxis.Name, idx));
-                };
-            }
+                CreateAndWireAxisTracker(data, axis);
             _trackerPanel.IsVisible = data.Axes.Count > 0;
+        }
+
+        /// <summary>
+        /// Creates one <see cref="AxisTracker"/> for <paramref name="axis"/>, adds it to
+        /// <see cref="_trackerPanel"/>/<see cref="_axisTrackers"/>, and wires every event it fires --
+        /// the Config-menu events (<see cref="WireAxisConfigButtons"/>), the Freeze button
+        /// (<see cref="WireFreezeButton"/>), Sync-broadcast (<see cref="WireAxisSync"/>), the Time
+        /// axis's animation interval, and the drag-overlay text
+        /// (<see cref="SliderDragStarted"/>/<c>IndexChanged</c>/<c>SliderDragEnded</c> ->
+        /// <see cref="UpdateAxisDragOverlay"/>).
+        /// <para>
+        /// Both places that build trackers from scratch -- the initial loop in
+        /// <see cref="SetMatrixData"/> and this method's own caller, <see cref="RebuildTrackerPanel"/>
+        /// -- must call this same method rather than duplicate the wiring: the two loops drifting out
+        /// of sync is exactly what left <see cref="RebuildTrackerPanel"/>'s trackers without the
+        /// drag-overlay handlers before this method existed. That gap went unnoticed for a long time
+        /// because <see cref="RebuildTrackerPanel"/> used to run only on the narrow "axis downgraded
+        /// on rename" path; generalizing Composite to any axis (see Tests.Documents/Working/
+        /// ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.7) means it now also runs on every
+        /// first-time promotion of a not-yet-tagged axis, which made the gap easy to hit.
+        /// </para>
+        /// </summary>
+        private void CreateAndWireAxisTracker(IMatrixData data, Axis axis)
+        {
+            var tracker = new AxisTracker(axis);
+            if (axis.Name.Equals("Time", StringComparison.OrdinalIgnoreCase) && axis.Step > 0)
+            {
+                // Special case for time axis: convert step to milliseconds and set AnimationInterval
+                string unit = axis.Unit.ToLowerInvariant();
+                int ms = unit switch
+                {
+                    "s" => (int)Math.Round(axis.Step * 1000.0),
+                    "ms" => (int)Math.Round(axis.Step),
+                    _ => 0
+                };
+                if (ms > 0)
+                    tracker.AnimationInterval = ms;
+            }
+
+            _trackerPanel.Children.Add(tracker);
+            _axisTrackers[axis.Name] = tracker;
+            WireFreezeButton(tracker, axis);
+            WireAxisSync(axis);
+            WireAxisConfigButtons(tracker, data, axis);
+            tracker.SliderDragStarted += (_, _) => UpdateAxisDragOverlay(tracker);
+            tracker.IndexChanged += (_, _) =>
+            {
+                if (_isDraggingAxisTracker) UpdateAxisDragOverlay(tracker);
+            };
+            tracker.SliderDragEnded += (_, _) =>
+            {
+                _isDraggingAxisTracker = false;
+                _view.OverlayInfoText = null;
+                _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.BottomLeft;
+            };
         }
 
 
@@ -1336,6 +1831,92 @@ namespace MxPlot.UI.Avalonia.Views
             if (showNotice)
                 ShowToast($"Animation interval: {intervalMs} ms");
             return true;
+        }
+
+        /// <summary>
+        /// Re-derives the All-mode global range from the current pixel content and carries it to
+        /// the side views when it moved. No-op in every other mode.
+        /// </summary>
+        /// <remarks>
+        /// Only All needs this. Fixed is user-entered and must never move on its own; ROI is
+        /// re-derived from <see cref="RefreshAllOverlayAnalysis"/>; and Current needs no wiring at
+        /// all, because the renderer computes that range itself to map the LUT and reports it back
+        /// through <see cref="MxView.AutoRangeComputed"/>. All renders with
+        /// <see cref="MxView.IsFixedRange"/> set, so the renderer reads <c>FixedMin</c>/<c>FixedMax</c>
+        /// and derives nothing - if this does not run, the numbers simply stay where they were.
+        /// <para>
+        /// The cost tracks what the caller dirtied rather than the dataset size:
+        /// <see cref="MatrixData{T}.GetArray"/> invalidates a frame's cached range as it hands the
+        /// buffer out, and <c>GetGlobalValueRange(forceRefresh: true)</c> rescans only invalid
+        /// entries - once per unique buffer, not per frame. An untouched dataset is a walk over the
+        /// cache; a wholesale rewrite pays for a full rescan, which is what All asks for.
+        /// </para>
+        /// <para>
+        /// Virtual data stays on the cached-only path inside <see cref="ApplyAllModeRange"/> and
+        /// reports the shortfall as imperfect, so it never stalls the window on MMF reads. Only the
+        /// active frame is forced, since in All mode nothing else would ever pull it through. A
+        /// writable Virtual dataset rewritten wholesale therefore narrows to that one frame and
+        /// behaves like Current until the rest is scanned - accepted, and flagged by the asterisk.
+        /// </para>
+        /// </remarks>
+        private void RefreshAllModeRange()
+        {
+            var data = _currentData;
+            if (data == null) return;
+
+            if (_rangeBar.Mode != ValueRangeMode.All)
+            {
+                // Not currently displaying the All-mode range, but the mode dropdown's "unscanned
+                // frame count" badge/tooltip is still user-visible at any time, and the per-frame
+                // range cache it reads from keeps shrinking incidentally as frames are viewed in
+                // Current mode (the GetValueRange(ActiveIndex) call below/elsewhere populates it).
+                // Keep that badge live too, without touching the displayed range -- that's All
+                // mode's alone to own.
+                RefreshAllModeImperfectBadge(data);
+                return;
+            }
+
+            if (data.IsVirtual)
+                data.GetValueRange(data.ActiveIndex); // caches this frame's range (MMF access, usually fast)
+
+            double prevMin = _view.FixedMin, prevMax = _view.FixedMax;
+            ApplyAllModeRange();
+
+            // Side views hold their own fixed range, fed by SyncRenderSettings. Current mode gets
+            // that for free via AutoRangeComputed; All has no such feedback, so push it here - and
+            // only on an actual move, so a steady dataset does not re-render them every refresh.
+            if ((_view.FixedMin != prevMin || _view.FixedMax != prevMax)
+                && (_orthoPanel.ShowBottom || _orthoPanel.ShowRight))
+                _orthoController.SyncRenderSettings();
+        }
+
+        /// <summary>
+        /// Updates just the <see cref="ValueRangeBar"/>'s "unscanned frame count" badge/tooltip
+        /// from the current cache state (cheap, cache-only lookup -- no scanning), without touching
+        /// the actually-displayed range. Called while browsing in a mode other than All so the mode
+        /// dropdown's count doesn't go stale until the user happens to switch back to All.
+        /// </summary>
+        private void RefreshAllModeImperfectBadge(IMatrixData data)
+        {
+            if (!data.IsVirtual) return; // "unscanned" only applies to Virtual data; InMemory is never imperfect
+
+            int valueMode = data.ValueType == typeof(System.Numerics.Complex)
+                ? (int)_view.ComplexValueMode : 0;
+
+            int invalidCount;
+            if (valueMode == 0)
+            {
+                data.GetGlobalValueRange(out var invalids, false);
+                invalidCount = invalids.Count;
+            }
+            else
+            {
+                var complexData = (MatrixData<System.Numerics.Complex>)data;
+                complexData.GetGlobalValueRange(valueMode, out var invalids, false);
+                invalidCount = invalids.Count;
+            }
+
+            _rangeBar.SetImperfect(invalidCount > 0, invalidCount);
         }
 
         /// <summary>
@@ -1398,8 +1979,41 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
+        /// Builds the per-bin color array for the histogram: the current LUT resampled to
+        /// <paramref name="level"/> levels, reversed if <see cref="MxView.IsInvertedColor"/> is set. Shared by
+        /// <see cref="UpdateHistogram"/> (full recompute) and <see cref="UpdateHistogramColors"/>
+        /// (recolor only) since palette/invert changes affect only this array, never the bins.
+        /// </summary>
+        private int[] BuildHistogramLutColors(int level)
+        {
+            var lut = _view.Lut;
+            var effectiveLut = (lut != null && lut.Levels != level) ? lut.Resample(level) : lut;
+            var aRgbs = effectiveLut?.AsSpan().ToArray() ?? new int[level];
+            if (_view.IsInvertedColor) Array.Reverse(aRgbs);
+            return aRgbs;
+        }
+
+        /// <summary>
+        /// Recolors the histogram bars in place for a LUT palette selection or invert-toggle
+        /// change, without rescanning pixel data. Which named LUT is selected, and whether it's
+        /// inverted, affect only the per-bin color -- never the bin count or the data/view range --
+        /// unlike a Level or Range change, where the bin count formula in
+        /// <see cref="UpdateHistogram"/> itself depends on those values and a rescan is required.
+        /// </summary>
+        private void UpdateHistogramColors()
+        {
+            if (_histogramPlot == null || _currentData == null) return;
+            int level = _view.LutDepth;
+            if (level <= 0) return;
+            _histogramPlot.SetLut(BuildHistogramLutColors(level));
+        }
+
+        /// <summary>
         /// Updates the histogram control with the current frame's data and LUT.
-        /// Called when the settings panel is opened or when LUT/level changes while the panel is visible.
+        /// Called when the settings panel is opened or when Range/Level/frame changes while the
+        /// panel is visible -- these all change the bin count or which pixels are binned, so they
+        /// require a rescan (unlike a palette/invert-only change; see
+        /// <see cref="UpdateHistogramColors"/> for that lighter path).
         /// Runs histogram calculation on a background thread to avoid blocking the UI.
         /// Mode-specific behavior:
         /// - Fixed: preserves plot zoom, uses valueRange for badge base (1x = plotRange matches valueRange).
@@ -1414,13 +2028,11 @@ namespace MxPlot.UI.Avalonia.Views
             if (_histogramPlot == null || _currentData == null) return;
 
             // Cancel any pending histogram calculation
-            _histogramCts?.Cancel();
-            _histogramCts = new CancellationTokenSource();
-            var cts = _histogramCts;
+            _lutHistogramCts?.Cancel();
+            _lutHistogramCts = new CancellationTokenSource();
+            var cts = _lutHistogramCts;
 
-            var lut = _view.Lut;
             int level = _view.LutDepth;
-            bool isInverted = _view.IsInvertedColor;
 
             // Guard against invalid LUT depth
             if (level <= 0)
@@ -1429,13 +2041,7 @@ namespace MxPlot.UI.Avalonia.Views
                 return;
             }
 
-            // Resample LUT if necessary, then get ARGB array
-            var effectiveLut = (lut != null && lut.Levels != level) ? lut.Resample(level) : lut;
-            var aRgbs = effectiveLut?.AsSpan().ToArray() ?? new int[level];
-
-            // Apply inversion to the LUT array for histogram display
-            if (isInverted)
-                Array.Reverse(aRgbs);
+            var aRgbs = BuildHistogramLutColors(level);
 
             try
             {
@@ -1490,16 +2096,7 @@ namespace MxPlot.UI.Avalonia.Views
                     if (data.ValueType == typeof(System.Numerics.Complex))
                     {
                         var complexData = (MatrixData<System.Numerics.Complex>)data;
-
-                        Func<System.Numerics.Complex, double> converter = complexValueMode switch
-                        {
-                            ComplexValueMode.Magnitude => c => c.Magnitude,
-                            ComplexValueMode.Real => c => c.Real,
-                            ComplexValueMode.Imaginary => c => c.Imaginary,
-                            ComplexValueMode.Phase => c => Math.Atan2(c.Imaginary, c.Real),
-                            ComplexValueMode.Power => c => c.Real * c.Real + c.Imaginary * c.Imaginary,
-                            _ => c => c.Magnitude
-                        };
+                        var converter = ComplexValueModeConverter.GetConverter(complexValueMode);
 
                         hist = complexData.CreateHistogram(frameIndex, bins, valueMode, converter, vMin, vMax);
                     }
@@ -1719,6 +2316,10 @@ namespace MxPlot.UI.Avalonia.Views
         /// <see cref="EndProgress"/> when the operation finishes.
         /// </para>
         /// </summary>
+        /// <param name="cts">
+        /// When supplied, a Cancel button appears next to the progress bar and cancels this source.
+        /// The caller keeps ownership (creation and disposal); this class only wires the click.
+        /// </param>
         /// <example>
         /// <code>
         /// var progress = plotter.BeginProgress("Saving…");
@@ -1727,12 +2328,13 @@ namespace MxPlot.UI.Avalonia.Views
         /// plotter.EndProgress();
         /// </code>
         /// </example>
-        public IProgress<int> BeginProgress(string label = "Processing…", bool blockInput = false)
+        public IProgress<int> BeginProgress(string label = "Processing…", bool blockInput = false,
+                                            CancellationTokenSource? cts = null)
         {
             if (!Dispatcher.UIThread.CheckAccess())
             {
                 IProgress<int>? result = null;
-                Dispatcher.UIThread.Invoke(() => result = BeginProgress(label, blockInput));
+                Dispatcher.UIThread.Invoke(() => result = BeginProgress(label, blockInput, cts));
                 return result!;
             }
 
@@ -1748,23 +2350,34 @@ namespace MxPlot.UI.Avalonia.Views
             _progressText.IsVisible = true;
             _progressBar.IsVisible = true;
 
+            _progressCts = cts;
+            _progressCancelBtn.IsEnabled = true;
+            _progressCancelBtn.IsVisible = cts != null;
+
             if (blockInput)
             {
                 var layer = OverlayLayer.GetOverlayLayer(this);
                 if (layer != null)
                 {
+                    // The blocker deliberately stops above the status bar so the Cancel button
+                    // stays reachable — blocking input must not also block the way out.
+                    double statusHeight = _statusBarBorder.Bounds.Height;
                     _inputBlocker = new Border
                     {
                         IsHitTestVisible = true,
                         Background = Brushes.Transparent,
                         Cursor = new Cursor(StandardCursorType.Wait),
+                        VerticalAlignment = VerticalAlignment.Top,
                         Width = layer.Bounds.Width,
-                        Height = layer.Bounds.Height,
+                        Height = Math.Max(0, layer.Bounds.Height - statusHeight),
                     };
                     void OnBoundsChanged(object? s, AvaloniaPropertyChangedEventArgs e)
                     {
                         if (e.Property == BoundsProperty && s is Control c && _inputBlocker != null)
-                        { _inputBlocker.Width = c.Bounds.Width; _inputBlocker.Height = c.Bounds.Height; }
+                        {
+                            _inputBlocker.Width = c.Bounds.Width;
+                            _inputBlocker.Height = Math.Max(0, c.Bounds.Height - _statusBarBorder.Bounds.Height);
+                        }
                     }
                     layer.PropertyChanged += OnBoundsChanged;
                     _inputBlockerCleanup = () => layer.PropertyChanged -= OnBoundsChanged;
@@ -1773,6 +2386,19 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             return new StatusBarProgress(this, label);
+        }
+
+        /// <summary>
+        /// Cancels the operation currently reporting progress, if it declared itself cancellable.
+        /// The button disables itself immediately: cancellation is observed at the next checkpoint,
+        /// and a second click would only look like the first one failed.
+        /// </summary>
+        private void OnProgressCancelClick()
+        {
+            if (_progressCts == null) return;
+            _progressCancelBtn.IsEnabled = false;
+            _progressText.Text = "Cancelling…";
+            _progressCts.Cancel();
         }
 
         /// <summary>
@@ -1799,6 +2425,8 @@ namespace MxPlot.UI.Avalonia.Views
             _progressText.Margin = new Thickness(4, 0, 4, 0);
             _progressBar.IsVisible = false;
             _progressBar.Value = 0;
+            _progressCancelBtn.IsVisible = false;
+            _progressCts = null;
 
             _infoText.IsVisible = true;
             _zoomText.IsVisible = true;
@@ -1906,13 +2534,21 @@ namespace MxPlot.UI.Avalonia.Views
             public double DisplayMinValue
             {
                 get => _host._view.FixedMin;
-                set { _host._view.IsFixedRange = true; _host._view.FixedMin = value; }
+                set => _host.ApplyViewMutationAtomically(() =>
+                {
+                    _host._view.IsFixedRange = true;
+                    _host._view.FixedMin = value;
+                });
             }
 
             public double DisplayMaxValue
             {
                 get => _host._view.FixedMax;
-                set { _host._view.IsFixedRange = true; _host._view.FixedMax = value; }
+                set => _host.ApplyViewMutationAtomically(() =>
+                {
+                    _host._view.IsFixedRange = true;
+                    _host._view.FixedMax = value;
+                });
             }
 
             public TopLevel? Owner => _host;
@@ -1947,7 +2583,7 @@ namespace MxPlot.UI.Avalonia.Views
                     }
                 }
 
-                return Rendering.BitmapWriter.CreateBitmap(data, frameIndex, lut, valueMin, valueMax);
+                return Rendering.LutBitmapWriter.CreateBitmap(data, frameIndex, lut, valueMin, valueMax);
             }
         }
     }

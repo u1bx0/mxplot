@@ -2,7 +2,7 @@
 
 **MxPlot.Core / MxPlot.UI.Avalonia — メタデータ運用規約**
 
-> 最終更新日: 2026-04-24
+> 最終更新日: 2026-08-20
 
 *注意: このドキュメントは大部分がAIによって生成されたものであり、正確性の確認が必要です。*
 
@@ -11,6 +11,7 @@
 1. [概要](#概要)
 2. [Metadata 辞書の基本](#metadata-辞書の基本)
 3. [キー名前空間](#キー名前空間)
+   - [システムキー一覧（UI 層）](#システムキー一覧ui-層)
 4. [フォーマットヘッダーメタデータ（Core API）](#フォーマットヘッダーメタデータcore-api)
    - [API リファレンス](#api-リファレンス)
    - [保存メカニズム](#保存メカニズム)
@@ -71,7 +72,7 @@ public interface IMatrixData
 | キーパターン | 管理者 | UI 表示 | 編集可否 | `CopyPropertiesFrom` でコピー | 例 |
 |---|---|---|---|---|---|
 | *(ユーザー定義)* | ユーザー / IO ハンドラー | ✅ 表示 | ✅ 可 | ✅ される | `user_note`, `experiment_id` |
-| `mxplot.*`（一般） | MatrixPlotter システム | ❌ 非表示 | ❌ 不可 | ✅ される | `mxplot.lut.min`, `mxplot.metadata.format_header` |
+| `mxplot.*`（一般） | MatrixPlotter システム | ❌ 非表示 | ❌ 不可 | ✅ される | `mxplot.vr.min`, `mxplot.metadata.format_header` |
 | `mxplot.*` + `VisibleSystemKeys` | MatrixPlotter システム | ✅ 表示名で表示 | ❌ 不可 | ✅ される | `mxplot.data.history` → "History" |
 | *(任意キー)* + `MarkAsFormatHeader` | IO ハンドラー | ✅ 🔒付きで表示 ¹ | ❌ 不可 ¹ | ❌ **されない** ² | `OME_XML`, `FITS_HEADER` |
 
@@ -80,6 +81,40 @@ public interface IMatrixData
 > ² フォーマットヘッダーエントリはソースファイルを記述するものであり、派生（Crop、Filter、Slice 等）後は無効になります。`Clone()`（同一データの完全な複製）では全メタデータが保持されます。
 
 `mxplot.` 接頭辞は `PlotterConfigKeys.Prefix` で定義されています。この接頭辞に一致するキーは、`PlotterConfigKeys.VisibleSystemKeys` に明示的に登録されていない限り、Metadata タブに表示されません。
+
+### システムキー一覧（UI 層）
+
+以下のキーは、表示設定を保存するときに `MatrixPlotter` が書き込み（`MatrixPlotter.Settings.cs`）、
+データを再度開いたときに読み戻すものです。MatrixPlotter を解さないビューアはこれらを単に無視します。
+
+| キー | 意味 | 値の形式 |
+|---|---|---|
+| `mxplot.lut.name` | 適用中の LUT | LUT 名（例: `Jet`） |
+| `mxplot.lut.level` | LUT の量子化レベル（`MxView.LutDepth`） | 整数（invariant culture） |
+| `mxplot.lut.inverted` | LUT の反転（`MxView.IsInvertedColor`） | `True` / `False` |
+| `mxplot.vr.mode` | 値範囲モード | `Fixed` / `Current` / `All` / `ROI` |
+| `mxplot.vr.min`, `mxplot.vr.max` | Fixed 時の範囲 | ラウンドトリップ（`"R"`）double、invariant culture。**`Fixed` モードのときのみ**書き込まれ、それ以外では削除されます |
+| `mxplot.axes.indices` | 軸トラッカーの位置 | 各 `Axis.Index` の CSV（`Axes` の順） |
+| `mxplot.overlays` | オーバーレイオブジェクト | JSON 配列（空のときは書き込まれません） |
+| `mxplot.ortho.{axis}.scaleMode` | 該当軸の直交ビュー スケーリング | `OrthoScaleMode` の名前 |
+| `mxplot.ortho.{axis}.custom` | 該当軸のカスタム縦横比 | ラウンドトリップ double。モードが `Custom` のときのみ存在 |
+
+0.3.0 で Composite / ColorCoded 用に追加されたキー:
+
+| キー | 意味 | 値の形式 |
+|---|---|---|
+| `mxplot.render.mode` | ファイルを開いたときの表示モード | `Lut` / `Composite` / `ColorCoded`。**キーが無い場合は `Lut`** — 0.3.0 以前のファイルが従来どおり開くのはこのため |
+| `mxplot.composite.blend` | Composite のブレンドモード | `BlendMode` の名前 |
+| `mxplot.composite.scope` | 値範囲のスコープ | Global / チャンネル別。キーが無い場合は Global |
+| `mxplot.composite.vrmode` | Composite 全体の値範囲モード | `ValueRangeMode` の名前。キーが無い場合は `Current` |
+| `mxplot.composite.{i}.visible` | チャンネル `i` の表示状態 | `True` / `False` |
+| `mxplot.composite.{i}.color` | チャンネル `i` の色 | 16 進カラー |
+| `mxplot.composite.{i}.min`, `.max` | チャンネル `i` の表示範囲 | ラウンドトリップ double |
+| `mxplot.composite.{i}.gain`, `.gamma` | チャンネル `i` のトーン調整 | ラウンドトリップ double |
+| `mxplot.composite.{i}.vrmode` | チャンネル `i` の値範囲モード | `ValueRangeMode` の名前 |
+
+`{i}` は Composite 軸に沿った 0 始まりのチャンネル番号で、このキー群がチャンネルごとの
+`BlendRecipe` 1 個に対応します。詳細は [Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md) を参照してください。
 
 ---
 
@@ -304,7 +339,7 @@ MatrixData.Metadata
 │   → 管理: mxplot.metadata.format_header の CSV
 │   → CopyPropertiesFrom でコピーされない（派生時に除外）
 │
-├── 非表示システムキー: "mxplot.lut.min" = "0"
+├── 非表示システムキー: "mxplot.vr.min" = "0"
 │   → リストに表示されない（PlotterConfigKeys.IsReserved = true）
 │
 └── 表示可能システムキー: "mxplot.data.history" = "[...]"

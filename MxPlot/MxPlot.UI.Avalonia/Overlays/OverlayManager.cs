@@ -1,4 +1,13 @@
-﻿using Avalonia;
+﻿// Diagnostic: overlay clipboard copy/paste round-trip (raw text length/content, SetClipboardText's
+// otherwise-unobserved Task outcome, GetClipboardText's raw return value, sameInstance detection,
+// deserialized object count), printed straight to the console (not Debug/Trace, which are stripped
+// or listener-less in a published Release build) so it shows up when running a `dotnet publish`
+// build from a terminal. Off by default -- the macOS cross-window overlay-paste report this was
+// added for stopped reproducing once the IsValueRangeRoi-copied-on-paste bug was fixed (unconfirmed
+// whether that was the actual cause, or an unrelated transient). Uncomment to re-investigate if it
+// resurfaces (see VolumeAccessor.cs's RESTACK_DIAG for the same convention).
+//#define OVERLAY_CLIPBOARD_DIAG
+using Avalonia;
 using Avalonia.Input;
 using Avalonia.Media;
 using MxPlot.UI.Avalonia.Helpers;
@@ -697,7 +706,27 @@ namespace MxPlot.UI.Avalonia.Overlays
         {
             var json = OverlaySerializer.Serialize(objects);
             if (string.IsNullOrEmpty(json) || json == "[]") return;
-            _ = SetClipboardText?.Invoke($"{ClipboardMarker}{_instanceId}\n{json}");
+            var payload = $"{ClipboardMarker}{_instanceId}\n{json}";
+#if OVERLAY_CLIPBOARD_DIAG
+            Console.WriteLine($"[OverlayClipboard] Copy: instanceId={_instanceId}, payload.Length={payload.Length}, json.Length={json.Length}");
+            // Fire-and-forget (the original `_ = SetClipboardText?.Invoke(...)`) never observes
+            // whether the underlying Clipboard.SetTextAsync actually succeeded -- a silent failure
+            // here (e.g. a macOS NSPasteboard write issue) would look identical to "it worked" from
+            // this call site. Awaiting it here (diagnostic build only) surfaces that.
+            var setTask = SetClipboardText?.Invoke(payload);
+            if (setTask != null)
+            {
+                setTask.ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                        Console.WriteLine($"[OverlayClipboard] SetClipboardText FAULTED: {t.Exception?.GetBaseException().Message}");
+                    else
+                        Console.WriteLine($"[OverlayClipboard] SetClipboardText completed (status={t.Status})");
+                });
+            }
+#else
+            _ = SetClipboardText?.Invoke(payload);
+#endif
             Copied?.Invoke(this, EventArgs.Empty);
         }
 
@@ -707,8 +736,14 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// <summary>Pastes overlay objects from the clipboard.</summary>
         public async void PasteOverlays()
         {
+#if OVERLAY_CLIPBOARD_DIAG
+            Console.WriteLine($"[OverlayClipboard] Paste: this instanceId={_instanceId}, GetClipboardText assigned={GetClipboardText != null}");
+#endif
             if (GetClipboardText == null) return;
             var text = await GetClipboardText();
+#if OVERLAY_CLIPBOARD_DIAG
+            Console.WriteLine($"[OverlayClipboard] Paste: raw text is null={text == null}, length={text?.Length ?? -1}, startsWithMarker={text?.StartsWith(ClipboardMarker)}, preview=\"{(text != null ? text[..Math.Min(80, text.Length)].Replace("\n", "\\n") : "<null>")}\"");
+#endif
             if (string.IsNullOrWhiteSpace(text)) return;
 
             // Detect source instance from "mxplot:<id>\n" header
@@ -723,8 +758,14 @@ namespace MxPlot.UI.Avalonia.Overlays
                     json = text[(nl + 1)..];
                 }
             }
+#if OVERLAY_CLIPBOARD_DIAG
+            Console.WriteLine($"[OverlayClipboard] Paste: sameInstance={sameInstance}, json.Length={json.Length}");
+#endif
 
             var objects = OverlaySerializer.Deserialize(json);
+#if OVERLAY_CLIPBOARD_DIAG
+            Console.WriteLine($"[OverlayClipboard] Paste: deserialized objects.Count={objects.Count}");
+#endif
             if (objects.Count == 0) return;
 
             // Offset only when pasting back into the same window instance
@@ -736,6 +777,15 @@ namespace MxPlot.UI.Avalonia.Overlays
             foreach (var obj in objects)
             {
                 obj.IsSelected = true;
+                // IsValueRangeRoi is a singleton relationship (exactly one overlay can be *the*
+                // value-range ROI, tracked by MatrixPlotter's own _valueRangeOverlay field) -- a
+                // pasted copy of a ROI overlay is a brand-new object, not a hand-off of that role,
+                // so it must never come in already claiming it (the original stays the real ROI
+                // either way; a copy that also shows the "ROI" tag/checked menu icon without
+                // actually being wired up to _valueRangeOverlay is exactly the bug this avoids).
+                // ShowStatistics is not a singleton (any number of overlays can show their own
+                // stats independently), so it -- unlike IsValueRangeRoi -- is fine to carry over.
+                if (obj is IAnalyzableOverlay ana) ana.IsValueRangeRoi = false;
                 AddObject(obj, invalidate: false);
             }
             InvalidateVisual();

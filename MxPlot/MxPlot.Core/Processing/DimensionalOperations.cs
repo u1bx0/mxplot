@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -152,6 +153,84 @@ namespace MxPlot.Core.Processing
                 var result = src.Reorder(order, deepCopy);
                 result.DefineDimensions(Axis.CreateFrom([.. dims.Axes]));
                 return result;
+            }
+        }
+    }
+
+    // =========================================================================================
+    // Channel Collapse (Grayscale) Operation
+    // =========================================================================================
+
+    /// <summary>How <see cref="GrayscaleOperation"/> combines the channels into one value.</summary>
+    public enum GrayscaleMethod
+    {
+        /// <summary>
+        /// Rec.709 luma for an R/G/B triplet (see <see cref="ColorAxis.IsRgbTriplet"/>),
+        /// plain mean for every other channel axis.
+        /// </summary>
+        Auto,
+
+        /// <summary>Arithmetic mean of all channels. Works for any channel count.</summary>
+        Mean,
+
+        /// <summary>Rec.709 luma <c>0.2126 R + 0.7152 G + 0.0722 B</c>. Requires exactly 3 channels.</summary>
+        LumaRec709,
+    }
+
+    /// <summary>
+    /// Collapses a channel axis into a single grayscale channel, leaving every other axis
+    /// (Z, Time, …) intact. The axis itself disappears from the result; collapsing the only
+    /// axis yields a plain single-frame matrix.
+    /// </summary>
+    /// <remarks>
+    /// A colour image decomposed into R/G/B needs luma weighting to look natural, whereas a
+    /// fluorescence stack has no such convention and is simply averaged. <see cref="GrayscaleMethod.Auto"/>
+    /// tells the two apart by the channel tags rather than by the channel count, so a three-colour
+    /// fluorescence stack is not silently treated as RGB.
+    /// </remarks>
+    public record GrayscaleOperation(
+        string AxisName = "Channel",
+        GrayscaleMethod Method = GrayscaleMethod.Auto,
+        IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default) : IMatrixDataOperation
+    {
+        public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
+        {
+            var axis = src[AxisName]
+                ?? throw new ArgumentException($"Axis '{AxisName}' not found.");
+
+            bool luma = Method switch
+            {
+                GrayscaleMethod.LumaRec709 => true,
+                GrayscaleMethod.Mean => false,
+                _ => ColorAxis.IsRgbTriplet(axis),
+            };
+
+            if (luma && axis.Count != 3)
+                throw new ArgumentException(
+                    $"Rec.709 luma requires exactly 3 channels, but '{AxisName}' has {axis.Count}.");
+
+            var result = luma
+                ? src.Reduce(AxisName, Luma, useParallel: true, Progress, CancellationToken)
+                : src.Reduce(AxisName, Mean, useParallel: true, Progress, CancellationToken);
+
+            // Reduce only carries over the XY scale and units; bring the rest of the metadata with it.
+            // The dimensions are deliberately not copied — the channel axis is gone by design.
+            result.CopyPropertiesFrom(src, copyScale: false, copyDimensions: false);
+            return result;
+
+            static T Luma(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
+                => NumericConverter.FromDouble<T>(
+                       0.2126 * NumericConverter.ToDouble(values[0])
+                     + 0.7152 * NumericConverter.ToDouble(values[1])
+                     + 0.0722 * NumericConverter.ToDouble(values[2]));
+
+            static T Mean(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
+            {
+                double sum = 0;
+                for (int i = 0; i < values.Length; i++)
+                    sum += NumericConverter.ToDouble(values[i]);
+                return NumericConverter.FromDouble<T>(sum / values.Length);
             }
         }
     }
