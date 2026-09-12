@@ -162,6 +162,19 @@ namespace MxPlot.UI.Avalonia.Controls
                 SelectionChanged?.Invoke(this, (ProjectionPlane.XY, true, GetMode(ProjectionPlane.XY)));
         }
 
+        /// <summary>
+        /// Re-announces the XY row's current selection as if the user had just made it, so
+        /// <c>OrthogonalViewController</c> recomputes the projection. For putting an open XY
+        /// projection back after something tore the orthogonal views down underneath it - the row
+        /// itself is unchanged, but the controller's projection state was reset. No-op when the row
+        /// is off, so callers do not have to check first.
+        /// </summary>
+        public void RaiseXySelection()
+        {
+            if (_xyRow.CheckBox.IsChecked != true) return;
+            SelectionChanged?.Invoke(this, (ProjectionPlane.XY, true, GetMode(ProjectionPlane.XY)));
+        }
+
         /// <summary>Programmatically set the state for a specific view.</summary>
         public void SetState(ProjectionPlane plane, bool enabled, ProjectionMode mode)
         {

@@ -7,7 +7,6 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.Core.Utils;
 using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
@@ -15,6 +14,7 @@ using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
 using MxPlot.UI.Avalonia.Utils;
 using MxPlot.UI.Avalonia.ViewModels;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -69,6 +69,62 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         internal void UpdateProjectionData(IMatrixData data)
         {
+            var previous = _view.MatrixData;
+            if (!HasSameAxisLayout(previous, data))
+            {
+                // The chrome is bound to axes that are about to stop existing (an AxisTracker holds
+                // its Axis and subscribes to it), so the lightweight path below is not available:
+                // leaving a tracker behind for a vanished axis is what made the XY-projection window
+                // throw when the parent left Composite and its payload collapsed to a single frame.
+                // Without the Initializing scope this reaches the full SetMatrixData, which rebuilds
+                // the trackers from the new layout.
+                _view.SetMatrixDataInternal(data);
+                RaiseRefreshed();
+                return;
+            }
+
+            // Same layout, new payload object. Hand the window's own Axis instances to it rather
+            // than adopting the freshly built clones: the trackers, the orthogonal controller and
+            // EnterCompositeMode's ReferenceEquals lookup all hold those instances, and every one of
+            // them would be pointing at a dead axis from here on. That is what made the projection
+            // window's "back to Composite" silently do nothing once the parent's Time axis had been
+            // stepped even once - EnterCompositeMode could no longer find the tracker's axis in the
+            // live data. Carrying the instances also carries their Index, i.e. where in the stack
+            // the window is looking - in LUT mode over a Composite payload, the selected channel.
+            if (previous != null)
+            {
+                var axes = previous.Dimensions.Axes.ToArray();
+                if (axes.Length > 0)
+                {
+                    int position = _view.FrameIndex;
+                    data.DefineDimensions(axes);
+                    // The outgoing structure is still subscribed to those same axes, and through
+                    // them would keep the whole previous payload (frame buffers included) alive.
+                    previous.Dimensions.Dispose();
+                    // DefineDimensions wires the axes up but does not push their positions back into
+                    // ActiveIndex, which the new payload still has at 0.
+                    data.ActiveIndex = position;
+                }
+                else if (previous.FrameCount == data.FrameCount)
+                {
+                    data.ActiveIndex = _view.FrameIndex;
+                }
+            }
+
+            // _activeIndexHandler was subscribed (in SetMatrixData) to the outgoing payload's own
+            // ActiveIndexChanged, not to _currentData -- ActiveIndex/ActiveIndexChanged live per
+            // MatrixData<T> instance, and previous.Dimensions was just disposed above, so previous
+            // will never raise it again. Move the subscription to the incoming instance so a
+            // subsequent AxisTracker drag (which changes an Axis shared into it via DefineDimensions
+            // above) still reaches the handler -- otherwise the tracker's slider moves but
+            // _view.FrameIndex silently stops following it. Harmless no-op for a single-frame
+            // projection (no axes, so SetMatrixData never created a handler to move).
+            if (_activeIndexHandler != null)
+            {
+                if (previous != null) previous.ActiveIndexChanged -= _activeIndexHandler;
+                data.ActiveIndexChanged += _activeIndexHandler;
+            }
+
             // The Initializing scope is what makes this lightweight, and it is not optional:
             // assigning MxView.MatrixData raises MxView.MatrixDataChanged, whose handler in
             // WireViewEvents calls the full SetMatrixData unless that scope is held. Without it
@@ -107,6 +163,30 @@ namespace MxPlot.UI.Avalonia.Views
         /// Existing calls right after <see cref="UpdateProjectionData"/> are harmless no-ops kept for
         /// now rather than churned across every call site.
         /// </summary>
+        /// <summary>
+        /// Whether two payloads describe the same stack shape: the same axes, in the same order,
+        /// with the same names and lengths. Anything the window's chrome was built from - the
+        /// AxisTrackers, the orthogonal controller, the Composite axis index - stays meaningful
+        /// across a swap only while this holds.
+        /// </summary>
+        internal static bool HasSameAxisLayout(IMatrixData? a, IMatrixData? b)
+        {
+            if (a == null || b == null) return false;
+            if (a.FrameCount != b.FrameCount) return false;
+
+            var left = a.Dimensions.Axes;
+            var right = b.Dimensions.Axes;
+            if (left.Count != right.Count) return false;
+
+            for (int i = 0; i < left.Count; i++)
+            {
+                if (left[i].Count != right[i].Count) return false;
+                if (!string.Equals(left[i].Name, right[i].Name, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            return true;
+        }
+
         internal void SyncCurrentDataFromView()
         {
             _currentData = _view.MatrixData;
@@ -169,12 +249,13 @@ namespace MxPlot.UI.Avalonia.Views
         private ToggleButton? _invertLutChk;
         private NumericUpDown? _levelNud;
         private HistogramPlotControl? _histogramPlot;
-        // Separate from MatrixPlotter.Composite.cs's _compositeHistogramCts: the two histogram
-        // computations were once sharing a single field, so cancelling one could silently discard
-        // the other's in-flight pixel scan whenever both fired in the same tick (e.g. a stale
-        // _lutModeDetails.IsVisible flag from a prior LUT-mode session let UpdateHistogram() run
-        // -- and cancel this -- while in Composite mode; see EnterCompositeMode's IsVisible reset).
-        private CancellationTokenSource? _lutHistogramCts;  // Cancel pending LUT histogram calculation
+        // Separate from MatrixPlotter.Composite.cs's own composite-histogram pair: LUT and
+        // Composite histograms run independently and must not gate each other (e.g. a stale
+        // _lutModeDetails.IsVisible flag from a prior LUT-mode session could otherwise have one
+        // mode's request affect the other's in-flight run; see EnterCompositeMode's IsVisible reset).
+        // See UpdateHistogram's own doc comment for the dirty/running coalescing loop these drive.
+        private bool _lutHistogramDirty;
+        private bool _lutHistogramRunning;
 
         // Hamburger menu panel (OverlayLayer — renders inside the window's Skia surface
         // so alpha transparency correctly shows the underlying view content)
@@ -207,6 +288,20 @@ namespace MxPlot.UI.Avalonia.Views
         /// </para>
         /// </summary>
         private volatile bool _isRefreshing;
+
+        /// <summary>
+        /// Throttle interval (ms) for the histogram recompute inside <see cref="Refresh"/> - see
+        /// <see cref="_histogramThrottle"/>.
+        /// </summary>
+        private const long HistogramThrottleMs = 200;
+
+        /// <summary>
+        /// Gates how often <see cref="Refresh"/> kicks off <see cref="UpdateHistogram"/> /
+        /// <see cref="UpdateCompositeHistograms"/>. Started eagerly so the very first Refresh call
+        /// is never throttled (elapsed time already exceeds <see cref="HistogramThrottleMs"/> by
+        /// the time any real Refresh happens).
+        /// </summary>
+        private readonly Stopwatch _histogramThrottle = Stopwatch.StartNew();
 
         // File session state
         [Flags]
@@ -431,6 +526,29 @@ namespace MxPlot.UI.Avalonia.Views
         public MxView MainView => _view;
 
         /// <summary>
+        /// How much of the machine the pixel loops that build this window's bitmaps may use.
+        /// <see cref="RenderSurface.ParallelismAuto"/> (the default) decides from the frame size,
+        /// <c>0</c> keeps them on one thread, <c>-1</c> is unrestricted, and a positive value caps
+        /// the degree of parallelism - the same encoding as <c>MatrixDataPlotter.Parallelism</c>
+        /// in the MatrixDataPlot library, plus Auto.
+        /// </summary>
+        /// <remarks>
+        /// Applies to the main view and both orthogonal side views together, since a host limiting
+        /// what rendering may take from the machine means the window, not one surface of it.
+        /// Reads back the main view's value.
+        /// </remarks>
+        public int Parallelism
+        {
+            get => _view.Parallelism;
+            set
+            {
+                _view.Parallelism = value;
+                _orthoPanel.BottomView.Parallelism = value;
+                _orthoPanel.RightView.Parallelism = value;
+            }
+        }
+
+        /// <summary>
         /// The bottom orthogonal projection view (XZ plane).
         /// The view component itself is never <c>null</c>, but <see cref="MxView.MatrixData"/>
         /// is <c>null</c> when orthogonal mode is inactive or the current data is single-frame.
@@ -609,7 +727,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void UpdateDirtyBadge()
         {
-            bool show = IsModified;
+            bool show = RevertUiEnabled && IsModified;
             _dirtyBadge.IsVisible = show;
             if (!show) return;
             if (SourcePath == null)
@@ -693,7 +811,7 @@ namespace MxPlot.UI.Avalonia.Views
         private void UpdateRenderRevertButtons()
         {
             if (_reentrancy.IsActive(GuardContext.Initializing)) return;
-            bool show = _renderSnapshot != null
+            bool show = RevertUiEnabled && _renderSnapshot != null
                      && (_dirty & (DirtyFlags.Lut | DirtyFlags.Vr | DirtyFlags.Composite)) != 0;
             if (_lutVrRevertBtn != null) _lutVrRevertBtn.IsVisible = show;
             if (_compositeRevertBtn != null) _compositeRevertBtn.IsVisible = show;
@@ -715,7 +833,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (_scaleRevertBtn != null && _scaleTabBody.Children.Contains(_scaleRevertBtn))
                 _scaleTabBody.Children.Remove(_scaleRevertBtn);
 
-            if (!_dirty.HasFlag(DirtyFlags.Scale) || _scaleSnapshot == null) return;
+            if (!RevertUiEnabled || !_dirty.HasFlag(DirtyFlags.Scale) || _scaleSnapshot == null) return;
 
             _scaleRevertBtn = new Button
             {
@@ -1025,6 +1143,17 @@ namespace MxPlot.UI.Avalonia.Views
                     // further down are cut against it rather than against the previous one.
                     RefreshAllModeRange();
 
+                    // Composite's Global/ChannelWise Current/All channels are resolved the same way
+                    // LUT's All/Roi are: computed here and pushed as a fixed value, not recomputed
+                    // live inside the renderer the way LUT's own Current mode is (see
+                    // ApplyCompositeRanges' internal mode checks - safe to call unconditionally,
+                    // same shape as RefreshAllModeRange above). Without this, a window whose
+                    // MatrixData is mutated in place and refreshed from outside the normal
+                    // Processing/navigation call sites (e.g. a live external data source) never
+                    // re-evaluates Composite's Auto/All ranges past whatever they were when Composite
+                    // was entered.
+                    if (_isCompositeMode) ApplyCompositeRanges();
+
                     _view.Refresh();
 
                     if (rebuildOrthogonalData && (_orthoPanel.ShowBottom || _orthoPanel.ShowRight))
@@ -1056,9 +1185,23 @@ namespace MxPlot.UI.Avalonia.Views
                     // Refresh (explicit data-content change, or the MxView.RefreshRequested bypass
                     // when MainView.Refresh() is called directly). Each call still gates on its own
                     // panel's visibility so a collapsed panel costs nothing.
-                    if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
-                        UpdateHistogram();
-                    UpdateCompositeHistograms();
+                    //
+                    // Throttled to ~5 Hz: UpdateHistogram/UpdateCompositeHistograms each coalesce
+                    // their own requests into a dirty-flag + single-in-flight loop (see their own
+                    // doc comments), so correctness no longer depends on this gate - a live feed
+                    // refreshing faster than a full-frame histogram scan can complete no longer
+                    // livelocks, it just always trails by one computation's worth of latency. This
+                    // throttle now only avoids pointlessly marking the loop dirty on every single
+                    // frame when the interactive case (a settings panel open, a few Hz at most) does
+                    // not need that. No separate timer: this is a passive elapsed-time check riding
+                    // on however often Refresh() already gets called, zero cost while idle.
+                    if (_histogramThrottle.ElapsedMilliseconds >= HistogramThrottleMs)
+                    {
+                        _histogramThrottle.Restart();
+                        if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
+                            UpdateHistogram();
+                        UpdateCompositeHistograms();
+                    }
 
                     Refreshed?.Invoke(this, EventArgs.Empty);
                 }
@@ -1504,9 +1647,16 @@ namespace MxPlot.UI.Avalonia.Views
 
             // Forward MatrixData.ActiveIndex changes to the view's FrameIndex.
             // Axis → DimensionStructure → MatrixData.ActiveIndex → ActiveIndexChanged → here.
+            // Reads _currentData, not the "data" parameter above, so that re-pointing this same
+            // delegate at a later payload's ActiveIndexChanged (UpdateProjectionData's lightweight
+            // refresh path, which swaps in a new IMatrixData instance while _currentData is kept
+            // current) picks up the live data instead of the original one this closure was built
+            // for -- ActiveIndex/ActiveIndexChanged live per MatrixData<T> instance, so a stale
+            // "data" read here would report a frozen value from an instance that stopped changing
+            // the moment its Dimensions was disposed.
             _activeIndexHandler = (_, _) =>
             {
-                _view.FrameIndex = data.ActiveIndex;
+                _view.FrameIndex = _currentData!.ActiveIndex;
                 if (_isCompositeMode) ApplyCompositeFrameIndices();
                 _orthoController.UpdateFrameIndicator();
                 // Fires for every axis uniformly, the frozen/orthogonal axis's own AxisTracker/
@@ -1520,7 +1670,7 @@ namespace MxPlot.UI.Avalonia.Views
                 // Current mode: update range bar to reflect the new frame's range
                 if (_rangeBar.Mode == ValueRangeMode.Current)
                 {
-                    var (min, max) = data.GetValueRange(data.ActiveIndex);
+                    var (min, max) = _currentData.GetValueRange(_currentData.ActiveIndex);
                     using (_reentrancy.Begin(GuardContext.SyncApply))
                         _rangeBar.SetRange(min, max);
                 }
@@ -2009,12 +2159,43 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Updates the histogram control with the current frame's data and LUT.
-        /// Called when the settings panel is opened or when Range/Level/frame changes while the
-        /// panel is visible -- these all change the bin count or which pixels are binned, so they
-        /// require a rescan (unlike a palette/invert-only change; see
-        /// <see cref="UpdateHistogramColors"/> for that lighter path).
-        /// Runs histogram calculation on a background thread to avoid blocking the UI.
+        /// Requests a histogram recompute for the current frame's data and LUT. Called when the
+        /// settings panel is opened or when Range/Level/frame changes while the panel is visible.
+        /// </summary>
+        /// <remarks>
+        /// Coalescing dirty-flag + single-in-flight loop, not cancel-and-restart: an earlier
+        /// version cancelled any still-running computation and started a fresh one on every call,
+        /// which meant a computation slower than the caller's own call rate (e.g. Refresh's 5 Hz
+        /// histogram throttle against a large Live camera frame) could NEVER finish -- always
+        /// pre-empted before it got to paint anything. This version instead lets whatever is
+        /// running finish, and re-runs at most once more immediately afterward if a newer request
+        /// arrived meanwhile (<see cref="_lutHistogramDirty"/>) -- so the histogram is always
+        /// exactly one computation's worth of latency behind the latest data, never stuck forever,
+        /// and settles correctly on the final frame once requests stop arriving.
+        /// </remarks>
+        private async void UpdateHistogram()
+        {
+            _lutHistogramDirty = true;
+            if (_lutHistogramRunning) return;
+            _lutHistogramRunning = true;
+            try
+            {
+                while (_lutHistogramDirty)
+                {
+                    _lutHistogramDirty = false;
+                    await UpdateHistogramOnceAsync();
+                }
+            }
+            finally
+            {
+                _lutHistogramRunning = false;
+            }
+        }
+
+        /// <summary>
+        /// One histogram computation, always run to completion (see <see cref="UpdateHistogram"/>'s
+        /// own doc comment for why this is never cancelled mid-flight). Runs the actual binning on
+        /// a background thread to avoid blocking the UI.
         /// Mode-specific behavior:
         /// - Fixed: preserves plot zoom, uses valueRange for badge base (1x = plotRange matches valueRange).
         ///   Range bar changes only update viewRange (red lines), not plotRange.
@@ -2023,14 +2204,9 @@ namespace MxPlot.UI.Avalonia.Views
         /// - Current/Auto: resets plot zoom to 1:1 with valueRange, uses valueRange for badge base.
         /// - All: resets plot zoom to 1:1 with viewRange, uses viewRange for badge base (1x = plotRange matches viewRange from range bar).
         /// </summary>
-        private async void UpdateHistogram()
+        private async Task UpdateHistogramOnceAsync()
         {
             if (_histogramPlot == null || _currentData == null) return;
-
-            // Cancel any pending histogram calculation
-            _lutHistogramCts?.Cancel();
-            _lutHistogramCts = new CancellationTokenSource();
-            var cts = _lutHistogramCts;
 
             int level = _view.LutDepth;
 
@@ -2073,18 +2249,12 @@ namespace MxPlot.UI.Avalonia.Views
                 // Run heavy computation on background thread
                 var (valueMin, valueMax, histogram) = await Task.Run(() =>
                 {
-                    if (cts.Token.IsCancellationRequested) 
-                        return (double.NaN, double.NaN, Array.Empty<int>());
-
                     // Determine the histogram calculation range (actual data range)
                     double vMin, vMax;
                     if (data.ValueType == typeof(System.Numerics.Complex))
                         (vMin, vMax) = data.GetValueRange(frameIndex, valueMode);
                     else
                         (vMin, vMax) = data.GetValueRange(frameIndex);
-
-                    if (cts.Token.IsCancellationRequested) 
-                        return (double.NaN, double.NaN, Array.Empty<int>());
 
                     // Calculate bin count: scale bins proportionally to the range ratio.
                     double dataRange = Math.Max(1e-9, vMax - vMin);
@@ -2106,11 +2276,7 @@ namespace MxPlot.UI.Avalonia.Views
                     }
 
                     return (vMin, vMax, hist);
-                }, cts.Token);
-
-                // Check if cancelled
-                if (cts.Token.IsCancellationRequested || double.IsNaN(valueMin))
-                    return;
+                });
 
                 // Update UI on UI thread
                 // Fixed/Roi mode: preserves plot zoom (user/ROI-controlled window), viewRange follows LUT range

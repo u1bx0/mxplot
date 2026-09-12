@@ -14,7 +14,7 @@ MxPlot は 3 種類の外部拡張ポイントを持っています。
 |---|---|---|
 | **IMatrixDataReader / IMatrixDataWriter** | 対応ファイルフォーマット | `MxPlot.Core` のみ |
 | **IMatrixPlotterPlugin** | MatrixPlotter ウィンドウの Plugins タブにコマンド追加 | `MxPlot.UI.Avalonia` |
-| **IMxPlotPlugin** | MxPlot.App（ダッシュボード）の Tools メニューにコマンド追加 | `MxPlot.App` |
+| **IMxPlotAppPlugin** | MxPlot.App（ダッシュボード）の Tools メニューにコマンド追加 | `MxPlot.App` |
 
 ---
 
@@ -460,7 +460,7 @@ plugins/
 
 ---
 
-## 5. MxPlot.App プラグイン（IMxPlotPlugin）
+## 5. MxPlot.App プラグイン（IMxPlotAppPlugin）
 
 ### 5.1 概要
 
@@ -499,12 +499,12 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
     /// <summary>
     /// 現在開いているすべてのデータを一括で CSV エクスポートするプラグイン。
     /// </summary>
-    public sealed class BatchCsvExportPlugin : IMxPlotPlugin
+    public sealed class BatchCsvExportPlugin : IMxPlotAppPlugin
     {
         public string CommandName => "Batch CSV Export";
         public string Description => "すべての開いているデータセットを CSV に書き出します。";
 
-        public void Run(IMxPlotContext ctx)
+        public void Run(IMxPlotAppContext ctx)
         {
             var datasets = ctx.OpenDatasets;
             if (datasets.Count == 0) return;
@@ -531,7 +531,7 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
 Avalonia のダイアログ API を使えます。
 
 ```csharp
-public async void Run(IMxPlotContext ctx)
+public async void Run(IMxPlotAppContext ctx)
 {
     // ctx.Owner を使ってファイル保存ダイアログを開く
     if (ctx.Owner is null) return;
@@ -584,7 +584,7 @@ public class MyPropFormat : IMatrixDataReader { ... }
 public class MyAnalysisPlugin : IMatrixPlotterPlugin { ... }
 
 // ③ MxPlot.App プラグイン
-public class MyBatchPlugin : IMxPlotPlugin { ... }
+public class MyBatchPlugin : IMxPlotAppPlugin { ... }
 ```
 
 ---
@@ -670,6 +670,6 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 
 ### MxPlot.App プラグイン追加
 
-- [ ] `IMxPlotPlugin` を実装
+- [ ] `IMxPlotAppPlugin` を実装
 - [ ] `CommandName`, `Description` を返す
 - [ ] `MxPlotAppPluginRegistry.LoadFromDirectory()` を App 起動時に呼ぶ

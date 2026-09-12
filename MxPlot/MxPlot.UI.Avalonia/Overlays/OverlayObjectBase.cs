@@ -164,7 +164,7 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
         /// the entry is hidden when no handler is assigned.
         /// </summary>
-        public OverlayMenuEntry PenEdit { get; } = new("Properties\u2026", icon: MenuIcons.Edit, tooltip: "Open overlay property dialog");
+        public OverlayMenuEntry PenEdit { get; } = new("Properties\u2026", icon: MenuIcons.Gear, tooltip: "Open overlay property dialog");
 
         /// <summary>
         /// Called when the user double-clicks this object.

@@ -895,7 +895,14 @@ namespace MxPlot.Core
         /// for the operation's whole duration like a frame cache, so claiming a larger share of
         /// available memory for a short time is a reasonable trade.
         /// </remarks>
-        private static int ComputeBandSize(int frameWidth, int frameHeight, int totalFrames)
+        /// <summary>
+        /// Sizes a RAM-buffered band of whole frames (by available system memory) for callers that
+        /// build Virtual output frame-by-frame elsewhere in <c>MxPlot.Core</c> — e.g.
+        /// <see cref="Processing.DimensionalOperator.Transpose{T}(MatrixData{T}, IProgress{int}?, CancellationToken)"/>
+        /// — and want the same generous-but-bounded batching this type already uses for
+        /// <see cref="Restack"/>, rather than a second, independently-tuned heuristic.
+        /// </summary>
+        internal static int ComputeBandSize(int frameWidth, int frameHeight, int totalFrames)
         {
             long frameBytes = (long)frameWidth * frameHeight * Unsafe.SizeOf<T>();
             if (frameBytes <= 0) return totalFrames;

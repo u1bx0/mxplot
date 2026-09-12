@@ -14,7 +14,7 @@ namespace MxPlot.UI.Avalonia.Views
     /// Returns <c>(Type TargetType, bool DoScale, bool ReplaceData, double SrcMin, double SrcMax, double TgtMin, double TgtMax)</c>
     /// on OK, or <c>null</c> on Cancel.
     /// </summary>
-    internal sealed class ConvertValueTypeDialog : Window
+    internal sealed class ConvertValueTypeDialog : ProcessingDialogBase
     {
         private readonly string _srcTypeName;
         private readonly double _lutMin;
@@ -23,7 +23,6 @@ namespace MxPlot.UI.Avalonia.Views
 
         private readonly ComboBox _targetTypeCombo;
         private readonly CheckBox _scaleCheck;
-        private readonly CheckBox _replaceCheck;
         private readonly TextBlock _warningText;
         private readonly TextBlock _tgtWarningText;
         private readonly TextBlock _sizeText;
@@ -55,19 +54,15 @@ namespace MxPlot.UI.Avalonia.Views
         /// is auto-recomputed from its source and would just be overwritten again on the next update.
         /// </param>
         internal ConvertValueTypeDialog(string srcTypeName, double lutMin, double lutMax, IMatrixData? srcData = null, bool isLinkWindow = false)
+            : base("Convert Value Type", width: 340, isLinkWindow: isLinkWindow, src: srcData)
         {
             _srcTypeName = srcTypeName;
             _lutMin = lutMin;
             _lutMax = lutMax;
             _srcData = srcData;
 
-            Title = "Convert Value Type";
-            Width = 340;
-            SizeToContent = SizeToContent.Height;
-            CanResize = true;
             CanMaximize = false;
             CanMinimize = false;
-            ShowInTaskbar = false;
 
             _targetTypeCombo = new ComboBox { MinWidth = 115, Width = double.NaN, Height = 24, FontSize = 11, MinHeight = 0, Padding = new Thickness(8, 0, 4, 0) };
             _targetTypeCombo.ItemsSource = Array.ConvertAll(TargetTypes, MatrixData.GetValueTypeName);
@@ -75,9 +70,6 @@ namespace MxPlot.UI.Avalonia.Views
             _targetTypeCombo.SelectedIndex = defaultIdx >= 0 ? defaultIdx : Array.IndexOf(TargetTypes, typeof(ushort));
 
             _scaleCheck = ControlFactory.MakeCheckBox("Scale values during conversion", fontSize: 11);
-            _replaceCheck = ControlFactory.MakeCheckBox("Replace current data", fontSize: 11,
-                hint: "If checked, replaces the current data in this window. If unchecked (default), result opens in a new window.");
-            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(_replaceCheck, isLinkWindow);
 
             _sizeText = new TextBlock { FontSize = 10, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center };
 
@@ -122,27 +114,8 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var panel = new StackPanel { Margin = new Thickness(12, 10, 12, 10), Spacing = 6 };
 
-            // Virtual data warning banner
-            if (_srcData?.IsVirtual == true)
-            {
-                var virtualBanner = new Border
-                {
-                    Background = new SolidColorBrush(Color.FromArgb(60, 255, 180, 0)),
-                    BorderBrush = Brushes.Orange,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(3),
-                    Padding = new Thickness(8, 5),
-                    Margin = new Thickness(0, 0, 0, 2),
-                    Child = new TextBlock
-                    {
-                        Text = "\u26a0 Source data is virtual (file-mapped). Conversion will load all frames into memory.",
-                        FontSize = 11,
-                        TextWrapping = TextWrapping.Wrap,
-                        Foreground = Brushes.Orange,
-                    },
-                };
-                panel.Children.Add(virtualBanner);
-            }
+            if (MaterializationWarningBanner != null)
+                panel.Children.Add(MaterializationWarningBanner);
 
             var typeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             typeRow.Children.Add(new TextBlock
@@ -160,7 +133,7 @@ namespace MxPlot.UI.Avalonia.Views
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 2)));
             panel.Children.Add(_scaleCheck);
             panel.Children.Add(_scalePanel);
-            panel.Children.Add(_replaceCheck);
+            panel.Children.Add(ReplaceDataCheckBox);
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
 
             var okBtn = new Button
@@ -400,7 +373,7 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var tgt = SelectedTargetType();
             bool doScale = _scaleCheck.IsChecked == true;
-            bool replaceData = _replaceCheck.IsChecked == true;
+            bool replaceData = ReplaceDataCheckBox.IsChecked == true;
 
             _lastTargetType = tgt;
 

@@ -2,7 +2,6 @@
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -73,6 +72,48 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         /// <inheritdoc />
         public ParallelOptions? ParallelOptions { get; set; }
+
+        /// <summary>
+        /// Parallel options actually used by the render loops: whatever the caller configured, or
+        /// a default one once the frame is large enough to be worth splitting.
+        /// </summary>
+        /// <remarks>
+        /// Nothing in the library ever assigned <see cref="ParallelOptions"/>, so every loop below
+        /// took its serial fallback: a 4096x4096 byte frame measured 6.68 ms against roughly 2 ms
+        /// for the same loop across all cores. <c>CompositeBitmapWriter</c> already defaulted its
+        /// own options (<c>ParallelOptions ?? new ParallelOptions()</c>), so composite rendering
+        /// was parallel while LUT rendering was not - the asymmetry was unintended.
+        /// Small frames stay serial. The crossover was measured on this loop (i9-14900KF, 32T):
+        /// 320x320 (102k px) serial 0.035 ms vs parallel 0.045 ms; 384x384 (147k px) serial
+        /// 0.054 ms vs parallel 0.021 ms. So it sits between 100k and 150k pixels, and 2^17 lands
+        /// on it. Getting this wrong in either direction is cheap - below the crossover the whole
+        /// loop is a few hundredths of a millisecond either way - but placing it too high gives up
+        /// a real win: 512x512 is already 4.5x faster in parallel.
+        /// </remarks>
+        public ParallelRenderPolicy ParallelPolicy { get; set; } = ParallelRenderPolicy.Auto;
+
+        private ParallelOptions? EffectiveParallelOptions => ParallelPolicy switch
+        {
+            // The policy answers "should this go parallel", the options answer "with how many".
+            // Keeping them separate is what lets a caller cap the degree of parallelism without
+            // also forcing a frame too small to benefit through a parallel loop - and it is why
+            // Never wins over supplied options: setting both says "these options, if you ever go
+            // parallel", and Never says not to.
+            ParallelRenderPolicy.Never => null,
+            ParallelRenderPolicy.Always => ParallelOptions ?? SharedParallelOptions,
+            _ => _autoWantsParallel ? ParallelOptions ?? SharedParallelOptions : null,
+        };
+
+        /// <remarks>
+        /// Evaluated per render rather than cached when the data is assigned: it is one multiply
+        /// and a compare against dimensions <see cref="RenderCore"/> has already read, so there is
+        /// nothing to gain by caching, and no cached value that can go stale when the frame size
+        /// changes without the writer being recreated (the writer is only rebuilt on a value-type
+        /// or rendering-mode change, not on every new MatrixData).
+        /// </remarks>
+        private const int ParallelPixelThreshold = 1 << 17;
+        private static readonly ParallelOptions SharedParallelOptions = new();
+        private bool _autoWantsParallel;
 
         /// <inheritdoc />
         public object? StructValueConverter { get; set; }
@@ -176,6 +217,30 @@ namespace MxPlot.UI.Avalonia.Rendering
             RebuildColorMapCache(ctx);
         }
 
+        /// <summary>
+        /// Builds the value -> LUT level transform. Levels are treated as equal-width bins:
+        /// level i covers [i/L, (i+1)/L) of the value range, so every color gets the same share.
+        /// Anchoring the scale on (Levels - 1) instead would hand the topmost level only the
+        /// single exact-max value - invisible at 256 levels, but glaring for a hand-written
+        /// .mlut with a handful of entries (a 3-color LUT rendered as two wide bands plus a
+        /// one-pixel sliver).
+        /// </summary>
+        internal static (double Scale, double Offset) BuildIndexMapping(int levels, double viewMin, double viewMax)
+        {
+            double range = viewMax - viewMin;
+            if (range == 0) range = 1.0;
+
+            double scale = levels / range;
+            return (scale, -viewMin * scale);
+        }
+
+        /// <summary>
+        /// Applies the transform from <see cref="BuildIndexMapping"/> to a single value.
+        /// The unsafe render loops inline this same expression for speed.
+        /// </summary>
+        internal static int MapValueToLevel(double value, double scale, double offset, int maxLevelIndex)
+            => Math.Clamp((int)(value * scale + offset), 0, maxLevelIndex);
+
         private void RebuildColorMapCache(LutRenderingContext ctx)
         {
             int size, offset;
@@ -185,19 +250,13 @@ namespace MxPlot.UI.Avalonia.Rendering
             else return;
 
             var (viewMin, viewMax) = ctx.GetEffectiveRange();
-            double range = viewMax - viewMin;
-            if (range == 0) range = 1.0;
-            double scale = (ctx.LookupTable.Levels - 1) / range;
-            double valueOffset = -viewMin * scale;
+            var (scale, valueOffset) = BuildIndexMapping(ctx.LookupTable.Levels, viewMin, viewMax);
             int lutMaxIndex = ctx.LookupTable.Levels - 1;
             var lut = ctx.LookupTable.AsSpan();
 
             var map = new int[size];
             for (int v = 0; v < size; v++)
-            {
-                int index = (int)((v - offset) * scale + valueOffset);
-                map[v] = lut[Math.Clamp(index, 0, lutMaxIndex)];
-            }
+                map[v] = lut[MapValueToLevel(v - offset, scale, valueOffset, lutMaxIndex)];
 
             _cachedColorMap = map;
             _cachedLut = ctx.LookupTable;
@@ -213,16 +272,13 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderCore(IMatrixData source, WriteableBitmap target, LutRenderingContext ctx)
         {
             var (viewMin, viewMax) = ctx.GetEffectiveRange();
-            double range = viewMax - viewMin;
-            if (range == 0) range = 1.0;
-
-            double valueScale = (ctx.LookupTable.Levels - 1) / range;
-            double valueOffset = -viewMin * valueScale;
+            var (valueScale, valueOffset) = BuildIndexMapping(ctx.LookupTable.Levels, viewMin, viewMax);
             int lutMaxIndex = ctx.LookupTable.Levels - 1;
 
             int width = source.XCount;
             int height = source.YCount;
             var scratch = EnsureScratch(width, height);
+            _autoWantsParallel = width * height >= ParallelPixelThreshold;
 
             fixed (int* pScratch = scratch)
             {
@@ -270,9 +326,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             var colorMap = _cachedColorMap!;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     ReadOnlySpan<byte> row = mem.Span.Slice(iy * width, width);
                     int* pRow = targetPtr + iy * strideInts;
@@ -301,9 +357,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             var colorMap = _cachedColorMap!;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     ReadOnlySpan<ushort> row = mem.Span.Slice(iy * width, width);
                     int* pRow = targetPtr + iy * strideInts;
@@ -332,9 +388,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             var colorMap = _cachedColorMap!;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var values = mem.Span.Slice(iy * width, width);
                     int* pRow = targetPtr + iy * strideInts;
@@ -362,9 +418,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             var typedData = (MatrixData<int>)source;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var values = mem.Span.Slice(iy * width, width);
                     var lut = lutMemory.Span;
@@ -396,9 +452,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var values = mem.Span.Slice(iy * width, width);
                     var lut = lutMemory.Span;
@@ -438,9 +494,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var values = mem.Span.Slice(iy * width, width);
                     var lut = lutMemory.Span;
@@ -483,9 +539,9 @@ namespace MxPlot.UI.Avalonia.Rendering
             int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var values = mem.Span.Slice(iy * width, width);
                     var lut = lutMemory.Span;
@@ -523,9 +579,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         {
             int missingColor = _cachedLut?.MissingColor ?? 0;
 
-            if (ParallelOptions != null)
+            if (EffectiveParallelOptions != null)
             {
-                Parallel.For(0, height, ParallelOptions, iy =>
+                Parallel.For(0, height, EffectiveParallelOptions!, iy =>
                 {
                     var lut = lutMemory.Span;
                     int* pRow = targetPtr + iy * strideInts;

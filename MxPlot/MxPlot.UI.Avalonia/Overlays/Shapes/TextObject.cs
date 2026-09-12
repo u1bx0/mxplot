@@ -2,6 +2,7 @@
 using Avalonia.Input;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
@@ -36,7 +37,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// The host assigns <see cref="OverlayMenuEntry.Handler"/> after the object is added;
         /// the entry is hidden when no handler is assigned.
         /// </summary>
-        public OverlayMenuEntry Edit { get; } = new("Edit…");
+        public OverlayMenuEntry Edit { get; } = new("Edit…", icon: MenuIcons.Edit, tooltip: "Edit this text");
 
         /// <summary>Double-click invokes the <see cref="Edit"/> handler rather than the pen editor.</summary>
         public override void OnDoubleClicked() => Edit.Handler?.Invoke();

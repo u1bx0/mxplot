@@ -5,9 +5,11 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MxPlot.Core;
 using MxPlot.Core.IO;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia;
 using MxPlot.UI.Avalonia.Views;
+using MxPlot.UI.Avalonia.Rendering;
+using Avalonia.Input;
+using Avalonia.Interactivity;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -33,6 +35,7 @@ namespace MxPlot.App.ViewModels
         private bool _hasSelection;
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ExportMenuHeader))]
         private bool _hasMultiSelection;
 
         /// <summary>True when two or more <em>visible</em> windows are selected (required for Tile and Sync).</summary>
@@ -64,6 +67,30 @@ namespace MxPlot.App.ViewModels
 
         public bool IsLoadingIndeterminate => _loadingTotal <= 0;
 
+        /// <summary>Header text for the "Export as PNG" hamburger menu item, reflecting the current selection count.</summary>
+        public string ExportMenuHeader => HasMultiSelection ? "Export selected as PNG…" : "Export as PNG…";
+
+        /// <summary>Whether the OS clipboard currently holds data this app can open. Refreshed each time the hamburger menu opens.</summary>
+        [ObservableProperty]
+        private bool _isClipboardUsable;
+
+        /// <summary>True while the dashboard window is pinned always-on-top regardless of focus.</summary>
+        [ObservableProperty]
+        private bool _isAlwaysOnTop;
+
+        /// <summary>
+        /// When true, the dashboard and plot windows automatically nudge apart (X-axis only) so they
+        /// don't cover each other on activation. Backs the "Avoid Window Overlap" hamburger menu toggle.
+        /// </summary>
+        [ObservableProperty]
+        private bool _isAvoidWindowOverlapEnabled = true;
+
+        [RelayCommand]
+        private void ToggleAvoidWindowOverlap() => IsAvoidWindowOverlapEnabled = !IsAvoidWindowOverlapEnabled;
+
+        [RelayCommand]
+        private void OpenMemoryMonitor() => MemoryMonitorWindow.ShowOrActivate();
+
         private CancellationTokenSource? _loadingCts;
 
         /// <summary>Callback set by the View to position a newly created plot window.</summary>
@@ -72,8 +99,18 @@ namespace MxPlot.App.ViewModels
         /// <summary>Set by the View so <see cref="TileWindows"/> can avoid the dashboard's area.</summary>
         internal Window? DashboardWindow { get; set; }
 
-        /// <summary>Set by the View to sync list selection when a managed window is activated.</summary>
+        /// <summary>Set by the View to sync list selection when a managed window is activated
+        /// without an accompanying click (Alt+Tab, taskbar, or list-driven activation).</summary>
         internal Action<Window>? WindowFocusedAction { get; set; }
+
+        /// <summary>Set by the View to apply Ctrl-aware selection when a managed window's
+        /// content is actually clicked. Second parameter is whether Ctrl was held.</summary>
+        internal Action<Window, bool>? WindowSelectionClickedAction { get; set; }
+
+        /// <summary>The window whose click was just relayed via <see cref="WindowSelectionClickedAction"/>,
+        /// so the deferred <see cref="WindowFocusedAction"/> fallback in <see cref="RegisterWindow"/>
+        /// knows to skip it (Activated fires before PointerPressed for the same click).</summary>
+        private Window? _lastClickHandledWindow;
 
         [RelayCommand]
         private void CancelLoading() => _loadingCts?.Cancel();
@@ -154,7 +191,25 @@ namespace MxPlot.App.ViewModels
             }
 
             window.Closed += OnManagedWindowClosed;
-            window.Activated += (_, _) => WindowFocusedAction?.Invoke(window);
+
+            // Window activation/selection sync. PointerPressed (Tunnel) fires for real clicks
+            // and carries live KeyModifiers, so Ctrl-aware selection (toggle vs. exclusive-select)
+            // lives there. Window.Activated also fires for non-click activations (Alt+Tab,
+            // taskbar, or the dashboard list itself calling Window.Activate()) where no modifier
+            // state exists; empirically Activated always fires BEFORE PointerPressed for a real
+            // click on this platform, so its fallback is posted (deferred) and skipped whenever
+            // a PointerPressed on the same window has just been handled — otherwise the plain
+            // fallback select would apply first and then get redundantly overridden.
+            window.AddHandler(InputElement.PointerPressedEvent, (_, e) =>
+            {
+                _lastClickHandledWindow = window;
+                WindowSelectionClickedAction?.Invoke(window, e.KeyModifiers.HasFlag(KeyModifiers.Control));
+            }, RoutingStrategies.Tunnel);
+            window.Activated += (_, _) => Dispatcher.UIThread.Post(() =>
+            {
+                if (_lastClickHandledWindow == window) { _lastClickHandledWindow = null; return; }
+                WindowFocusedAction?.Invoke(window);
+            });
 
             // Tab / Shift+Tab during inline rename: commit current name and move to next/prev item.
             EventHandler<bool> onNav = (sender, forward) =>

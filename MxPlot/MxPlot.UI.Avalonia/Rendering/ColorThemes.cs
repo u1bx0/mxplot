@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 
-namespace MxPlot.Core.Imaging
+namespace MxPlot.UI.Avalonia.Rendering
 {
     /// <summary>
     /// Provides a collection of predefined and user-registered color themes for use in data visualization.
@@ -46,6 +48,10 @@ namespace MxPlot.Core.Imaging
     ///     <description>Simple diverging colormap (Original)</description>
     ///   </item>
     /// </list>
+    /// 
+    /// <para>Full license texts for the components above (currently the Apache 2.0
+    /// license covering Turbo's lookup table) are reproduced in this project's
+    /// THIRD-PARTY-NOTICES.txt.</para>
     /// 
     /// <para><strong>Usage:</strong></para>
     /// <code>
@@ -93,12 +99,17 @@ namespace MxPlot.Core.Imaging
 
         static ColorThemes()
         {
-            int red = 0xFF0000; // Red for missing values
+            // LookupTable's constructor expects R | (G << 8) | (B << 16) (see its own doc comment),
+            // not the conventional 0xRRGGBB hex reading - so red and blue are each other's
+            // "natural-looking" literal (0xFF0000 is really blue, 0x0000FF is really red) and brawn
+            // needs its byte order reversed too. green/magenta are unaffected: swapping R and B
+            // leaves a color with R==B (or R==B==0) unchanged.
+            int red = 0x0000FF; // Red for missing values
             int green = 0x00FF00; // Green for missing values
-            int blue = 0x0000FF; // Blue for missing values
+            int blue = 0xFF0000; // Blue for missing values
             int magenta = 0xFF00FF; // Magenta for missing values
             //int black = 0x000000; // Black for missing values
-            int brawn = 0x8B4513; // Brown for missing values
+            int brawn = 0x13458B; // Brown for missing values
 
             // Create built-in LUTs
             Grayscale = new LookupTable("Grayscale", CreateGrayscale(DefaultLevels), red);
@@ -167,6 +178,64 @@ namespace MxPlot.Core.Imaging
                             .Where(l => !string.IsNullOrWhiteSpace(l))
                             .ToArray();
             return CreateFrom(lines);   
+        }
+
+        /// <summary>
+        /// Loads every <c>.mlut</c> file under <paramref name="directoryPath"/> and registers it,
+        /// returning how many were registered. A missing directory is not an error - it simply
+        /// registers nothing - and a file that fails to parse is skipped rather than aborting the
+        /// scan, so one hand-edited mistake cannot cost the user their other palettes.
+        /// <para>
+        /// The extension is matched case-insensitively on every platform. Left to the file system,
+        /// <c>*.mlut</c> would also pick up <c>Fire.MLUT</c> on Windows and macOS but silently skip
+        /// it on Linux - the kind of difference that only shows up as "my palette did not load"
+        /// after the instructions were written on another machine.
+        /// </para>
+        /// <para>
+        /// Where to look is the caller's decision; this only scans what it is given.
+        /// </para>
+        /// </summary>
+        /// <param name="directoryPath">Directory to scan.</param>
+        /// <param name="recursive">Whether to descend into subdirectories. Defaults to <c>true</c>.</param>
+        /// <returns>The number of lookup tables registered.</returns>
+        public static int LoadFromDirectory(string directoryPath, bool recursive = true)
+        {
+            if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+                return 0;
+
+            var options = new EnumerationOptions
+            {
+                MatchCasing = MatchCasing.CaseInsensitive,
+                RecurseSubdirectories = recursive,
+                IgnoreInaccessible = true,
+            };
+
+            int registered = 0;
+            foreach (string file in Directory.EnumerateFiles(directoryPath, "*.mlut", options))
+            {
+                LookupTable? lut = null;
+                try
+                {
+                    lut = LoadFromFile(file);
+                }
+                catch (Exception e)
+                {
+                    // CreateFrom throws on a file too short to be a LUT, and the read itself can
+                    // fail on a locked or unreadable file.
+                    Debug.WriteLine($"[ColorThemes.LoadFromDirectory] '{file}' could not be read: {e.Message}");
+                }
+
+                if (lut == null)
+                {
+                    Debug.WriteLine($"[ColorThemes.LoadFromDirectory] Skipped malformed LUT '{file}'.");
+                    continue;
+                }
+
+                Register(lut);
+                registered++;
+            }
+
+            return registered;
         }
 
         /// <summary>
@@ -646,8 +715,18 @@ namespace MxPlot.Core.Imaging
         
 
         // ------------------------------------------------------------
-        // Turbo (Google AI, Apache 2.0) - Official 256-color LUT
+        // Turbo (Google AI) - official 256-color LUT
         // https://ai.googleblog.com/2019/08/turbo-improved-rainbow-colormap-for.html
+        //
+        // Copyright 2019 Google LLC.
+        // SPDX-License-Identifier: Apache-2.0
+        //
+        // The turbo256 table below is the only third-party licensed data in this
+        // file. Its full Apache License 2.0 text lives in this project's
+        // THIRD-PARTY-NOTICES.txt (section 3, "Built-in colormaps"), which ships
+        // inside the NuGet package; the license covers that table alone, not the
+        // rest of this file or MxPlot as a whole - Apache 2.0 places no copyleft /
+        // share-alike obligation on surrounding code.
         // ------------------------------------------------------------
         private static int[] CreateTurbo(int levels)
         {

@@ -6,7 +6,6 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Rendering;
 using MxPlot.UI.Avalonia.Utils;
@@ -70,7 +69,17 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── State ────────────────────────────────────────────────────────────
         private WriteableBitmap? _bitmap;
+
+        // Memoized palette-depth resample - see ResolveEffectiveLut.
+        private LookupTable? _resampleSource;
+        private LookupTable? _resampledLut;
+        private int _resampleDepth;
         private IBitmapWriter? _writer;
+#if DEBUG
+        // Debug-only render timing - see RefreshBitmap's own comment and DrawRenderDiagnosticsOverlay.
+        private readonly System.Diagnostics.Stopwatch _writerRenderStopwatch = new();
+        private double _lastWriterRenderMs;
+#endif
         private bool _refreshing;         // a render is in flight; see RefreshBitmap
         private bool _refreshRequested;   // a nested request arrived while it was
         private EventHandler? _scaleChangedHandler;
@@ -155,6 +164,61 @@ namespace MxPlot.UI.Avalonia.Controls
         /// Defaults to true. Set to false for orthogonal side views whose ViewTransform handles orientation.
         /// </summary>
         public bool FlipY { get; set; } = true;
+
+        /// <summary>
+        /// How much of the machine the bitmap writer's pixel loop may use.
+        /// <see cref="ParallelismAuto"/> (the default) leaves the writer to decide from the frame
+        /// size; <c>0</c> keeps the loop on one thread; <c>-1</c> is unrestricted; a positive
+        /// value caps the degree of parallelism.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Shaped after <c>MatrixDataPlotter.Parallelism</c> in the MatrixDataPlot library, whose
+        /// 0 / -1 / positive encoding consumers already know, with Auto added for the size-based
+        /// default this library has and that one did not.
+        /// </para>
+        /// <para>
+        /// A positive cap still goes through the writer's size threshold, so capping how many
+        /// cores a large frame may use does not also force a tiny frame to go parallel. Measured
+        /// on a 4096x4096 LUT frame (32 logical processors): 8 threads reach 77% of the best time
+        /// while leaving three quarters of the machine to whatever else the host is doing - an
+        /// acquisition or processing thread that matters more than redraw latency.
+        /// </para>
+        /// <para>
+        /// Handed to the writer alongside <see cref="FlipY"/> on every allocation pass, so a
+        /// change takes effect from the next render.
+        /// </para>
+        /// </remarks>
+        public int Parallelism
+        {
+            get => _parallelism;
+            set
+            {
+                if (value < ParallelismAuto)
+                    throw new ArgumentOutOfRangeException(
+                        nameof(value), value, "Parallelism must be -2 (Auto), -1, 0, or positive.");
+                if (_parallelism == value) return;
+                _parallelism = value;
+                // Rebuilt here rather than per render: the options object is immutable in practice
+                // and handing the same instance to the writer every pass keeps it allocation-free.
+                _parallelismOptions = value > 0
+                    ? new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = value }
+                    : null;
+            }
+        }
+
+        /// <summary>Sentinel for <see cref="Parallelism"/>: let the writer decide from frame size.</summary>
+        public const int ParallelismAuto = -2;
+
+        private int _parallelism = ParallelismAuto;
+        private System.Threading.Tasks.ParallelOptions? _parallelismOptions;
+
+        private MxPlot.UI.Avalonia.Rendering.ParallelRenderPolicy ParallelPolicyFromParallelism => _parallelism switch
+        {
+            0 => MxPlot.UI.Avalonia.Rendering.ParallelRenderPolicy.Never,
+            -1 => MxPlot.UI.Avalonia.Rendering.ParallelRenderPolicy.Always,
+            _ => MxPlot.UI.Avalonia.Rendering.ParallelRenderPolicy.Auto,   // Auto, and any positive cap
+        };
 
         /// <summary>When true, draws the current data-pixel coordinates at the top-left corner.</summary>
         public bool ShowDataPosition { get; set; } = true;
@@ -256,7 +320,9 @@ namespace MxPlot.UI.Avalonia.Controls
         public static readonly StyledProperty<bool> IsInvertedColorProperty =
             AvaloniaProperty.Register<RenderSurface, bool>(nameof(IsInvertedColor));
         public static readonly StyledProperty<int> LutLevelProperty =
-            AvaloniaProperty.Register<RenderSurface, int>(nameof(LutLevel)); // 0 = use LUT.Levels
+            // 0 = use the LUT's own level count. MxView pushes its own LutDepth default in at
+            // construction, so in practice the surface starts at 256, not at this sentinel.
+            AvaloniaProperty.Register<RenderSurface, int>(nameof(LutLevel));
 
         public static readonly StyledProperty<RenderingMode> RenderingModeProperty =
             AvaloniaProperty.Register<RenderSurface, RenderingMode>(
@@ -596,6 +662,8 @@ namespace MxPlot.UI.Avalonia.Controls
             }
 
             _writer.FlipY = FlipY;
+            _writer.ParallelPolicy = ParallelPolicyFromParallelism;
+            _writer.ParallelOptions = _parallelismOptions;
 
             // Set Complex projection function when data is Complex
             if (data.ValueType == typeof(Complex))
@@ -644,7 +712,18 @@ namespace MxPlot.UI.Avalonia.Controls
                     var context = BuildContext(data);
                     if (context == null) return;
 
+#if DEBUG
+                    // Debug-only, relative signal (not a Release-mode perf number - JIT/tiering
+                    // differences make the absolute value meaningless there): "did this change
+                    // make the writer call faster or slower, roughly", visible at a glance via
+                    // DrawRenderDiagnosticsOverlay instead of reading log spam. Same reasoning as
+                    // LastRenderUsedRgbFastPath - a quick sanity check, not a shipped API.
+                    _writerRenderStopwatch.Restart();
                     _writer.Render(data, _bitmap, context);
+                    _lastWriterRenderMs = _writerRenderStopwatch.Elapsed.TotalMilliseconds;
+#else
+                    _writer.Render(data, _bitmap, context);
+#endif
                 }
                 while (_refreshRequested);
             }
@@ -666,13 +745,33 @@ namespace MxPlot.UI.Avalonia.Controls
                 _ => null
             };
 
+        /// <summary>
+        /// Applies the requested palette depth, resampling the LUT when it does not already have
+        /// that many levels. The result is memoized: <see cref="LutBitmapWriter"/> keys its color
+        /// map cache on the LUT instance, so handing it a freshly resampled table on every render
+        /// would rebuild that map every frame - and for a custom .mlut whose level count differs
+        /// from the default depth, that is every frame.
+        /// </summary>
+        private LookupTable ResolveEffectiveLut(LookupTable lut, int depth)
+        {
+            // depth 0 is the "use the LUT's own level count" sentinel; 1 would collapse the LUT.
+            if (depth <= 1 || depth == lut.Levels) return lut;
+
+            if (!ReferenceEquals(_resampleSource, lut) || _resampleDepth != depth)
+            {
+                _resampledLut = lut.Resample(depth);
+                _resampleSource = lut;
+                _resampleDepth = depth;
+            }
+
+            return _resampledLut!;
+        }
+
         private LutRenderingContext? BuildLutContext(IMatrixData data, LookupTable? lut)
         {
             if (lut == null) return null;
 
-            // Apply palette depth: resample LUT when a custom level count is requested
-            int depth = LutLevel;
-            var effectiveLut = (depth > 1 && depth != lut.Levels) ? lut.Resample(depth) : lut;
+            var effectiveLut = ResolveEffectiveLut(lut, LutLevel);
 
             double min, max;
             if (IsFixedRange)
@@ -799,9 +898,10 @@ namespace MxPlot.UI.Avalonia.Controls
 
             DrawCrosshair(ctx);
             DrawPositionOverlay(ctx);
-#if DEBUG   
+#if DEBUG
             DrawModifierDebugOverlay(ctx);
-#endif 
+            DrawRenderDiagnosticsOverlay(ctx);
+#endif
         }
 
         /// <summary>
@@ -1020,9 +1120,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
+            /*
 #if DEBUG
             Debug.WriteLine("[OnKeyDown] Key: {0}, Modifiers: {1}", e.Key, e.KeyModifiers);
 #endif
+            */
             if (OverlayManager != null && OverlayManager.OnKeyDown(e.Key, e.KeyModifiers))
             {
                 e.Handled = true;
@@ -1041,10 +1143,12 @@ namespace MxPlot.UI.Avalonia.Controls
         protected override void OnKeyUp(KeyEventArgs e)
         {
             bool isModifier = e.Key is Key.LeftShift or Key.RightShift or Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt;
+            /*
 #if DEBUG
             Debug.WriteLine("[OnKeyUp] Key: {0}, Modifiers: {1}, IsModifier: {2}",
                 e.Key, e.KeyModifiers, isModifier);
 #endif
+            */
             OverlayManager?.OnKeyUp(e.Key, e.KeyModifiers);
             if (OverlayManager != null && isModifier)
             {
@@ -1441,6 +1545,82 @@ namespace MxPlot.UI.Avalonia.Controls
             ctx.DrawText(ft3, new Point(ox + pad, oy + pad + ft1.Height + lineGap + ft2.Height + lineGap));
         }
 
+#if DEBUG
+        /// <summary>
+        /// Debug-only render diagnostics: the last writer.Render call's own elapsed time (any
+        /// mode - LUT, Composite, ColorCoded), plus, in Composite mode specifically, whether that
+        /// render actually took <see cref="CompositeBitmapWriter"/>'s pure-RGB Fast Path (see its
+        /// own <c>IsRgbFastPathEligible</c>) instead of the general per-pixel LUT/blend path. Grew
+        /// out of a DSImageCapture performance investigation where this was exactly the kind of
+        /// thing that needed an at-a-glance Debug-time sanity check, without adding logging noise.
+        /// </summary>
+        /// <remarks>
+        /// The timing is a relative signal for spotting regressions or confirming a change helped
+        /// within the same Debug session - not a Release-mode perf number. Debug builds run
+        /// un-tiered/un-optimized, so the absolute millisecond value here does not transfer to
+        /// Release; that is also why this stays a private, Debug-only overlay rather than a public
+        /// MxView property - a "did this get faster" glance does not need a committed public API,
+        /// and a real Release-mode number would need its own separate design (this method's own
+        /// Stopwatch already only exists under #if DEBUG - see the field declarations above).
+        /// Bottom-right, away from <see cref="DrawModifierDebugOverlay"/> (top-right) and any
+        /// app-level overlay that might sit at the view's top-left (e.g. DSImageCapture's own
+        /// Stack controls).
+        /// </remarks>
+        private void DrawRenderDiagnosticsOverlay(DrawingContext ctx)
+        {
+            bool isComposite = _writer is CompositeBitmapWriter;
+            bool fast = _writer is CompositeBitmapWriter cbw && cbw.LastRenderUsedRgbFastPath;
+            string? rejectReason = _writer is CompositeBitmapWriter cbw2 ? cbw2.LastRgbFastPathRejectReason : null;
+
+            const double fontSize = 11.0;
+            const double pad = 4.0;
+            const double lineGap = 2.0;
+            var tf = new Typeface("Consolas");
+            var neutralBrush = new SolidColorBrush(Color.FromRgb(220, 220, 220));
+            var fastBrush = fast
+                ? new SolidColorBrush(Color.FromRgb(120, 220, 120))
+                : new SolidColorBrush(Color.FromRgb(180, 180, 180));
+            var reasonBrush = new SolidColorBrush(Color.FromRgb(230, 180, 90));
+
+            var lines = new List<FormattedText>
+            {
+                new($"Render {_lastWriterRenderMs:F2} ms", CultureInfo.CurrentCulture, FlowDirection.LeftToRight, tf, fontSize, neutralBrush),
+            };
+            if (isComposite)
+                lines.Add(new(fast ? "FastPath ✓" : "FastPath –",
+                    CultureInfo.CurrentCulture, FlowDirection.LeftToRight, tf, fontSize, fastBrush));
+            // Diagnostic-only, per-condition detail so a stale/unexpectedly-non-eligible session
+            // does not need a debugger session to explain itself - see CompositeBitmapWriter's own
+            // LastRgbFastPathRejectReason doc comment.
+            if (isComposite && !fast && rejectReason != null)
+                lines.Add(new(rejectReason,
+                    CultureInfo.CurrentCulture, FlowDirection.LeftToRight, tf, fontSize, reasonBrush));
+
+            double bw = 0;
+            double bh = pad * 2;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                bw = Math.Max(bw, lines[i].Width);
+                bh += lines[i].Height + (i > 0 ? lineGap : 0);
+            }
+            bw += pad * 2;
+            double ox = Bounds.Width - bw - 4.0;
+            double oy = Bounds.Height - bh - 4.0;
+
+            var bg = isComposite && fast
+                ? new SolidColorBrush(Color.FromArgb(200, 20, 100, 20))
+                : new SolidColorBrush(Color.FromArgb(200, 60, 60, 60));
+
+            ctx.FillRectangle(bg, new Rect(ox, oy, bw, bh), 3f);
+            double y = oy + pad;
+            foreach (var line in lines)
+            {
+                ctx.DrawText(line, new Point(ox + pad, y));
+                y += line.Height + lineGap;
+            }
+        }
+#endif
+
         // ── Position overlay ──────────────────────────────────────────────────
 
         /// <summary>
@@ -1617,6 +1797,14 @@ namespace MxPlot.UI.Avalonia.Controls
             var recipes = CompositeRecipes;
             var indices = CompositeFrameIndices;
             if (recipes is not { Count: > 0 } || indices is not { Length: > 0 }) return false;
+
+            // MatrixData, CompositeRecipes and CompositeFrameIndices are separate styled properties
+            // that can briefly disagree mid-transition (see BuildCompositeContext's identical guard) --
+            // e.g. entering Composite mode pushes N frame indices before the view's MatrixData has
+            // been swapped for the merged N-frame set. md.GetValueAt below would throw for an index
+            // past md.FrameCount; skip the read-out for this frame instead, same as the bitmap.
+            foreach (int frameIndex in indices)
+                if (frameIndex < 0 || frameIndex >= md.FrameCount) return false;
 
             int count = Math.Min(recipes.Count, indices.Length);
             var separator = new SolidColorBrush(Color.FromRgb(150, 150, 150));

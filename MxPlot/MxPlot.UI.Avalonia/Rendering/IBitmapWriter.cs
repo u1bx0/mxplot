@@ -45,10 +45,26 @@ namespace MxPlot.UI.Avalonia.Rendering
         bool FlipY { get; set; }
 
         /// <summary>
-        /// Gets or sets parallel processing options for the pixel loop.
-        /// Set to <c>null</c> for sequential execution (default).
+        /// Gets or sets the options used when the pixel loop runs in parallel (degree of
+        /// parallelism, scheduler, cancellation). <c>null</c> means "no preference" and lets the
+        /// writer pick a default; it does not by itself decide whether the loop goes parallel.
+        /// Use <see cref="ParallelPolicy"/> for that.
         /// </summary>
         ParallelOptions? ParallelOptions { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the pixel loop runs across cores.
+        /// Defaults to <see cref="ParallelRenderPolicy.Auto"/>.
+        /// </summary>
+        /// <remarks>
+        /// This property exists because <see cref="ParallelOptions"/> previously carried both
+        /// meanings: <c>null</c> was documented as "sequential", so the only way to reach the
+        /// parallel path was to hand in options - and nothing in the library ever did, which left
+        /// LUT rendering serial by accident. Splitting the two lets the default be parallel for
+        /// large frames while <see cref="ParallelRenderPolicy.Never"/> still gives a caller a way
+        /// to ask for a single-threaded render on purpose.
+        /// </remarks>
+        ParallelRenderPolicy ParallelPolicy { get; set; }
 
         /// <summary>
         /// Gets or sets a converter for struct-based value types

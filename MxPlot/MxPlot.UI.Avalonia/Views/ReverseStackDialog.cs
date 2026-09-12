@@ -18,13 +18,14 @@ namespace MxPlot.UI.Avalonia.Views
             string? AxisName,
             bool ReplaceData);
 
-        internal static Task<ReverseStackParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false)
+        internal static Task<ReverseStackParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false, IMatrixData? src = null)
         {
-            var dlg = new ReverseStackDialog(axes, isLinkWindow);
+            var dlg = new ReverseStackDialog(axes, isLinkWindow, src);
             return dlg.ShowDialog<ReverseStackParameters?>(owner);
         }
 
-        private ReverseStackDialog(IReadOnlyList<Axis> axes, bool isLinkWindow) : base("Reverse Stack", isLinkWindow: isLinkWindow)
+        private ReverseStackDialog(IReadOnlyList<Axis> axes, bool isLinkWindow, IMatrixData? src)
+            : base("Reverse Stack", isLinkWindow: isLinkWindow, src: src)
         {
             const double LW = 80;
 
@@ -53,10 +54,17 @@ namespace MxPlot.UI.Avalonia.Views
             axisRow.Children.Add(axisCombo);
 
             // ── Reverse all frames ────────────────────────────────────────────
+            // With a single axis, reversing "all frames" (raw frame order) and reversing along
+            // that one axis are the same operation (see ReverseStackOperation.Execute) -- the
+            // checkbox would just be a confusing second way to say the same thing, so it is
+            // hidden entirely rather than merely disabled, mirroring how CreateProjectionDialog
+            // hides "This position only" when there are no surviving axes to distinguish.
+            bool hasMultipleAxes = axes.Count > 1;
             var allAxesChk = ControlFactory.MakeCheckBox(
                 "Reverse all frames",
                 hint: "Ignore the axis selection and reverse the entire frame sequence");
             allAxesChk.Margin = new Thickness(0, 2, 0, -7);
+            allAxesChk.IsVisible = hasMultipleAxes;
             allAxesChk.IsCheckedChanged += (_, _) =>
                 axisRow.IsEnabled = allAxesChk.IsChecked != true;
 

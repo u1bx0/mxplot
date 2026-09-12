@@ -14,7 +14,7 @@ By placing a DLL in the appropriate directory you can add functionality without 
 |---|---|---|
 | **IMatrixDataReader / IMatrixDataWriter** | File format support | `MxPlot.Core` only |
 | **IMatrixPlotterPlugin** | Commands in the MatrixPlotter Plugins tab | `MxPlot.UI.Avalonia` |
-| **IMxPlotPlugin** | Commands in the MxPlot.App (dashboard) Tools menu | `MxPlot.App` |
+| **IMxPlotAppPlugin** | Commands in the MxPlot.App (dashboard) Tools menu | `MxPlot.App` |
 
 ---
 
@@ -374,7 +374,7 @@ Just place the plugin DLL in the `plugins/` folder.
 
 ---
 
-## 5. MxPlot.App Plugin (IMxPlotPlugin)
+## 5. MxPlot.App Plugin (IMxPlotAppPlugin)
 
 ### 5.1 Overview
 
@@ -404,12 +404,12 @@ using System.IO;
 
 namespace MyCompany.MxPlotAppPlugin.BatchExport
 {
-    public sealed class BatchCsvExportPlugin : IMxPlotPlugin
+    public sealed class BatchCsvExportPlugin : IMxPlotAppPlugin
     {
         public string CommandName => "Batch CSV Export";
         public string Description => "Exports all open datasets to CSV.";
 
-        public void Run(IMxPlotContext ctx)
+        public void Run(IMxPlotAppContext ctx)
         {
             foreach (var data in ctx.OpenDatasets)
             {
@@ -426,7 +426,7 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
 #### File Dialog Example (async)
 
 ```csharp
-public async void Run(IMxPlotContext ctx)
+public async void Run(IMxPlotAppContext ctx)
 {
     if (ctx.Owner is null) return;
     var file = await ctx.Owner.StorageProvider.SaveFilePickerAsync(
@@ -451,7 +451,7 @@ MxPlotAppPluginRegistry.AddPlugin(new BatchCsvExportPlugin());
 // MxPlot.Extensions.MyCompanyTools.dll
 public class MyPropFormat    : IMatrixDataReader      { ... }  // ① File format (auto-registered)
 public class MyAnalysisPlugin: IMatrixPlotterPlugin   { ... }  // ② MatrixPlotter plugin
-public class MyBatchPlugin   : IMxPlotPlugin          { ... }  // ③ MxPlot.App plugin
+public class MyBatchPlugin   : IMxPlotAppPlugin          { ... }  // ③ MxPlot.App plugin
 ```
 
 Each Registry selects only the types implementing its own interface, so mixing is safe.
@@ -523,5 +523,5 @@ working across Avalonia and WinForms hosts.
 
 ### Adding a MxPlot.App Plugin
 
-- [ ] Implement `IMxPlotPlugin`; return `CommandName` and `Description`
+- [ ] Implement `IMxPlotAppPlugin`; return `CommandName` and `Description`
 - [ ] Place DLL in `plugins/`

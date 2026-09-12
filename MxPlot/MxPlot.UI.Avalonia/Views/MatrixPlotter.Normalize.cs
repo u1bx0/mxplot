@@ -25,19 +25,22 @@ namespace MxPlot.UI.Avalonia.Views
             if (_currentData == null) return;
             HideMenuPanel();
 
-            bool isMultiFrame = _currentData.FrameCount > 1;
-            bool isVirtual = _currentData.IsVirtual;
+            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
 
-            var p = await NormalizeDialog.ShowAsync(this, isMultiFrame, isVirtual, IsSyncFollower);
+            var p = await NormalizeDialog.ShowAsync(this, isMultiFrame, _currentData, IsReplaceDataBlocked);
             if (p == null) return;
 
+            // Forced on when Composite mode has no surviving axis besides the composited one --
+            // see IsThisFrameOnlyAChoice's remarks: the checkbox is hidden in that case, but the
+            // composite-cube extraction below must still run so the result re-enters Composite mode.
+            bool thisFrameOnly = p.ThisFrameOnly || (_isCompositeMode && !isMultiFrame);
             // Composite + This Frame Only: process every channel at the current position
             // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
-            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
+            var compositeCube = thisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
 
             // ── Pre-scan global max if needed ─────────────────────────────────
             double globalMax = double.NaN;
-            if (p.Scope == NormalizeScope.Global && isMultiFrame && (!p.ThisFrameOnly || compositeCube != null))
+            if (p.Scope == NormalizeScope.Global && isMultiFrame && (!thisFrameOnly || compositeCube != null))
             {
                 var scanProgress = BeginProgress("Scanning max value\u2026", blockInput: true);
                 _normalizeCts?.Dispose();
@@ -55,7 +58,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             // ── Execute normalization ─────────────────────────────────────────
             int frameIdx = _currentData.ActiveIndex;
-            bool singleFrame = p.ThisFrameOnly || !isMultiFrame;
+            bool singleFrame = thisFrameOnly || !isMultiFrame;
             string label = $"Normalize (max\u2192{p.Target:G4})";
             string detail = compositeCube != null
                 ? $"[{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}], scope={p.Scope}, target={p.Target:G4}"

@@ -157,6 +157,12 @@ namespace MxPlot.UI.Avalonia.Views
             /// setter with no marshalling, so a background write would otherwise reach the UI here.
             /// </para>
             /// </remarks>
+            /// <summary>
+            /// Requests a recompute from outside the usual triggers (source Refreshed/ActiveIndexChanged),
+            /// e.g. an overlay's own geometry changing. Same coalescing/cancellation behavior as those.
+            /// </summary>
+            internal void RequestRecompute() => Fire();
+
             private void Fire()
             {
                 if (_disposed) return;
@@ -245,10 +251,22 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Whether this window's content is being driven by a <see cref="LinkedView"/>.
-        /// Processing dialogs consult this to disable their own "Replace data" option: overwriting
-        /// a window that is itself live-driven would just be undone on the next update.
+        /// Automatic, not overridable from outside: it reflects MxPlot's own Sync feature
+        /// (Log Transform / Spatial Filter sync, orthogonal live extracts) invariant, so a host
+        /// cannot accidentally re-enable "Replace data" on a genuine sync follower. Hosts that want
+        /// the same protection for their own externally-driven windows should use
+        /// <see cref="AllowDataReplace"/> instead; see <see cref="IsReplaceDataBlocked"/>, which
+        /// combines both.
         /// </summary>
         internal bool IsSyncFollower => _linkedView != null;
+
+        /// <summary>
+        /// Whether Processing dialogs should disable their "Replace data" option for this window -
+        /// either because it is a genuine <see cref="LinkedView"/> follower (<see cref="IsSyncFollower"/>),
+        /// or because the host opted out via <see cref="AllowDataReplace"/>. This is what call sites
+        /// pass as the dialogs' <c>isLinkWindow</c> parameter.
+        /// </summary>
+        internal bool IsReplaceDataBlocked => IsSyncFollower || !AllowDataReplace;
 
         /// <summary>
         /// Closes every window recomputed from this one, cascading down any chain. Call wherever

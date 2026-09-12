@@ -360,10 +360,18 @@ namespace MxPlot.Core
 
         private void UpdateScale()
         {
+            // A 1-element axis has no defined physical step (XRange is 0 too, since a single
+            // point can't span a range) - dividing by (_xcount - 1) = 0 gives NaN, not the "no
+            // step" value every consumer actually expects. Axis.Step and Scale2D's constructor
+            // already guard this the same way (Count > 1 ? ... : 0); this was the one place that
+            // didn't, and a stray NaN here silently breaks aspect-ratio scaling downstream
+            // (RenderSurface.GetAspectScales's "md.XStep <= 0" guard doesn't catch NaN - NaN
+            // comparisons are always false - so it flows through Math.Min/division into the
+            // render rect and the bitmap draws with zero size instead of falling back to 1:1).
             XRange = _xmax - _xmin;
             YRange = _ymax - _ymin;
-            XStep = XRange / (_xcount - 1);
-            YStep = YRange / (_ycount - 1);
+            XStep = _xcount > 1 ? XRange / (_xcount - 1) : 0;
+            YStep = _ycount > 1 ? YRange / (_ycount - 1) : 0;
             ScaleChanged?.Invoke(this, EventArgs.Empty);
         }
 

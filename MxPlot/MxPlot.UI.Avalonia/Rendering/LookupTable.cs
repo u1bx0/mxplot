@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace MxPlot.Core.Imaging
+namespace MxPlot.UI.Avalonia.Rendering
 {
     /// <summary>
     /// Represents a color lookup table (LUT) used for mapping normalized values

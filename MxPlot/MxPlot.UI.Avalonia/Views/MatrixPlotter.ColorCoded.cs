@@ -23,7 +23,6 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Rendering;
 using System;

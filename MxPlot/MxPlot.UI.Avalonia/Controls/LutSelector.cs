@@ -11,9 +11,9 @@ using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Rendering;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -369,20 +369,104 @@ namespace MxPlot.UI.Avalonia.Controls
             return new WindowIcon(ms);
         }
 
+        /// <summary>The documented spelling of the palette folder. Matched case-insensitively.</summary>
+        private const string LutFolderName = "LUTs";
+
         private static void LoadExternalLuts()
         {
-            string lutDir = Path.Combine(AppContext.BaseDirectory, "LUTs");
-            if (!Directory.Exists(lutDir)) return;
-
-            foreach (string file in Directory.EnumerateFiles(lutDir, "*.mlut",
-                                                             SearchOption.AllDirectories))
+            foreach (string dir in EnumerateLutFolders())
             {
-                var lut = ColorThemes.LoadFromFile(file);
-                if (lut != null) ColorThemes.Register(lut);
-                Debug.WriteLine(lut != null
-                    ? $"[LutSelector.LoadExternalLuts] Loaded LUT '{lut.Name}' from '{file}'."
-                    : $"[LutSelector.LoadExternalLuts] Failed to load LUT from '{file}'. File is malformed or incompatible.");
+                int count = ColorThemes.LoadFromDirectory(dir);
+                Debug.WriteLine($"[LutSelector.LoadExternalLuts] {count} LUT(s) from '{dir}'.");
             }
+        }
+
+        /// <summary>
+        /// The places a <c>LUTs</c> folder is honoured, nearest first. Each root is only a place to
+        /// look; what to do with the folder is <see cref="ColorThemes.LoadFromDirectory"/>'s job.
+        /// <list type="number">
+        ///   <item>Beside the running assembly - a Windows release folder, or a LUTs folder shipped
+        ///         with the application.</item>
+        ///   <item>Beside the <c>.app</c> on macOS, which is where the equivalent folder has to go:
+        ///         inside <c>Contents/</c> it would be hidden from Finder, lost on every update, and
+        ///         would break the bundle's ad-hoc code signature.</item>
+        ///   <item>The working directory, which is the only one a script can use - a file-based app
+        ///         (<c>dotnet run foo.cs</c>) runs out of a hashed temp build folder, so
+        ///         <see cref="AppContext.BaseDirectory"/> is nowhere near the script.</item>
+        /// </list>
+        /// A user-wide location (<c>~/Library/Application Support</c>, <c>%APPDATA%</c>) is
+        /// deliberately not searched: it would have to be created and documented before it could be
+        /// found, which is a separate decision from honouring folders the user can already see.
+        /// </summary>
+        private static IEnumerable<string> EnumerateLutFolders()
+        {
+            // Linux is the only one of the three where two paths differing only in case are two
+            // different directories.
+            var seen = new HashSet<string>(OperatingSystem.IsLinux()
+                ? StringComparer.Ordinal
+                : StringComparer.OrdinalIgnoreCase);
+
+            foreach (string? root in new[]
+            {
+                AppContext.BaseDirectory,
+                OperatingSystem.IsMacOS() ? ResolveAppBundleParent(AppContext.BaseDirectory) : null,
+                Environment.CurrentDirectory,
+            })
+            {
+                if (root == null) continue;
+                string? folder = ResolveLutFolder(root);
+                if (folder != null && seen.Add(folder)) yield return folder;
+            }
+        }
+
+        /// <summary>
+        /// Finds the <c>LUTs</c> subfolder of <paramref name="root"/>, whatever its casing, or
+        /// <c>null</c>. The exact spelling is tried first - it is what the file system resolves for
+        /// free on Windows and on a default (case-insensitive) APFS volume. The sweep after it is
+        /// for Linux and case-sensitive APFS, where <c>luts</c> would otherwise be silently ignored.
+        /// </summary>
+        internal static string? ResolveLutFolder(string root)
+        {
+            if (!Directory.Exists(root)) return null;
+
+            string exact = Path.Combine(root, LutFolderName);
+            if (Directory.Exists(exact)) return exact;
+
+            foreach (string dir in Directory.EnumerateDirectories(root))
+            {
+                if (Path.GetFileName(dir).Equals(LutFolderName, StringComparison.OrdinalIgnoreCase))
+                    return dir;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Given the directory an app bundle runs from (<c>Foo.app/Contents/MacOS</c>), returns the
+        /// directory the bundle itself sits in - so a <c>LUTs</c> folder can live next to
+        /// <c>MxPlot.app</c> the same way it lives next to <c>MxPlot.exe</c> on Windows. Returns
+        /// <c>null</c> for anything that is not that structure.
+        /// <para>
+        /// The <c>Info.plist</c> check is what distinguishes a real bundle from a directory that
+        /// merely happens to be three levels deep. Takes the path rather than reading
+        /// <see cref="AppContext.BaseDirectory"/> itself so the structure test is exercisable off
+        /// macOS; the caller applies the platform guard.
+        /// </para>
+        /// </summary>
+        internal static string? ResolveAppBundleParent(string baseDirectory)
+        {
+            if (string.IsNullOrWhiteSpace(baseDirectory)) return null;
+
+            var macOsDir = new DirectoryInfo(baseDirectory);
+            var contents = macOsDir.Parent;
+            var bundle = contents?.Parent;
+            if (contents == null || bundle == null) return null;
+
+            if (!macOsDir.Name.Equals("MacOS", StringComparison.Ordinal)) return null;
+            if (!contents.Name.Equals("Contents", StringComparison.Ordinal)) return null;
+            if (!bundle.Name.EndsWith(".app", StringComparison.OrdinalIgnoreCase)) return null;
+            if (!File.Exists(Path.Combine(contents.FullName, "Info.plist"))) return null;
+
+            return bundle.Parent?.FullName;
         }
     }
 

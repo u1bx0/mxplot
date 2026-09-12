@@ -2,7 +2,6 @@
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using System;
 using System.Numerics;
 using System.Threading.Tasks;
@@ -279,7 +278,8 @@ namespace MxPlot.UI.Avalonia.Rendering
                 double range = viewValueMax - viewValueMin;
                 if (range == 0) range = 1.0;
 
-                double valueScale = (_lookupTable.Levels - 1) / range;
+                // Equal-width bins - see LutBitmapWriter.RebuildColorMapCache.
+                double valueScale = _lookupTable.Levels / range;
                 double valueOffset = -viewValueMin * valueScale;
                 int lutMaxIndex = _lookupTable.Levels - 1;
 
@@ -319,7 +319,8 @@ namespace MxPlot.UI.Avalonia.Rendering
             double viewValueMax = _isInvertedColor ? _valueMin : _valueMax;
             double range = viewValueMax - viewValueMin;
             if (range == 0) range = 1.0;
-            double valueScale = (_lookupTable.Levels - 1) / range;
+            // Equal-width bins - see LutBitmapWriter.RebuildColorMapCache.
+            double valueScale = _lookupTable.Levels / range;
             double valueOffset = -viewValueMin * valueScale;
             int lutMaxIndex = _lookupTable.Levels - 1;
             var lut = _lookupTable.AsSpan();

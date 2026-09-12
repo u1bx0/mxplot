@@ -65,6 +65,7 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 evaluable.FindMinMax.Handler = () => OnFindMinMaxRequested(evaluable);
                 evaluable.ToggleShowStatistics.Handler = () => OnToggleShowStatisticsRequested(evaluable);
+                evaluable.OpenRoiView.Handler = () => OnOpenRoiViewRequested(evaluable);
                 evaluable.UseRoiForValueRange.Handler = () => OnUseRoiForValueRangeRequested(evaluable);
                 evaluable.CopyData.Handler = () => _ = OnCopyDataRequestedAsync(evaluable);
             }
@@ -103,6 +104,7 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 evaluable.FindMinMax.Handler = null;
                 evaluable.ToggleShowStatistics.Handler = null;
+                evaluable.OpenRoiView.Handler = null;
                 evaluable.UseRoiForValueRange.Handler = null;
                 evaluable.CopyData.Handler = null;
             }
@@ -116,6 +118,11 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 System.Diagnostics.Debug.WriteLine("[MatrixPlotter] ROI overlay removed — falling back to Current mode.");
                 DeactivateRoiMode();
+            }
+            if (obj is IAnalyzableOverlay roiViewOverlay && _roiViewLinks.Remove(roiViewOverlay, out var roiViewEntry))
+            {
+                roiViewOverlay.HasLinkedRoiView = false;
+                roiViewEntry.Window.Close();
             }
             SetDirty(DirtyFlags.Overlay, true);
         }
@@ -159,6 +166,8 @@ namespace MxPlot.UI.Avalonia.Views
             RefreshCachedStatistics(rect);
             if (rect is IAnalyzableOverlay a && ReferenceEquals(a, _valueRangeOverlay))
                 RefreshRoiValueRange();
+            if (rect is IAnalyzableOverlay a1 && _roiViewLinks.TryGetValue(a1, out var link1))
+                link1.Link.RequestRecompute();
             SetDirty(DirtyFlags.Overlay, true);
         }
 
@@ -169,6 +178,8 @@ namespace MxPlot.UI.Avalonia.Views
             if (obj is BoundingBoxBase bbox) RefreshCachedStatistics(bbox);
             if (obj is IAnalyzableOverlay a2 && ReferenceEquals(a2, _valueRangeOverlay))
                 RefreshRoiValueRange();
+            if (obj is IAnalyzableOverlay a3 && _roiViewLinks.TryGetValue(a3, out var link2))
+                link2.Link.RequestRecompute();
             SetDirty(DirtyFlags.Overlay, true);
         }
 
@@ -194,7 +205,7 @@ namespace MxPlot.UI.Avalonia.Views
             var md = sourceView.MatrixData;
             if (md == null) return;
 
-            var stats = ComputeRegionStatistics(evaluable, bbox, md, sourceView.FrameIndex);
+            var stats = ComputeRegionStatistics(evaluable, bbox, md, sourceView.FrameIndex, sourceView.FlipY);
             if (stats.NumPoints == 0) return;
 
             // Always target the main _rangeBar; ModeChanged handler propagates to ortho views
@@ -296,7 +307,7 @@ namespace MxPlot.UI.Avalonia.Views
                 return;
             }
 
-            var stats = ComputeRegionStatistics(_valueRangeOverlay, bbox, md, sourceView.FrameIndex);
+            var stats = ComputeRegionStatistics(_valueRangeOverlay, bbox, md, sourceView.FrameIndex, sourceView.FlipY);
             if (stats.NumPoints == 0)
             {
                 System.Diagnostics.Debug.WriteLine("[MatrixPlotter] RefreshRoiValueRange: ROI region is empty — no update.");
@@ -346,12 +357,22 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 evaluable.CachedStatisticsLabel = compositeLabel;
                 evaluable.CachedStatistics = null;
+                return;
             }
-            else
-            {
-                evaluable.CachedStatisticsLabel = null;
-                evaluable.CachedStatistics = ComputeRegionStatistics(evaluable, bbox, md, sourceView.FrameIndex);
-            }
+
+            // ComputeCompositeStatisticsLabel returns null both when composite/color-coded
+            // rendering isn't active and when the region currently has zero overlapping points
+            // (see its own doc comment) - the latter falls through here too. Skipping the
+            // overwrite when this recompute also finds zero points matches
+            // OnFindMinMaxRequested/RefreshRoiValueRange: the last real statistics stay displayed
+            // instead of flashing to a misleading "Min=0, Max=0 (n=0)" whenever the ROI slides
+            // fully off the data (or, per the earlier ROI-View discussion, off every pixel it
+            // still nominally overlaps).
+            var stats = ComputeRegionStatistics(evaluable, bbox, md, sourceView.FrameIndex, sourceView.FlipY);
+            if (stats.NumPoints == 0) return;
+
+            evaluable.CachedStatisticsLabel = null;
+            evaluable.CachedStatistics = stats;
         }
 
         /// <summary>
@@ -401,7 +422,7 @@ namespace MxPlot.UI.Avalonia.Views
                 if (!recipes[i].IsVisible) continue;
                 visibleTotal++;
                 if (shown >= maxShown) continue;
-                var stats = ComputeRegionStatistics(evaluable, bbox, md, indices[i]);
+                var stats = ComputeRegionStatistics(evaluable, bbox, md, indices[i], sourceView.FlipY);
                 // Every channel shares the same ROI and the same ContainsWorldPoint filter, so the
                 // point count is the same for all of them (barring a channel-specific NaN inside the
                 // ROI, an edge case not worth a per-channel count here) -- take it once from the
@@ -412,6 +433,13 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             if (lines.Count == 0) return null;
+            // The region currently has no overlapping points (e.g. it moved fully out of the
+            // image) - every channel's line would read all-zero. Report "nothing here right now"
+            // via null rather than a misleading "Min=0, Max=0" label; the caller (see
+            // RecomputeCachedStatistics) then falls through to the plain-stats path, which applies
+            // the same NumPoints==0 check and, finding it empty too, leaves the last real
+            // statistics on screen instead of overwriting them.
+            if (numPoints == 0) return null;
             if (visibleTotal > shown)
                 lines.Add($"... (+{visibleTotal - shown} more)");
             lines.Add($"(n={numPoints})");
@@ -421,16 +449,42 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>
         /// Iterates over all integer pixel positions within <paramref name="bbox"/>'s bounding box,
         /// filters by <see cref="IAnalyzableOverlay.ContainsWorldPoint"/>,
-        /// applies FlipY (<c>dataY = YCount - 1 - worldY</c>), and accumulates statistics.
+        /// applies FlipY (<c>dataY = YCount - 1 - worldY</c> when <paramref name="flipY"/>,
+        /// otherwise <c>dataY = worldY</c> directly), and accumulates statistics.
         /// </summary>
+        /// <param name="flipY">
+        /// The hosting <see cref="MxView"/>'s <see cref="MxView.FlipY"/> - <c>true</c> for the main
+        /// view and RightView, <c>false</c> for BottomView (see <see cref="OrthogonalPanel"/>'s
+        /// constructor). Unlike <see cref="ExtractRectRegionPixels"/> (which also lays pixels out
+        /// into an image and so additionally needs the hosting view's <c>Transform</c>, see that
+        /// method), this only aggregates values - which pixels are included is all that matters,
+        /// and that's governed by FlipY alone; the geometric layout Transform affects is irrelevant
+        /// to a min/max/average.
+        /// </param>
         private static RegionStatistics ComputeRegionStatistics(
             IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
-            IMatrixData md, int frameIndex)
+            IMatrixData md, int frameIndex, bool flipY = true)
         {
-            int xMin = Math.Max(0, (int)Math.Ceiling(bbox.X - 0.5 - 1e-10));
-            int xMax = Math.Min(md.XCount - 1, (int)Math.Floor(bbox.X + bbox.Width - 0.5 + 1e-10));
-            int yMin = Math.Max(0, (int)Math.Ceiling(bbox.Y - 0.5 - 1e-10));
-            int yMax = Math.Min(md.YCount - 1, (int)Math.Floor(bbox.Y + bbox.Height - 0.5 + 1e-10));
+            // World space is pixel-CENTER-based (pixel i's centre at world i, edges at i +/- 0.5 -
+            // see AvaloniaViewport/PixelSnapService), so the per-pixel test below checks each
+            // candidate's own centre (wx, wy) directly against bbox - not (wx+0.5, wy+0.5), which
+            // an earlier version of this method used and which tests half a pixel off from where
+            // the pixel actually is. That offset is invisible for a ROI comfortably inside the
+            // data (both the correct and offset windows contain the same count, just shifted by
+            // one index), but at a boundary that needs clamping it silently swaps in a wrong index
+            // on one side while losing the correct one on the other - e.g. a 3x3 ROI flush against
+            // the left+bottom edge under-counts to 6 points instead of 9.
+            //
+            // xMin/xMax/yMin/yMax are only a candidate pre-filter - the actual per-pixel inclusion
+            // test is ContainsWorldPoint below, so a range that's a pixel too wide costs a few
+            // harmless extra iterations (rejected by ContainsWorldPoint), but a range that's a pixel
+            // too narrow silently drops a whole row/column of otherwise-valid points. Rounding
+            // outward (Floor for the min, Ceiling for the max) needs no epsilon fudge against
+            // floating-point noise: it can only ever be too wide, never too narrow.
+            int xMin = Math.Max(0, (int)Math.Floor(bbox.X));
+            int xMax = Math.Min(md.XCount - 1, (int)Math.Ceiling(bbox.X + bbox.Width));
+            int yMin = Math.Max(0, (int)Math.Floor(bbox.Y));
+            int yMax = Math.Min(md.YCount - 1, (int)Math.Ceiling(bbox.Y + bbox.Height));
 
             // Acquire entire frame once (single lock / zero-alloc for double data)
             var frame = md.GetFrameAsDoubleSpan(frameIndex);
@@ -440,11 +494,11 @@ namespace MxPlot.UI.Avalonia.Views
 
             for (int wy = yMin; wy <= yMax; wy++)
             {
-                int dataY = (md.YCount - 1) - wy;   // FlipY: world Y-down → data Y-up
+                int dataY = flipY ? (md.YCount - 1) - wy : wy;
                 int rowStart = dataY * md.XCount;
                 for (int wx = xMin; wx <= xMax; wx++)
                 {
-                    if (!evaluable.ContainsWorldPoint(new Point(wx + 0.5, wy + 0.5))) continue;
+                    if (!evaluable.ContainsWorldPoint(new Point(wx, wy))) continue;
                     double v = frame[rowStart + wx];
                     if (double.IsNaN(v)) continue;
                     if (v < min) min = v;
@@ -543,6 +597,9 @@ namespace MxPlot.UI.Avalonia.Views
         /// Otherwise, the label is formatted as "{AxisName}0", "{AxisName}1", etc.
         /// If the axis does not exist in the dimension structure, a single profile at the current
         /// frame index is returned with the label "Profile".
+        /// In Composite mode each series also carries its channel's <see cref="BlendRecipe"/> colour
+        /// (see <see cref="ResolveChannelSeriesColor"/>); otherwise the colour is left unset and
+        /// <see cref="ProfilePlotControl"/> assigns one from its palette.
         /// <code>
         /// // Example: Channel axis with tags "R", "G", "B"
         /// var series = BuildProfileSeries(line, md, sourceView, "Channel");
@@ -575,6 +632,10 @@ namespace MxPlot.UI.Avalonia.Views
                 var taggedAxis = axis as TaggedAxis;
                 int[] frameIndices = dims.GetFrameIndicesFor(groupAxisName);
 
+                // In Composite mode each channel already has a colour on screen; reuse it so the
+                // profile lines read as the same channels rather than an unrelated palette.
+                bool useChannelColors = sourceView.RenderingMode == RenderingMode.Composite;
+
                 for (int i = 0; i < frameIndices.Length; i++)
                 {
                     // Skip channels the user has hidden via BlendRecipe.IsVisible in the Composite
@@ -587,7 +648,10 @@ namespace MxPlot.UI.Avalonia.Views
                     if (profile.Count == 0) continue;
 
                     string label = taggedAxis != null ? taggedAxis[i] : $"{axis.Name}{i}";
-                    result.Add(new PlotSeries(profile, label, PlotStyle.Line));
+                    Color? color = useChannelColors && i < _compositeRecipes.Count
+                        ? ResolveChannelSeriesColor(_compositeRecipes[i].ColorArgb)
+                        : null;
+                    result.Add(new PlotSeries(profile, label, PlotStyle.Line, color));
                 }
             }
             else
@@ -598,6 +662,31 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Maps a Composite channel colour to a profile-plot series colour. Channel colours are
+        /// picked for additive blending on black, while the plot draws on a light background
+        /// (black axes, white PNG export), so a bright channel washes out against it. Colours
+        /// above a legible luminance are pulled down with the hue preserved - the mirror image of
+        /// <c>RenderSurface.BrightenForText</c>, which lifts the same colours for the dark cursor
+        /// read-out. Returns <c>null</c> for a colour carrying no level at all, letting
+        /// <see cref="ProfilePlotControl"/> fall back to its own palette.
+        /// </summary>
+        private static Color? ResolveChannelSeriesColor(int argb)
+        {
+            var c = Color.FromUInt32(unchecked((uint)argb));
+            double luma = (0.299 * c.R + 0.587 * c.G + 0.114 * c.B) / 255.0;
+
+            // A black channel would draw an invisible line on a white plot - not a usable colour.
+            if (luma <= 0.0) return null;
+
+            const double maxLuma = 0.5;
+            if (luma <= maxLuma) return Color.FromRgb(c.R, c.G, c.B);
+
+            double gain = maxLuma / luma;
+            byte Dim(byte v) => (byte)Math.Clamp(v * gain, 0, 255);
+            return Color.FromRgb(Dim(c.R), Dim(c.G), Dim(c.B));
         }
 
         /// <summary>
@@ -876,10 +965,10 @@ namespace MxPlot.UI.Avalonia.Views
             var md = sourceView.MatrixData;
             if (md == null) return;
 
-            var region = ExtractRectRegionData(evaluable, bbox, md, sourceView.FrameIndex);
+            var region = ExtractRectRegionData(evaluable, bbox, md, sourceView.FrameIndex, sourceView.FlipY, sourceView.Transform);
             if (region == null)
             {
-                await ShowMessageDialogAsync("Copy Data", "The selected rectangle has no data points.");
+                await ShowMessageDialogAsync("Copy Image in Region", "The selected rectangle has no data points.");
                 return;
             }
 
@@ -887,11 +976,19 @@ namespace MxPlot.UI.Avalonia.Views
             double vmax = sourceView.IsFixedRange ? sourceView.FixedMax : double.NaN;
 
             // Physical aspect correction: if XStep != YStep, naturalH is adjusted so that
-            // 1 pixel = 1 data point on the longer physical axis.
+            // 1 pixel = 1 data point on the longer physical axis. region's own X/Y are already
+            // post-Transform (ExtractRectRegionData applies sourceView.Transform, swapping width
+            // and height for Rotate90CW/CCW/Transpose), so md's per-axis steps must swap the same
+            // way to stay paired with the axis they actually describe after that swap.
+            bool dimsSwapped = sourceView.Transform is ViewTransform.Rotate90CW
+                                                      or ViewTransform.Rotate90CCW
+                                                      or ViewTransform.Transpose;
             int naturalW = region.XCount;
             int naturalH = region.YCount;
-            double xStep = Math.Abs(md.XStep > 0 ? md.XStep : 1.0);
-            double yStep = Math.Abs(md.YStep > 0 ? md.YStep : 1.0);
+            double mdXStep = dimsSwapped ? md.YStep : md.XStep;
+            double mdYStep = dimsSwapped ? md.XStep : md.YStep;
+            double xStep = Math.Abs(mdXStep > 0 ? mdXStep : 1.0);
+            double yStep = Math.Abs(mdYStep > 0 ? mdYStep : 1.0);
             if (Math.Abs(xStep - yStep) > 1e-12)
             {
                 if (xStep < yStep)
@@ -920,7 +1017,7 @@ namespace MxPlot.UI.Avalonia.Views
                     // channel. A per-channel extraction still failing here would mean the channel
                     // frame index is out of range; fall back to an all-NaN layer rather than throw.
                     var channelArrays = compositeFrameIndices!
-                        .Select(fi => ExtractRectRegionPixels(evaluable, bbox, md, fi)?.Values
+                        .Select(fi => ExtractRectRegionPixels(evaluable, bbox, md, fi, sourceView.FlipY, sourceView.Transform)?.Values
                                    ?? new double[region.XCount * region.YCount])
                         .ToList();
                     var compositeRegion = new MatrixData<double>(region.XCount, region.YCount, channelArrays);
@@ -1000,42 +1097,131 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private static (double[] Values, int Width, int Height)? ExtractRectRegionPixels(
             IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
-            IMatrixData md, int frameIndex)
+            IMatrixData md, int frameIndex, bool flipY = true, ViewTransform transform = ViewTransform.None)
         {
-            // PixelSnapMode.Corner snaps to pixel edges  (bbox coords are half-integers: 2.5, 9.5…)
-            // PixelSnapMode.Center snaps to pixel centres (bbox coords are integers:       3,  10…)
-            // Pixel wx is inside when:  bbox.X ≤ wx+0.5 < bbox.X+bbox.Width
-            //   → xMin = ⌈ bbox.X − 0.5 ⌉    (first wx whose centre is ≥ bbox.X)
-            //   → xMax = ⌊ bbox.X+W − 0.5 − ε ⌋  (last  wx whose centre is <  bbox.X+W)
-            int xMin = Math.Max(0, (int)Math.Ceiling(bbox.X - 0.5 - 1e-10));
-            int xMax = Math.Min(md.XCount - 1, (int)Math.Floor(bbox.X + bbox.Width - 0.5 - 1e-10));
-            int yMin = Math.Max(0, (int)Math.Ceiling(bbox.Y - 0.5 - 1e-10));
-            int yMax = Math.Min(md.YCount - 1, (int)Math.Floor(bbox.Y + bbox.Height - 0.5 - 1e-10));
+            // World space is pixel-CENTER-based (pixel i's centre at world i, edges at i +/- 0.5 -
+            // see AvaloniaViewport/PixelSnapService), so the per-pixel test below checks each
+            // candidate's own centre (wx, wy) directly against bbox - see ComputeRegionStatistics,
+            // which this mirrors (same bug, same fix).
+            //
+            // Unlike ComputeRegionStatistics, this method's xMin/xMax/yMin/yMax become the
+            // exported image's own Width/Height, so a generous (outward-rounded) pre-filter can't
+            // be used directly here the way it is there - that would pad the image with an extra
+            // all-NaN border whenever the pre-filter is wider than the true region. So this scans
+            // a generous candidate range first (safe against under-inclusion, same reasoning as
+            // ComputeRegionStatistics) and derives the actual tight bounds from whichever
+            // candidates really passed ContainsWorldPoint, before sizing the array.
+            int scanXMin = Math.Max(0, (int)Math.Floor(bbox.X));
+            int scanXMax = Math.Min(md.XCount - 1, (int)Math.Ceiling(bbox.X + bbox.Width));
+            int scanYMin = Math.Max(0, (int)Math.Floor(bbox.Y));
+            int scanYMax = Math.Min(md.YCount - 1, (int)Math.Ceiling(bbox.Y + bbox.Height));
+
+            int xMin = int.MaxValue, xMax = int.MinValue, yMin = int.MaxValue, yMax = int.MinValue;
+            for (int wy = scanYMin; wy <= scanYMax; wy++)
+                for (int wx = scanXMin; wx <= scanXMax; wx++)
+                {
+                    if (!evaluable.ContainsWorldPoint(new Point(wx, wy))) continue;
+                    if (wx < xMin) xMin = wx;
+                    if (wx > xMax) xMax = wx;
+                    if (wy < yMin) yMin = wy;
+                    if (wy > yMax) yMax = wy;
+                }
             if (xMax < xMin || yMax < yMin) return null;
 
             int w = xMax - xMin + 1;
             int h = yMax - yMin + 1;
             var frame = md.GetFrameAsDoubleSpan(frameIndex);
-            var arr = new double[w * h];
 
+            // Stage 1: canonical bitmap-space extraction - row 0 = yMin = the top of the rect as
+            // it sits in the untransformed bitmap (same space RenderClean starts from before
+            // applying Transform). dataY picks which row of the underlying data array a given
+            // bitmap row wy reads from - see MxView.FlipY / LutBitmapWriter.RenderCore (BottomView
+            // uses FlipY=false, so its bitmap row order matches the data array directly).
+            var canon = new double[w * h];
             for (int wy = yMin; wy <= yMax; wy++)
             {
-                int dataY = (md.YCount - 1) - wy;
-                // wy is screen/world space (Y-down: yMin is the top of the rect on screen).
-                // destRow must land in the opposite (bottom-origin) convention, so the row at the
-                // screen bottom of the rect (wy = yMax) becomes row 0.
-                int destRow = yMax - wy;
+                int dataY = flipY ? (md.YCount - 1) - wy : wy;
+                int rowStart = (wy - yMin) * w;
                 for (int wx = xMin; wx <= xMax; wx++)
                 {
-                    double v = evaluable.ContainsWorldPoint(new Point(wx + 0.5, wy + 0.5))
+                    canon[rowStart + (wx - xMin)] = evaluable.ContainsWorldPoint(new Point(wx, wy))
                         ? frame[dataY * md.XCount + wx]
                         : double.NaN;
-                    arr[destRow * w + (wx - xMin)] = v;
                 }
             }
 
+            // Stage 2: apply the same geometric transform RenderSurface.RenderClean applies when
+            // drawing the whole bitmap for "Copy Image" (see GetTransformMatrix) - so a region
+            // copied from a rotated/flipped side view (BottomView/RightView) matches what's
+            // actually shown on screen instead of the untransformed pixel order.
+            var (disp, dw, dh) = ApplyViewTransform(canon, w, h, transform);
+
+            // Stage 3: canonical/display space is screen Y-down (row 0 = top); the output
+            // MatrixData follows MatrixData's own Y-up convention (row 0 = bottom), so reverse row
+            // order once here - a fixed, Transform-independent step, distinct from Stage 1's
+            // flipY (which is about which SOURCE row a bitmap row reads from, not the output's
+            // own layout).
+            var arr = new double[dw * dh];
+            for (int y = 0; y < dh; y++)
+                Array.Copy(disp, y * dw, arr, (dh - 1 - y) * dw, dw);
+
             if (arr.All(double.IsNaN)) return null;
-            return (arr, w, h);
+            return (arr, dw, dh);
+        }
+
+        /// <summary>
+        /// Applies the discrete pixel-array equivalent of <see cref="RenderSurface"/>'s
+        /// <c>GetTransformMatrix()</c> to a row-major <paramref name="src"/> image (row 0 = top),
+        /// matching how <c>RenderClean</c> geometrically transforms the displayed bitmap for
+        /// <paramref name="transform"/>. Rotate90CW/CCW and Transpose swap width and height.
+        /// </summary>
+        private static (double[] Data, int Width, int Height) ApplyViewTransform(
+            double[] src, int w, int h, ViewTransform transform)
+        {
+            double[] dst;
+            switch (transform)
+            {
+                case ViewTransform.None:
+                    return (src, w, h);
+                case ViewTransform.FlipH:
+                    dst = new double[w * h];
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++)
+                            dst[y * w + x] = src[y * w + (w - 1 - x)];
+                    return (dst, w, h);
+                case ViewTransform.FlipV:
+                    dst = new double[w * h];
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++)
+                            dst[y * w + x] = src[(h - 1 - y) * w + x];
+                    return (dst, w, h);
+                case ViewTransform.Rotate180:
+                    dst = new double[w * h];
+                    for (int y = 0; y < h; y++)
+                        for (int x = 0; x < w; x++)
+                            dst[y * w + x] = src[(h - 1 - y) * w + (w - 1 - x)];
+                    return (dst, w, h);
+                case ViewTransform.Transpose:
+                    dst = new double[w * h];
+                    for (int yp = 0; yp < w; yp++)
+                        for (int xp = 0; xp < h; xp++)
+                            dst[yp * h + xp] = src[xp * w + yp];
+                    return (dst, h, w);
+                case ViewTransform.Rotate90CW:
+                    dst = new double[w * h];
+                    for (int yp = 0; yp < w; yp++)
+                        for (int xp = 0; xp < h; xp++)
+                            dst[yp * h + xp] = src[(h - 1 - xp) * w + yp];
+                    return (dst, h, w);
+                case ViewTransform.Rotate90CCW:
+                    dst = new double[w * h];
+                    for (int yp = 0; yp < w; yp++)
+                        for (int xp = 0; xp < h; xp++)
+                            dst[yp * h + xp] = src[xp * w + (w - 1 - yp)];
+                    return (dst, h, w);
+                default:
+                    return (src, w, h);
+            }
         }
 
         /// <summary>
@@ -1045,9 +1231,9 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private static MatrixData<double>? ExtractRectRegionData(
             IAnalyzableOverlay evaluable, BoundingBoxBase bbox,
-            IMatrixData md, int frameIndex)
+            IMatrixData md, int frameIndex, bool flipY = true, ViewTransform transform = ViewTransform.None)
         {
-            var pixels = ExtractRectRegionPixels(evaluable, bbox, md, frameIndex);
+            var pixels = ExtractRectRegionPixels(evaluable, bbox, md, frameIndex, flipY, transform);
             if (pixels == null) return null;
             var (arr, w, h) = pixels.Value;
             return new MatrixData<double>(w, h, arr);

@@ -517,7 +517,7 @@ namespace MxPlot.UI.Avalonia.Views
                 lutMax = max;
             }
 
-            var action = new ConvertValueTypeAction(lutMin, lutMax, IsSyncFollower);
+            var action = new ConvertValueTypeAction(lutMin, lutMax, IsReplaceDataBlocked);
             _activeAction?.Dispose();
             _activeAction = action;
 
@@ -553,7 +553,7 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_currentData is not MatrixData<System.Numerics.Complex> complexData) return;
 
-            var dialog = new ConvertComplexDialog(_currentData, IsSyncFollower);
+            var dialog = new ConvertComplexDialog(_currentData, IsReplaceDataBlocked);
             var result = await dialog.ShowCenteredOnAsync(this, this);
             if (result == null) return;
 
@@ -592,16 +592,25 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>Shows a minimal About dialog.</summary>
-        private async Task ShowAboutAsync()
+        /// <summary>
+        /// Optional replacement for the content shown in the About dialog (Menu → About),
+        /// in place of <see cref="BuildDefaultAboutContent"/>. Set once at startup by a host
+        /// embedding MatrixPlotter (e.g. a camera-viewer app built on top of it) that wants its
+        /// own About screen instead of MxPlot's -- typically by building its own branding and
+        /// calling <see cref="BuildDefaultAboutContent"/> itself to still credit MxPlot underneath.
+        /// Receives the <see cref="MatrixPlotter"/> instance About was invoked from (rarely needed).
+        /// Left <see langword="null"/> (the default), the built-in MxPlot About is shown unchanged.
+        /// </summary>
+        public static Func<MatrixPlotter, Control>? AboutContentOverride { get; set; }
+
+        /// <summary>
+        /// Builds the default About content (MxPlot logo, name, and version) as a standalone
+        /// control. Public and static so a host can reuse it verbatim -- e.g. nested inside its
+        /// own <see cref="AboutContentOverride"/> content, to credit MxPlot alongside its own
+        /// branding -- without reimplementing the version-reading/layout logic.
+        /// </summary>
+        public static Control BuildDefaultAboutContent()
         {
-            var ok = new Button
-            {
-                Content = "OK",
-                Width = 60,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                HorizontalContentAlignment = HorizontalAlignment.Center,
-                Margin = new Thickness(0, 12, 0, 0),
-            };
             var verFull = typeof(MatrixPlotter).Assembly
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                 ?.InformationalVersion ?? string.Empty;
@@ -638,9 +647,22 @@ namespace MxPlot.UI.Avalonia.Views
             }
             catch { }
             headerRow.Children.Add(textStack);
+            return headerRow;
+        }
+
+        private async Task ShowAboutAsync()
+        {
+            var ok = new Button
+            {
+                Content = "OK",
+                Width = 60,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 12, 0, 0),
+            };
 
             var stack = new StackPanel { Margin = new Thickness(20) };
-            stack.Children.Add(headerRow);
+            stack.Children.Add(AboutContentOverride?.Invoke(this) ?? BuildDefaultAboutContent());
             stack.Children.Add(ok);
             var dlg = new Window
             {

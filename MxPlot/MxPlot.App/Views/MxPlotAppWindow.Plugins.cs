@@ -7,9 +7,9 @@ using Avalonia.Threading;
 using MxPlot.App.Plugins;
 using MxPlot.App.ViewModels;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Plugins;
 using MxPlot.UI.Avalonia.Views;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -21,23 +21,17 @@ namespace MxPlot.App.Views
     {
         // ── Plugin menu management ────────────────────────────────────────
 
-        /// <summary>Built-in item count inside the Tools submenu (before any plugin separator).</summary>
-        private const int ToolsBuiltInCount = 5; // "Sample Mandelbrot…", "Sample Julia Set…", "Sample Hyperstack…"
-
         /// <summary>
-        /// Rebuilds the plugin portion of the Tools submenu.
-        /// Static built-in items (indices 0 … ToolsBuiltInCount-1) are preserved;
-        /// everything beyond is replaced with the current registry contents.
+        /// Rebuilds the Tools submenu from the current plugin registry contents.
+        /// The Tools submenu has no built-in items; it is populated entirely by plugins.
         /// </summary>
         private void RebuildPluginMenuItems(MenuItem toolsItem)
         {
-            while (toolsItem.Items.Count > ToolsBuiltInCount)
-                toolsItem.Items.RemoveAt(toolsItem.Items.Count - 1);
+            toolsItem.Items.Clear();
 
             var plugins = MxPlotAppPluginRegistry.Plugins;
             if (plugins.Count == 0) return;
 
-            toolsItem.Items.Add(new Separator());
             foreach (var plugin in plugins)
             {
                 var captured = plugin;
@@ -45,26 +39,26 @@ namespace MxPlot.App.Views
                 ToolTip.SetTip(item, plugin.Description);
                 item.Click += (_, _) =>
                 {
-                    try { captured.Run(CreateMxPlotContext()); }
+                    try { captured.Run(CreateMxPlotAppContext()); }
                     catch { /* silently absorb plugin errors */ }
                 };
                 toolsItem.Items.Add(item);
             }
         }
 
-        private IMxPlotContext CreateMxPlotContext() => new MxPlotContextImpl(this, ViewModel, _windowList);
+        private IMxPlotAppContext CreateMxPlotAppContext() => new MxPlotAppContextImpl(this, ViewModel, _windowList);
 
         /// <summary>
-        /// Implementation of <see cref="IMxPlotContext"/> that provides plugin access
+        /// Implementation of <see cref="IMxPlotAppContext"/> that provides plugin access
         /// to the dashboard's open and selected datasets, owner window, and file operations.
         /// </summary>
-        private sealed class MxPlotContextImpl : IMxPlotContext
+        private sealed class MxPlotAppContextImpl : IMxPlotAppContext
         {
             private readonly MxPlotAppWindow _window;
             private readonly MxPlotAppViewModel _vm;
             private readonly ListBox _list;
 
-            internal MxPlotContextImpl(MxPlotAppWindow window, MxPlotAppViewModel vm, ListBox list)
+            internal MxPlotAppContextImpl(MxPlotAppWindow window, MxPlotAppViewModel vm, ListBox list)
             { _window = window; _vm = vm; _list = list; }
 
             public IReadOnlyList<IMatrixData> OpenDatasets
@@ -165,7 +159,7 @@ namespace MxPlot.App.Views
         private void ToolsGenerateJulia_Click(object? sender, RoutedEventArgs e)
         {
             var md = Services.TestDataGenerator.GenerateJuliaSet();
-            MatrixPlotter.Create(md, title: "Julia Set  1024×1024  ×8 frames (float)", lut: Core.Imaging.ColorThemes.BSMod).Show();
+            MatrixPlotter.Create(md, title: "Julia Set  1024×1024  ×8 frames (float)", lut: ColorThemes.BSMod).Show();
         }
     }
 }

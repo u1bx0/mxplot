@@ -288,6 +288,21 @@ namespace MxPlot.UI.Avalonia.Overlays
 
         // ── Context menu
 
+        /// <summary>
+        /// Hit-tests <paramref name="screenPos"/> and returns the context menu items for whatever
+        /// selectable, visible overlay is found there (topmost wins), or empty if none is hit.
+        /// </summary>
+        /// <remarks>
+        /// A hit on an overlay that is not already selected switches selection to it first --
+        /// the same single-selection switch <see cref="OnPointerPressed"/> performs for a plain
+        /// left-click ("New object or resize handle" branch below) -- so the menu returned always
+        /// describes the overlay that ends up showing selection handles, rather than leaving a
+        /// previously-selected object looking active while a different object's menu is shown.
+        /// A hit on an already-selected overlay (including one that is part of a multi-selection)
+        /// leaves the current selection untouched. Not written as an iterator (no <c>yield</c>)
+        /// specifically because of that selection side effect -- deferred execution would make it
+        /// fire whenever the caller first enumerates rather than immediately on this call.
+        /// </remarks>
         public IEnumerable<OverlayMenuEntry> GetContextMenuItems(Point screenPos)
         {
             var vp = GetViewport?.Invoke() ?? default;
@@ -298,10 +313,19 @@ namespace MxPlot.UI.Avalonia.Overlays
                 return o.HitTest(screenPos, vp) != HandleType.None;
             });
 
-            if (target == null) yield break;
+            if (target == null) return [];
 
-            foreach (var item in target.GetContextMenuItems() ?? [])
-                yield return item;
+            if (!target.IsSelected)
+            {
+                var handle = target.HitTest(screenPos, vp);
+                ClearSelection();
+                target.IsSelected = true;
+                _activeObj = target;
+                _activeHandle = handle;
+                InvalidateVisual();
+            }
+
+            return target.GetContextMenuItems()?.ToList() ?? [];
         }
 
         // ── Pointer events ────────────────────────────────────────────────────

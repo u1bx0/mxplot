@@ -48,8 +48,8 @@ namespace MxPlot.UI.Avalonia.Views
             if (_currentData == null) return;
             HideMenuPanel();
 
-            bool isMultiFrame = _currentData.FrameCount > 1;
-            var p = await SpatialFilterDialog.ShowAsync(this, isMultiFrame, kernelType);
+            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
+            var p = await SpatialFilterDialog.ShowAsync(this, isMultiFrame, kernelType, _currentData);
             if (p == null) return;
 
             await ExecuteFilterAsync(p);
@@ -61,12 +61,16 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_currentData == null) return;
 
-            bool isMultiFrame = _currentData.FrameCount > 1;
-            bool singleFrame = !isMultiFrame || p.ThisFrameOnly;
+            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
+            // Forced on when Composite mode has no surviving axis besides the composited one --
+            // see IsThisFrameOnlyAChoice's remarks: the checkbox is hidden in that case, but the
+            // composite-cube extraction below must still run so the result re-enters Composite mode.
+            bool thisFrameOnly = p.ThisFrameOnly || (_isCompositeMode && !isMultiFrame);
+            bool singleFrame = !isMultiFrame || thisFrameOnly;
             int frameIdx = _currentData.ActiveIndex;
             // Composite + This Frame Only: process every channel at the current position
             // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
-            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
+            var compositeCube = thisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
 
             string kernelLabel = KernelLabel(p.Kernel);
             string detailSuffix = compositeCube != null

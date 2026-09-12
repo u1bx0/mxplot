@@ -57,7 +57,7 @@ namespace MxPlot.App.Views
     ///                      new window positioning with cascade, and topmost suspension during dialogs.</description>
     ///   </item>
     ///   <item><term>MxPlotAppWindow.Plugins.cs</term>
-    ///         <description>Plugin menu rebuilding, plugin context implementation (<see cref="IMxPlotContext"/>),
+    ///         <description>Plugin menu rebuilding, plugin context implementation (<see cref="IMxPlotAppContext"/>),
     ///                      and test data generation handlers (Mandelbrot, Julia, Hyperstack, 2D linear scale).</description>
     ///   </item>
     ///   <item><term>MxPlotAppWindow.SyncFeature.cs</term>
@@ -75,6 +75,9 @@ namespace MxPlot.App.Views
     ///   <item><term>MxPlotAppWindow.ContextMenu.cs</term>
     ///         <description>Reserved for future menu-related consolidation (currently empty; context menu logic resides in WindowManagement).</description>
     ///   </item>
+    ///   <item><term>MxPlotAppWindow.WelcomeAnimation.cs</term>
+    ///         <description>One-time startup reveal: the empty-state hint fades in after the window is shown.</description>
+    ///   </item>
     /// </list>
     /// </remarks>
     public partial class MxPlotAppWindow : Window
@@ -86,7 +89,6 @@ namespace MxPlot.App.Views
         private int _cardSizeStep = 2;
         private bool _applyingCardSize = false;
         private ViewMode _viewMode = ViewMode.Details;
-        private bool _topmostEnabled = false;
         private bool _processingSelectionChange = false;
         private Button _syncBtn = null!;
         private Button? _revertBtn;
@@ -95,20 +97,21 @@ namespace MxPlot.App.Views
         private List<WindowListItemViewModel>? _syncSelectionSnapshot;
         private List<MatrixPlotter> _syncBorderedPlotters = [];
 
-        /// <summary>
-        /// When <see langword="true"/>, automatically repositions windows (X-axis only) to prevent
-        /// the dashboard and plot windows from covering each other on activation.
-        /// Set to <see langword="false"/> to disable all overlap-avoidance movement.
-        /// </summary>
-        private bool _avoidOverlapEnabled = true;
-
         /// <summary>Re-entry guard for overlap-avoidance repositioning.</summary>
         private bool _adjustingOverlap = false;
 
         /// <summary>
         /// Set to <see langword="true"/> just before activating a window from the dashboard list,
         /// so that <see cref="OnAnyAppWindowActivated"/> knows to skip the dashboard-dodge path
-        /// (the list-click path handles repositioning via <see cref="TryAvoidDashboardOverlap"/> instead).
+        /// (the list-click path handles repositioning via <see cref="TryAvoidDashboardOverlap"/> instead),
+        /// and so <see cref="OnManagedWindowFocused"/> knows to ignore an <c>Activated</c> that fired
+        /// as a side effect of a purely programmatic <c>Show()</c>/<c>Activate()</c> -- e.g. restoring
+        /// every managed window when the dashboard itself un-minimizes -- rather than a real user click.
+        /// Without this, each restored window's <c>Activated</c> (deferred via <c>Dispatcher.Post</c> in
+        /// <see cref="MxPlotAppViewModel.RegisterWindow"/>) re-selects it in the list, which re-activates
+        /// it, which can re-fire <c>Activated</c>; observed as the whole restored group cycling focus
+        /// indefinitely on macOS with 3+ windows, where re-activating an already-active window is not
+        /// the no-op it is on Windows.
         /// </summary>
         private bool _activatingFromList = false;
 
@@ -135,6 +138,7 @@ namespace MxPlot.App.Views
 #endif
 
             InitializeComponent();
+            SetupWelcomeAnimation();
 
             // ── Top bar: drag to move + minimize + close ────────────────
             var topBarDrag = this.FindControl<Border>("TopBarDrag")!;
@@ -152,17 +156,30 @@ namespace MxPlot.App.Views
             PropertyChanged += (_, e) =>
             {
                 if (e.Property != WindowStateProperty) return;
-                if (WindowState == WindowState.Minimized)
+                // Guard the whole batch (not just each individual Show/Activate call) against the
+                // Activated-driven list-selection sync in MxPlotAppViewModel.RegisterWindow, which
+                // is deferred via Dispatcher.Post -- so the reset below is *also* posted, landing
+                // after every Show() call in this loop has already had its chance to enqueue its own
+                // deferred continuation. See _activatingFromList's remarks for why this matters.
+                _activatingFromList = true;
+                try
                 {
-                    // Hide all user-visible managed windows (without changing their IsWindowVisible flag).
-                    foreach (var item in ViewModel.ManagedWindows)
-                        if (item.IsWindowVisible) item.Window.Hide();
+                    if (WindowState == WindowState.Minimized)
+                    {
+                        // Hide all user-visible managed windows (without changing their IsWindowVisible flag).
+                        foreach (var item in ViewModel.ManagedWindows)
+                            if (item.IsWindowVisible) item.Window.Hide();
+                    }
+                    else if (WindowState == WindowState.Normal)
+                    {
+                        // Restore only the windows the user had visible before minimization.
+                        foreach (var item in ViewModel.ManagedWindows)
+                            if (item.IsWindowVisible) item.Window.Show();
+                    }
                 }
-                else if (WindowState == WindowState.Normal)
+                finally
                 {
-                    // Restore only the windows the user had visible before minimization.
-                    foreach (var item in ViewModel.ManagedWindows)
-                        if (item.IsWindowVisible) item.Window.Show();
+                    Dispatcher.UIThread.Post(() => _activatingFromList = false, DispatcherPriority.Background);
                 }
             };
 
@@ -184,6 +201,7 @@ namespace MxPlot.App.Views
                 vm.PositionWindowAction = (w, i) => PositionNewWindow(w, i);
                 vm.DashboardWindow = this;
                 vm.WindowFocusedAction = OnManagedWindowFocused;
+                vm.WindowSelectionClickedAction = OnManagedWindowSelectionClicked;
             };
 
             var listPanel = this.FindControl<Panel>("ListPanel")!;
@@ -345,67 +363,12 @@ namespace MxPlot.App.Views
             MxPlotAppPluginRegistry.PluginsChanged += onPluginsChanged;
             Closed += (_, _) => MxPlotAppPluginRegistry.PluginsChanged -= onPluginsChanged;
 
-            // ── "Open from Clipboard" item (not in AXAML: flyout items are outside the name scope) ──
-            var clipboardItem = new MenuItem
-            {
-                Header = "Open from Clipboard\u2026",
-                IsEnabled = false,
-                Icon = new PathIcon
-                {
-                    Data = Geometry.Parse("M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"),
-                    Width = 14,
-                    Height = 14,
-                    Foreground = new SolidColorBrush(Color.Parse("#78909C")),
-                },
-            };
-            clipboardItem.Click += HamburgerOpenFromClipboard_Click;
-            flyout.Items.Insert(1, clipboardItem);
-
-            var exportItem = new MenuItem { Header = "Export as PNG\u2026", IsEnabled = false };
-            exportItem.Click += HamburgerExportAsPng_Click;
-            flyout.Items.Insert(2, exportItem);
-
-            // Enable/disable depending on clipboard/export availability when the flyout opens
+            // Refresh clipboard-usability state each time the hamburger menu opens
+            // ("Open from Clipboard…" IsEnabled is bound to ViewModel.IsClipboardUsable in AXAML).
             flyout.Opened += async (_, _) =>
             {
-                clipboardItem.IsEnabled = await ClipboardHasUsableDataAsync();
-                exportItem.IsEnabled = ViewModel.HasExportableSelection;
-                exportItem.Header = ViewModel.HasMultiSelection
-                    ? "Export selected as PNG\u2026"
-                    : "Export as PNG\u2026";
+                ViewModel.IsClipboardUsable = await ClipboardHasUsableDataAsync();
             };
-
-            // ── ───────────────────────────────
-            var topmostCheckIcon = new TextBlock
-            {
-                Text = "✓",
-                FontSize = 11,
-                VerticalAlignment = VerticalAlignment.Center,
-            };
-            topmostCheckIcon.IsVisible = _topmostEnabled;
-            var topmostItem = new MenuItem
-            {
-                Header = "Always on Top",
-                Icon = topmostCheckIcon,
-            };
-            topmostItem.Click += (_, _) =>
-            {
-                _topmostEnabled = !_topmostEnabled;
-                topmostCheckIcon.IsVisible = _topmostEnabled;
-                if (_topmostEnabled)
-                    Topmost = true;
-                else
-                    Topmost = IsCurrentForegroundOurProcess();
-            };
-
-            var memoryMonitorItem = new MenuItem { Header = "Memory Monitor" };
-            memoryMonitorItem.Click += (_, _) => MemoryMonitorWindow.ShowOrActivate();
-
-            var aboutMenuItem = flyout.Items.OfType<MenuItem>().First(m => m.Header?.ToString() == "About");
-            int aboutIdx = ((System.Collections.IList)flyout.Items).IndexOf(aboutMenuItem);
-            //flyout.Items.Insert(aboutIdx, new Separator());
-            flyout.Items.Insert(aboutIdx, topmostItem);
-            flyout.Items.Insert(aboutIdx + 1, memoryMonitorItem);
 
             // Dashboard stays above own plot windows; drops behind other apps when they take focus.
             Topmost = true;
@@ -447,6 +410,18 @@ namespace MxPlot.App.Views
 
         private async void HamburgerExit_Click(object? sender, RoutedEventArgs e)
             => Close();
+
+        /// <summary>
+        /// Toggles the "Always on Top" user override. When enabled, <see cref="OnAnyAppWindowDeactivated"/>
+        /// skips dropping <see cref="Topmost"/> on focus loss. The immediate effect (pin now / re-evaluate
+        /// against the current foreground window) happens here since it touches native window state that
+        /// isn't expressed as a binding.
+        /// </summary>
+        private void HamburgerToggleAlwaysOnTop_Click(object? sender, RoutedEventArgs e)
+        {
+            ViewModel.IsAlwaysOnTop = !ViewModel.IsAlwaysOnTop;
+            Topmost = ViewModel.IsAlwaysOnTop || IsCurrentForegroundOurProcess();
+        }
 
         private bool _suppressExitConfirmation = false;
         private bool _isCheckingExit = false;
@@ -677,7 +652,7 @@ namespace MxPlot.App.Views
         /// </summary>
         private void TryAvoidDashboardOverlap(Window plotWindow)
         {
-            if (!_avoidOverlapEnabled) return;
+            if (!ViewModel.IsAvoidWindowOverlapEnabled) return;
             if (_adjustingOverlap) return;
             // Guards against a stray Activated/PositionChanged event that can fire while a
             // window is in the middle of closing, at which point its Position/Bounds may
@@ -728,7 +703,7 @@ namespace MxPlot.App.Views
         /// </summary>
         private void TryDodgeDashboardFromPlotWindow(Window plotWindow)
         {
-            if (!_avoidOverlapEnabled) return;
+            if (!ViewModel.IsAvoidWindowOverlapEnabled) return;
             if (_adjustingOverlap) return;
             if (_isSyncActive) return;
             // See the matching comment in TryAvoidDashboardOverlap: skip windows that are
@@ -778,7 +753,7 @@ namespace MxPlot.App.Views
         /// </summary>
         private void TryDockDashboardOnMaximize(Window plotWindow)
         {
-            if (!_avoidOverlapEnabled) return;
+            if (!ViewModel.IsAvoidWindowOverlapEnabled) return;
             if (_adjustingOverlap) return;
             if (_isSyncActive) return;
             if (!plotWindow.IsVisible) return;
@@ -807,7 +782,7 @@ namespace MxPlot.App.Views
 
         private async void OnAnyAppWindowDeactivated(object? sender, EventArgs e)
         {
-            if (_topmostEnabled)
+            if (ViewModel.IsAlwaysOnTop)
                 return;
 
             if (!OperatingSystem.IsWindows())

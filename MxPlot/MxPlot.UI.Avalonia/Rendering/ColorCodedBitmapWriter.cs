@@ -56,6 +56,43 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// <inheritdoc />
         public ParallelOptions? ParallelOptions { get; set; }
 
+        public ParallelRenderPolicy ParallelPolicy { get; set; } = ParallelRenderPolicy.Auto;
+
+        /// <remarks>
+        /// These loops have no serial branch of their own, so Never is expressed as a single
+        /// worker rather than by skipping Parallel.For. The body then runs sequentially, which is
+        /// what a caller asking to leave the cores alone actually wants; the residual scheduling
+        /// overhead is a few microseconds per frame.
+        /// Also replaces the previous <c>ParallelOptions ?? new ParallelOptions()</c>, which
+        /// allocated a fresh options object on every render loop invocation.
+        /// </remarks>
+        private ParallelOptions EffectiveParallelOptions => ParallelPolicy switch
+        {
+            // Never wins over explicitly supplied options: a caller that set both is saying
+            // "these options, if you ever go parallel", and Never says not to.
+            ParallelRenderPolicy.Never => SerialParallelOptions,
+            ParallelRenderPolicy.Always => ParallelOptions ?? SharedParallelOptions,
+            // The policy answers "should this go parallel", the options answer "with how many", so
+            // a supplied cap does not smuggle a sub-threshold frame onto the parallel path. Auto
+            // has to honour the threshold, or it is just Always under a name that says otherwise;
+            // before RenderCore has run there is no size to judge, hence the serial default.
+            _ => _autoWantsParallel ? ParallelOptions ?? SharedParallelOptions : SerialParallelOptions,
+        };
+
+        /// <remarks>
+        /// Shares CompositeBitmapWriter's threshold rather than LutBitmapWriter's: this loop also
+        /// combines more than one source per pixel (value plus winner index plus depth palette),
+        /// so its crossover should sit near composite's measured 4k-9k pixels rather than near
+        /// the LUT writer's 131k. Unlike composite's, this one has not been measured directly -
+        /// it is a structural argument, and the constant is worth revisiting if ColorCoded ever
+        /// becomes a hot path.
+        /// </remarks>
+        private const int ParallelPixelThreshold = 1 << 13;
+        private static readonly ParallelOptions SharedParallelOptions = new();
+        private static readonly ParallelOptions SerialParallelOptions = new() { MaxDegreeOfParallelism = 1 };
+        private bool _autoWantsParallel;
+
+
         /// <inheritdoc />
         public object? StructValueConverter { get; set; }
 
@@ -113,6 +150,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             if (_scratch == null || _scratch.Length < needed)
                 _scratch = new int[needed];
             var scratch = _scratch;
+            _autoWantsParallel = width * height >= ParallelPixelThreshold;
 
             fixed (int* pScratch = scratch)
             {
@@ -142,7 +180,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             double valueMin = info.ValueMin;
             double range = info.ValueMax - info.ValueMin;
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;

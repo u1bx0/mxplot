@@ -130,6 +130,10 @@ namespace MxPlot.App.ViewModels
             }
         }
 
+        // Comfortably above the Icon view's largest "Thumbnail size" step (146px, see
+        // MxPlotAppWindow.ViewMode.cs's CardSizeSteps), with headroom for 2x/Retina displays.
+        private const int ThumbnailCaptureSize = 320;
+
         private void ScheduleThumbnailUpdate(MatrixPlotter plotter)
         {
             if (_thumbnailPending) return;
@@ -137,7 +141,7 @@ namespace MxPlot.App.ViewModels
             Dispatcher.UIThread.Post(() =>
             {
                 _thumbnailPending = false;
-                var snap = plotter.CaptureThumbnail();
+                var snap = plotter.CaptureThumbnail(ThumbnailCaptureSize);
                 if (snap != null) Thumbnail = snap;
             }, DispatcherPriority.Background);
         }

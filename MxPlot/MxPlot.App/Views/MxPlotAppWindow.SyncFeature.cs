@@ -30,6 +30,7 @@ namespace MxPlot.App.Views
                 _syncBtn.Classes.Add("sync-active");
                 _syncBtn.ClearValue(Button.BackgroundProperty);
                 _syncBtn.ClearValue(Button.ForegroundProperty);
+                ToolTip.SetTip(_syncBtn, "Stop syncing these windows");
                 Resources["WindowListSelectedBorder"] = new SolidColorBrush(Color.Parse("#E57373"));
 
                 // Deselect hidden items and non-MatrixPlotter items before building the sync snapshot.
@@ -77,6 +78,7 @@ namespace MxPlot.App.Views
                 _syncBtn.Classes.Remove("sync-active");
                 _syncBtn.ClearValue(Button.BackgroundProperty);
                 _syncBtn.ClearValue(Button.ForegroundProperty);
+                ToolTip.SetTip(_syncBtn, "Lock the selected windows together: LUT, value range, axis scale, crop, and frame index stay in sync (pan/zoom stay independent per window)");
                 Resources.Remove("WindowListSelectedBorder");
                 if (_syncGroup != null)
                     _syncGroup.DirtyChanged -= OnSyncDirtyChanged;
@@ -119,16 +121,35 @@ namespace MxPlot.App.Views
         {
             if (_revertBtn != null) return;
 
+            // Deliberately not the Sync/Unsync red: an amber outline reads as "a correction
+            // you can make" rather than "the same toggle as the button underneath it", so a
+            // quick click doesn't land on Unsync by mistake.
+            var borderBrush = new SolidColorBrush(Color.Parse("#FB8C00"));
+            var textBrush = new SolidColorBrush(Color.Parse("#E65100"));
             _revertBtn = new Button
             {
                 Content = "\u21a9 Revert",
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 HorizontalContentAlignment = HorizontalAlignment.Center,
-                Background = new SolidColorBrush(Color.Parse("#E57373")),
-                Foreground = Brushes.White,
+                Background = new SolidColorBrush(Color.Parse("#FFF3E0")),
+                BorderBrush = borderBrush,
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(4),
+                Foreground = textBrush,
                 FontSize = _syncBtn.FontSize - 1,
                 Padding = new Thickness(4, 2),
             };
+            // FluentTheme's default :pointerover/:pressed states resolve the button's background
+            // via these DynamicResource keys (not the Background property set above), fading it
+            // toward transparent against our light custom color. Overriding the keys locally on
+            // this control keeps it fully opaque while still giving hover/press feedback.
+            _revertBtn.Resources["ButtonBackgroundPointerOver"] = new SolidColorBrush(Color.Parse("#FFE0B2"));
+            _revertBtn.Resources["ButtonBackgroundPressed"] = new SolidColorBrush(Color.Parse("#FFCC80"));
+            _revertBtn.Resources["ButtonBorderBrushPointerOver"] = borderBrush;
+            _revertBtn.Resources["ButtonBorderBrushPressed"] = borderBrush;
+            _revertBtn.Resources["ButtonForegroundPointerOver"] = textBrush;
+            _revertBtn.Resources["ButtonForegroundPressed"] = textBrush;
+            ToolTip.SetTip(_revertBtn, "Undo changes made since Sync started, restoring the original view");
             _revertBtn.Click += (_, _) => _syncGroup?.Revert();
 
             // Place via OverlayLayer so it floats above normal content,
@@ -177,11 +198,10 @@ namespace MxPlot.App.Views
             if (_revertBtn == null) return;
             var pt = _syncBtn.TranslatePoint(new Point(0, 0), overlay);
             if (!pt.HasValue) return;
-            // Slightly narrower than the Sync button, centered horizontally
-            double btnW = _syncBtn.Bounds.Width;
-            double revW = Math.Max(btnW * 0.8, 60);
-            _revertBtn.Width = revW;
-            Canvas.SetLeft(_revertBtn, pt.Value.X + (btnW - revW) / 2);
+            // Same width, left-aligned with the Sync button underneath it, so the two
+            // read as one deliberately stacked pair rather than a stray floating button.
+            _revertBtn.Width = _syncBtn.Bounds.Width;
+            Canvas.SetLeft(_revertBtn, pt.Value.X);
             double revH = _revertBtn.DesiredSize.Height > 0 ? _revertBtn.DesiredSize.Height : _syncBtn.Bounds.Height;
             Canvas.SetTop(_revertBtn, pt.Value.Y - revH - 6);
         }

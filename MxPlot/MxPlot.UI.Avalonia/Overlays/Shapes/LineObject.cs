@@ -85,7 +85,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             }
         }
 
-        public LineObject() { SnapMode = PixelSnapMode.Center; }
+        public LineObject() { SnapMode = PixelSnapMode.Both; }
         public LineObject(Point p1, Point p2) { P1 = p1; P2 = p2; }
         public LineObject(double x1, double y1, double x2, double y2)
         {

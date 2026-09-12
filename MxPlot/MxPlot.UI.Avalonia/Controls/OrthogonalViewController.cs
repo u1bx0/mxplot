@@ -1,7 +1,6 @@
 ﻿using Avalonia;
 using Avalonia.Threading;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.Core.Processing;
 using MxPlot.Core.Utils;
 using MxPlot.UI.Avalonia.Rendering;
@@ -1213,49 +1212,70 @@ namespace MxPlot.UI.Avalonia.Controls
                             if (yzProjMode.HasValue) _yzProjectionCache = newYzCache;
                         }
 
-                        // Save non-shared axis translations before FitToView resets them.
-                        // OnMatrixDataChanged → FitToView resets all translations; SyncSidesFromMain
-                        // only restores the shared axis (BottomView.TransX, RightView.TransY).
-                        var oldBottom = _panel.BottomView.MatrixData;
-                        var oldRight  = _panel.RightView.MatrixData;
-                        double savedBotTransY   = _panel.BottomView.RawTransY;
-                        double savedRightTransX = _panel.RightView.RawTransX;
+                        // compositeActive/compositeChannelCount were captured when this run started --
+                        // if SetCompositeState changed either of them while this run was in flight
+                        // (e.g. EnterCompositeMode pins the composited axis to index 0 first, which
+                        // fires an axis-change slice refresh -- capturing compositeActive=false --
+                        // before SetCompositeState itself runs and flips it to true), the xz/yz frames
+                        // just built are shaped for the stale state, not the live one. Applying them
+                        // (and the composite view state below, built from that same stale shape) would
+                        // regress the Composite mode/frame-indices SetCompositeState already applied
+                        // synchronously -- visibly, Bottom/Right staying in LUT mode until some
+                        // unrelated refresh (e.g. moving Time) happens to call UpdateSlicesAsync again
+                        // with fresh state. SetCompositeState always re-requests a shape-correct run
+                        // (via _hasPending below, since this run is in flight whenever the race above
+                        // can happen) whenever it changes active/channelCount, so it is safe to just
+                        // drop this stale result instead of applying it.
+                        bool compositeShapeCurrent = compositeActive == _compositeActive
+                                                   && compositeChannelCount == _compositeChannelCount;
 
-                        // Apply the *live* recipes/blend mode here, not the ones captured at the start
-                        // of this Task.Run: a recipe/blend edit (e.g. dragging a channel's histogram Max)
-                        // made while this run was in flight already pushed its own fresh values
-                        // synchronously via SetCompositeState -> ApplyCompositeViewState. Reapplying the
-                        // stale captured copy here would silently regress that edit right after it took
-                        // effect. compositeActive/compositeChannelCount stay captured because they must
-                        // match the shape of the xz/yz frames this run just built.
-                        _isSyncing = true;
-                        ApplyCompositeViewState(_panel.BottomView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
-                        ApplyCompositeViewState(_panel.RightView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
-                        // null here means "this side wasn't rebuilt because its axis didn't move" --
-                        // leaving the view's existing MatrixData in place IS the reuse, no separate
-                        // cache needed.
-                        if (xz != null) _panel.BottomView.SetMatrixDataInternal(xz);
-                        if (yz != null) _panel.RightView.SetMatrixDataInternal(yz);
-                        SyncSidesFromMain();
-
-                        // Restore non-shared axis scroll position so the user's Z-axis
-                        // scroll is preserved across slice updates.  Skip on the first
-                        // assignment (old data null) to let FitToView centre correctly.
-                        if (oldBottom != null)
-                            _panel.BottomView.ApplyZoomAndTrans(
-                                _panel.BottomView.Zoom, _panel.BottomView.RawTransX, savedBotTransY);
-                        if (oldRight != null)
-                            _panel.RightView.ApplyZoomAndTrans(
-                                _panel.RightView.Zoom, savedRightTransX, _panel.RightView.RawTransY);
-
-                        bool isDragging = _panel.BottomView.IsAxisIndicatorDragging
-                                       || _panel.RightView.IsAxisIndicatorDragging;
-                        if (!isDragging)
+                        if (compositeShapeCurrent)
                         {
-                            _panel.BottomView.ScrollToAxisIndicator();
-                            _panel.RightView.ScrollToAxisIndicator();
+                            // Save non-shared axis translations before FitToView resets them.
+                            // OnMatrixDataChanged → FitToView resets all translations; SyncSidesFromMain
+                            // only restores the shared axis (BottomView.TransX, RightView.TransY).
+                            var oldBottom = _panel.BottomView.MatrixData;
+                            var oldRight  = _panel.RightView.MatrixData;
+                            double savedBotTransY   = _panel.BottomView.RawTransY;
+                            double savedRightTransX = _panel.RightView.RawTransX;
+
+                            // Apply the *live* recipes/blend mode here, not the ones captured at the
+                            // start of this Task.Run: a recipe/blend edit (e.g. dragging a channel's
+                            // histogram Max) made while this run was in flight already pushed its own
+                            // fresh values synchronously via SetCompositeState -> ApplyCompositeViewState.
+                            // Reapplying the stale captured copy here would silently regress that edit
+                            // right after it took effect. compositeActive/compositeChannelCount stay
+                            // captured (guarded by compositeShapeCurrent above) because they must match
+                            // the shape of the xz/yz frames this run just built.
+                            _isSyncing = true;
+                            ApplyCompositeViewState(_panel.BottomView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
+                            ApplyCompositeViewState(_panel.RightView, compositeActive, compositeChannelCount, _compositeRecipes, _compositeBlendMode);
+                            // null here means "this side wasn't rebuilt because its axis didn't move" --
+                            // leaving the view's existing MatrixData in place IS the reuse, no separate
+                            // cache needed.
+                            if (xz != null) _panel.BottomView.SetMatrixDataInternal(xz);
+                            if (yz != null) _panel.RightView.SetMatrixDataInternal(yz);
+                            SyncSidesFromMain();
+
+                            // Restore non-shared axis scroll position so the user's Z-axis
+                            // scroll is preserved across slice updates.  Skip on the first
+                            // assignment (old data null) to let FitToView centre correctly.
+                            if (oldBottom != null)
+                                _panel.BottomView.ApplyZoomAndTrans(
+                                    _panel.BottomView.Zoom, _panel.BottomView.RawTransX, savedBotTransY);
+                            if (oldRight != null)
+                                _panel.RightView.ApplyZoomAndTrans(
+                                    _panel.RightView.Zoom, savedRightTransX, _panel.RightView.RawTransY);
+
+                            bool isDragging = _panel.BottomView.IsAxisIndicatorDragging
+                                           || _panel.RightView.IsAxisIndicatorDragging;
+                            if (!isDragging)
+                            {
+                                _panel.BottomView.ScrollToAxisIndicator();
+                                _panel.RightView.ScrollToAxisIndicator();
+                            }
+                            _isSyncing = false;
                         }
-                        _isSyncing = false;
                         _isUpdating = false;
 
                         if (_hasPending)

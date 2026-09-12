@@ -110,7 +110,6 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly HistogramPlotControl _histogram;
         private readonly Button _gainGammaBtn;
         private readonly TextBlock _gainGammaLabel;
-        private readonly TextBlock _gainGammaBadge;
         private readonly Slider _gainSlider;
         private readonly TextBox _gainBox;
 
@@ -258,22 +257,9 @@ namespace MxPlot.UI.Avalonia.Controls
             _gammaMax = Math.Max(GammaSliderDefaultMax, recipe.Gamma);
 
             _gainGammaLabel = new TextBlock { Text = "Gain", FontSize = BaseFontSize, VerticalAlignment = VerticalAlignment.Center };
-            _gainGammaBadge = new TextBlock
-            {
-                Text = "*",
-                FontSize = BaseFontSize,
-                FontWeight = FontWeight.Bold,
-                Foreground = new SolidColorBrush(Color.FromRgb(255, 190, 0)),
-                IsVisible = false,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(1, -2, 0, 0),
-            };
-            var gainGammaBtnContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 1 };
-            gainGammaBtnContent.Children.Add(_gainGammaLabel);
-            gainGammaBtnContent.Children.Add(_gainGammaBadge);
             _gainGammaBtn = new Button
             {
-                Content = gainGammaBtnContent,
+                Content = _gainGammaLabel,
                 // Fixed width (not Auto) so the column doesn't resize when the label text or badge
                 // changes - other rows in the composite channel list must stay column-aligned.
                 Width = GainGammaBtnWidth,
@@ -661,16 +647,19 @@ namespace MxPlot.UI.Avalonia.Controls
             ToolTip.SetTip(_gainSlider, $"To exceed {FormatActiveShort(defaultMax)}, type a value in the {paramLabel} box\n{resetTip}");
         }
 
-        /// <summary>Updates the mode button's label, <c>*</c> badge, and combined-value ToolTip.</summary>
+        /// <summary>Updates the mode button's label weight and combined-value ToolTip.</summary>
         private void UpdateGainGammaLabel()
         {
             _gainGammaLabel.Text = _activeParam == GainGammaParam.Gain ? "Gain" : "Gamma";
-            // The badge flags the *other* parameter, i.e. the one currently hidden behind the shared
-            // widget, so a non-default value there is never silently forgotten.
-            bool otherNonDefault = _activeParam == GainGammaParam.Gain
-                ? !_recipe.Gamma.Equals(DefaultGamma)
-                : !_recipe.Gain.Equals(DefaultGain);
-            _gainGammaBadge.IsVisible = otherNonDefault;
+            // Bold whenever EITHER parameter is non-default, regardless of which one is currently
+            // displayed -- not just the hidden one. Flagging only the hidden parameter felt
+            // backwards while looking at Gain and changing it away from 1: the displayed value
+            // itself not going bold read as "nothing changed" even though it just did. A separate
+            // "*" badge previously flagged only the hidden parameter, but "Gamma" (5 letters) plus
+            // the badge overflowed the button's fixed width and got clipped -- bolding the existing
+            // label needs no extra width at all.
+            bool anyNonDefault = !_recipe.Gain.Equals(DefaultGain) || !_recipe.Gamma.Equals(DefaultGamma);
+            _gainGammaLabel.FontWeight = anyNonDefault ? FontWeight.Bold : FontWeight.Normal;
             string tip = $"Gain={FormatGain(_recipe.Gain)}\nGamma={FormatGamma(_recipe.Gamma)}";
             ToolTip.SetTip(_gainGammaBtn, tip);
         }

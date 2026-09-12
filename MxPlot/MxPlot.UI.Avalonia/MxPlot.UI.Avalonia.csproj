@@ -24,6 +24,7 @@
 		  <Pack>true</Pack>
 		</AvaloniaResource>
 		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+		<None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
   <ItemGroup>

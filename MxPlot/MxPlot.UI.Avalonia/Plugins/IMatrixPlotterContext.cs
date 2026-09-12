@@ -1,7 +1,7 @@
 ﻿using Avalonia.Controls;
 using Avalonia.Media.Imaging;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
+using MxPlot.UI.Avalonia.Rendering;
 
 namespace MxPlot.UI.Avalonia.Plugins
 {

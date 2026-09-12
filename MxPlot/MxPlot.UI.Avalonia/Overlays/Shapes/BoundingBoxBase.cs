@@ -95,7 +95,8 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// <summary>
         /// Returns context menu items for this bounding box.
         /// When the concrete class implements <see cref="IAnalyzableOverlay"/>, analysis items
-        /// (Find Min/Max, Show Statistics, Use ROI for Value Range) are prepended automatically.
+        /// (Find Min/Max, Show Statistics, Open ROI View, Use ROI for Value Range) are prepended
+        /// automatically.
         /// </summary>
         public override IEnumerable<OverlayMenuEntry>? GetContextMenuItems()
         {
@@ -113,6 +114,10 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
                 evaluable.ToggleShowStatistics.Icon =
                     evaluable.ShowStatistics ? MenuIcons.CheckboxChecked : MenuIcons.CheckboxUnchecked;
                 yield return evaluable.ToggleShowStatistics;
+
+                evaluable.OpenRoiView.Icon =
+                    evaluable.HasLinkedRoiView ? MenuIcons.CheckboxChecked : MenuIcons.CheckboxUnchecked;
+                yield return evaluable.OpenRoiView;
 
                 evaluable.UseRoiForValueRange.Icon =
                     evaluable.IsValueRangeRoi ? MenuIcons.CheckboxChecked : MenuIcons.CheckboxUnchecked;
@@ -164,14 +169,25 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         // ── ROI label drawing helper ──────────────────────────────────────────
 
         /// <summary>
-        /// Draws a small "ROI" tag just outside the top-left corner of the bounding box.
-        /// The tag's bottom-left corner is placed 1 DIP above and to the right of the
-        /// top-left resize handle's outer corner (handle half-size = 4 screen px).
-        /// Call from <see cref="OverlayObjectBase.Draw"/> in concrete subclasses
-        /// when <see cref="IAnalyzableOverlay.IsValueRangeRoi"/> is true.
+        /// Draws a small tag just outside the top-left corner of the bounding box, indicating why
+        /// this region is special: <c>"VR"</c> when only <see cref="IAnalyzableOverlay.IsValueRangeRoi"/>
+        /// is set, <c>"ROI"</c> when only <see cref="IAnalyzableOverlay.HasLinkedRoiView"/> is set,
+        /// or <c>"ROI-VR"</c> when both are. The tag's bottom-left corner is placed 1 DIP above and
+        /// to the right of the top-left resize handle's outer corner (handle half-size = 4 screen px).
+        /// Call from <see cref="OverlayObjectBase.Draw"/> in concrete subclasses whenever either flag
+        /// is true; no-ops (draws nothing) if neither is.
         /// </summary>
-        protected void DrawRoiLabel(AvaloniaOverlayGraphics g)
+        protected void DrawRoiLabel(AvaloniaOverlayGraphics g, bool isValueRangeRoi, bool hasLinkedRoiView)
         {
+            string label = (hasLinkedRoiView, isValueRangeRoi) switch
+            {
+                (true, true) => "ROI-VR",
+                (true, false) => "ROI",
+                (false, true) => "VR",
+                _ => null!,
+            };
+            if (label == null) return;
+
             var sTL = g.WorldToScreen(X, Y);
             // Place the label so its bottom-left is 1 DIP above the handle's outer top-left corner.
             // Handle outer top-left = (sTL.X - HandleSize/2, sTL.Y - HandleSize/2)
@@ -180,7 +196,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             const double handleHalf = HandleSize / 2;   // 4.0
             const double labelH = 13.0;                 // approx rendered height of the tag
             g.DrawStringAtScreen(
-                "ROI",
+                label,
                 foreground: Colors.Black,
                 background: Color.FromArgb(210, 255, 210, 60),
                 screenPos: new Point(sTL.X - handleHalf + 1, sTL.Y - handleHalf - labelH - 1));

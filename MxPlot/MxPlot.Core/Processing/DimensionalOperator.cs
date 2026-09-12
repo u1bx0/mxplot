@@ -17,79 +17,138 @@ namespace MxPlot.Core.Processing
     {
 
         /// <summary>
-        /// Simple 2D transpose through all frames.
+        /// Simple 2D transpose through all frames (swaps X/Y). Always a deep copy — there is no
+        /// shallow/reference-sharing form of this operation.
         /// </summary>
-        /// <typeparam name="T"></typeparam>
         /// <param name="src"></param>
-        /// <returns></returns>
-        public static MatrixData<T> Transpose<T>(this MatrixData<T> src) where T : unmanaged
+        /// <param name="progress">
+        /// Optional progress reporter; reports a negative total once, then <c>0 .. total-1</c> as
+        /// frames complete.
+        /// </param>
+        /// <param name="cancellationToken">Checked between frames (in-memory) or bands (Virtual).</param>
+        /// <remarks>
+        /// When <see cref="MatrixData{T}.IsVirtual"/>, output is streamed straight to a temporary
+        /// MMF-backed vessel in RAM-sized bands (<see cref="VolumeAccessor{T}.ComputeBandSize"/> —
+        /// shared with <see cref="VolumeAccessor{T}.Restack"/> rather than a second, independently
+        /// tuned heuristic) instead of materializing every transposed frame in managed memory at
+        /// once, keeping peak RAM roughly one band's worth regardless of total frame count.
+        /// </remarks>
+        public static MatrixData<T> Transpose<T>(this MatrixData<T> src,
+            IProgress<int>? progress = null, CancellationToken cancellationToken = default) where T : unmanaged
         {
             int srcW = src.XCount;
             int srcH = src.YCount;
             int frameCount = src.FrameCount;
-
             int newW = srcH;
             int newH = srcW;
 
+            var result = src.IsVirtual
+                ? TransposeVirtual(src, srcW, srcH, newW, newH, frameCount, progress, cancellationToken)
+                : TransposeInMemory(src, srcW, srcH, newW, newH, frameCount, progress, cancellationToken);
+
+            // Swap physical scale and units: src.XMin -> result.YMin, src.YUnit -> result.XUnit.
+            result.SetXYScale(src.YMin, src.YMax, src.XMin, src.XMax);
+            result.XUnit = src.YUnit;
+            result.YUnit = src.XUnit;
+            // Dimensions (Channel/Z/Time/...) and Metadata are unaffected by an XY-only transpose;
+            // copyScale: false because the scale above is swapped, not a plain copy of src's.
+            result.CopyPropertiesFrom(src, copyScale: false);
+
+            return result;
+        }
+
+        private static MatrixData<T> TransposeInMemory<T>(MatrixData<T> src, int srcW, int srcH, int newW, int newH,
+            int frameCount, IProgress<int>? progress, CancellationToken cancellationToken) where T : unmanaged
+        {
             var transposed = new T[frameCount][];
             var vminArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
             var vmaxArray = Enumerable.Repeat<List<double>>(null!, frameCount).ToList();
 
-            // 1. Parallel Transpose with Cache Blocking
-            Parallel.For(0, frameCount, frameIndex =>
+            progress?.Report(-frameCount);
+            long workDone = 0;
+            Parallel.For(0, frameCount, new ParallelOptions { CancellationToken = cancellationToken }, frameIndex =>
             {
-                var srcArray = src.GetArray(frameIndex); // Get raw data of src
-                var dstArray = new T[newW * newH];
-
-                // Cache blocking constant
-                const int BlockSize = 32;
-
-                // srcW, srcH are the width and height of the original image
-                for (int xBase = 0; xBase < srcW; xBase += BlockSize)
-                {
-                    for (int yBase = 0; yBase < srcH; yBase += BlockSize)
-                    {
-                        int xMax = Math.Min(xBase + BlockSize, srcW);
-                        int yMax = Math.Min(yBase + BlockSize, srcH);
-
-                        for (int x = xBase; x < xMax; x++)
-                        {
-                            // Transpose logic
-                            // src: (x, y) -> index = y * srcW + x
-                            // dst: (y, x) -> index = x * newW + y  (newW = srcH)
-
-                            // Write start position of dst (dst's x row = original x column)
-                            int dstBaseIndex = x * newW + yBase;
-
-                            // Read start position of src
-                            int srcBaseIndex = yBase * srcW + x;
-
-                            for (int y = yBase; y < yMax; y++)
-                            {
-                                dstArray[dstBaseIndex] = srcArray[srcBaseIndex];
-
-                                dstBaseIndex++;     // dst advances horizontally (Y) contiguously
-                                srcBaseIndex += srcW; // src advances vertically (Y) by adding Width
-                            }
-                        }
-                    }
-                }
-                transposed[frameIndex] = dstArray;
+                var srcArray = src.GetArray(frameIndex);
+                transposed[frameIndex] = TransposeFrame(srcArray, srcW, srcH, newW);
                 var (minArray, maxArray) = src.GetValueRangeList(frameIndex);
                 vminArray[frameIndex] = minArray;
                 vmaxArray[frameIndex] = maxArray;
+                progress?.Report((int)(Interlocked.Increment(ref workDone) - 1));
             });
 
+            return new MatrixData<T>(newW, newH, transposed.ToList(), vminArray, vmaxArray);
+        }
 
-            // 2. Create new instance
-            var result = new MatrixData<T>(newW, newH, transposed.ToList(), vminArray, vmaxArray);
-            // Swap physical scale and units
-            // src.XMin -> result.YMin, src.YUnit -> result.XUnit
-            result.SetXYScale(src.YMin, src.YMax, src.XMin, src.XMax);
-            result.XUnit = src.YUnit;
-            result.YUnit = src.XUnit;
+        private static MatrixData<T> TransposeVirtual<T>(MatrixData<T> src, int srcW, int srcH, int newW, int newH,
+            int frameCount, IProgress<int>? progress, CancellationToken cancellationToken) where T : unmanaged
+        {
+            var vessel = IO.MatrixDataSerializer.CreateTempVessel<T>(newW, newH, frameCount);
+            try
+            {
+                int bandSize = VolumeAccessor<T>.ComputeBandSize(newW, newH, frameCount);
+                progress?.Report(-frameCount);
+                long workDone = 0;
 
-            return result;
+                for (int bandStart = 0; bandStart < frameCount; bandStart += bandSize)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int bandCount = Math.Min(bandSize, frameCount - bandStart);
+                    var band = new T[bandCount][];
+
+                    Parallel.For(0, bandCount, new ParallelOptions { CancellationToken = cancellationToken }, i =>
+                    {
+                        band[i] = TransposeFrame(src.GetArray(bandStart + i), srcW, srcH, newW);
+                    });
+
+                    // Concurrent MMF writes aren't exercised elsewhere in this codebase (VolumeAccessor's
+                    // Restack bands write out sequentially too) -- keep to that known-safe pattern.
+                    for (int i = 0; i < bandCount; i++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        vessel.WriteDirectly(bandStart + i, band[i]);
+                        band[i] = null!; // let the GC reclaim it as we go
+                        progress?.Report((int)(Interlocked.Increment(ref workDone) - 1));
+                    }
+                }
+                vessel.Flush();
+            }
+            catch
+            {
+                // Cancelled or failed mid-write -- don't leak the (possibly multi-GB) temp file.
+                vessel.Dispose();
+                throw;
+            }
+            return MatrixData<T>.CreateAsVirtualFrames(newW, newH, vessel);
+        }
+
+        /// <summary>Cache-blocked transpose of a single frame. src: (x,y) -&gt; y*srcW+x. dst: (y,x) -&gt; x*newW+y.</summary>
+        private static T[] TransposeFrame<T>(T[] srcArray, int srcW, int srcH, int newW) where T : unmanaged
+        {
+            var dstArray = new T[srcW * srcH];
+            const int BlockSize = 32;
+
+            for (int xBase = 0; xBase < srcW; xBase += BlockSize)
+            {
+                for (int yBase = 0; yBase < srcH; yBase += BlockSize)
+                {
+                    int xMax = Math.Min(xBase + BlockSize, srcW);
+                    int yMax = Math.Min(yBase + BlockSize, srcH);
+
+                    for (int x = xBase; x < xMax; x++)
+                    {
+                        int dstBaseIndex = x * newW + yBase;   // dst advances horizontally (Y) contiguously
+                        int srcBaseIndex = yBase * srcW + x;   // src advances vertically (Y) by adding Width
+
+                        for (int y = yBase; y < yMax; y++)
+                        {
+                            dstArray[dstBaseIndex] = srcArray[srcBaseIndex];
+                            dstBaseIndex++;
+                            srcBaseIndex += srcW;
+                        }
+                    }
+                }
+            }
+            return dstArray;
         }
 
         /// <summary>

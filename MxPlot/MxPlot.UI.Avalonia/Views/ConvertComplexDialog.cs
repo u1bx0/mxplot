@@ -14,12 +14,11 @@ namespace MxPlot.UI.Avalonia.Views
     /// Dialog for converting complex-valued matrix data to double by extracting a specific component.
     /// Returns <c>(ComplexValueMode Mode, bool ApplyLog10, bool ReplaceData)</c> on OK, or <c>null</c> on Cancel.
     /// </summary>
-    internal sealed class ConvertComplexDialog : Window
+    internal sealed class ConvertComplexDialog : ProcessingDialogBase
     {
         private readonly IMatrixData? _srcData;
         private readonly ComboBox _modeCombo;
         private readonly CheckBox _log10Check;
-        private readonly CheckBox _replaceCheck;
         private readonly TextBlock _sizeText;
         private readonly TextBlock _infoText;
 
@@ -33,16 +32,12 @@ namespace MxPlot.UI.Avalonia.Views
         /// is auto-recomputed from its source and would just be overwritten again on the next update.
         /// </param>
         internal ConvertComplexDialog(IMatrixData? srcData = null, bool isLinkWindow = false)
+            : base("Convert Complex Value", width: 360, isLinkWindow: isLinkWindow, src: srcData)
         {
             _srcData = srcData;
 
-            Title = "Convert Complex Value";
-            Width = 360;
-            SizeToContent = SizeToContent.Height;
-            CanResize = true;
             CanMaximize = false;
             CanMinimize = false;
-            ShowInTaskbar = false;
 
             _modeCombo = new ComboBox
             {
@@ -66,10 +61,6 @@ namespace MxPlot.UI.Avalonia.Views
             _log10Check = ControlFactory.MakeCheckBox("Apply log₁₀ transformation", fontSize: 11);
             _log10Check.IsChecked = _lastApplyLog10;
             ToolTip.SetTip(_log10Check, "Applies log₁₀ to each output value (with epsilon floor to avoid log(0)).");
-
-            _replaceCheck = ControlFactory.MakeCheckBox("Replace current data (all frames)", fontSize: 11,
-                hint: "If checked, replaces the current data in this window. If unchecked (default), result opens in a new window.");
-            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(_replaceCheck, isLinkWindow);
 
             _sizeText = new TextBlock
             {
@@ -97,27 +88,8 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var panel = new StackPanel { Margin = new Thickness(12, 10, 12, 10), Spacing = 6 };
 
-            // Virtual data warning banner
-            if (_srcData?.IsVirtual == true)
-            {
-                var virtualBanner = new Border
-                {
-                    Background = new SolidColorBrush(Color.FromArgb(60, 255, 180, 0)),
-                    BorderBrush = Brushes.Orange,
-                    BorderThickness = new Thickness(1),
-                    CornerRadius = new CornerRadius(3),
-                    Padding = new Thickness(8, 5),
-                    Margin = new Thickness(0, 0, 0, 2),
-                    Child = new TextBlock
-                    {
-                        Text = "\u26a0 Source data is virtual (file-mapped). Conversion will load all frames into memory.",
-                        FontSize = 11,
-                        TextWrapping = TextWrapping.Wrap,
-                        Foreground = Brushes.Orange,
-                    },
-                };
-                panel.Children.Add(virtualBanner);
-            }
+            if (MaterializationWarningBanner != null)
+                panel.Children.Add(MaterializationWarningBanner);
 
             var headerRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
             headerRow.Children.Add(new TextBlock
@@ -145,7 +117,7 @@ namespace MxPlot.UI.Avalonia.Views
             panel.Children.Add(_infoText);
             panel.Children.Add(_log10Check);
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
-            panel.Children.Add(_replaceCheck);
+            panel.Children.Add(ReplaceDataCheckBox);
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
 
             var okBtn = new Button
@@ -224,7 +196,7 @@ namespace MxPlot.UI.Avalonia.Views
             int idx = _modeCombo.SelectedIndex;
             var mode = idx >= 0 && idx < 5 ? (ComplexValueMode)idx : ComplexValueMode.Magnitude;
             bool applyLog10 = _log10Check.IsChecked == true;
-            bool replaceData = _replaceCheck.IsChecked == true;
+            bool replaceData = ReplaceDataCheckBox.IsChecked == true;
 
             _lastMode = mode;
             _lastApplyLog10 = applyLog10;

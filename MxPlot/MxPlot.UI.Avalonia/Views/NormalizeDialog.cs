@@ -2,6 +2,7 @@
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
+using MxPlot.Core;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using System.Threading.Tasks;
@@ -26,16 +27,18 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Factory ───────────────────────────────────────────────────────────
 
         internal static Task<NormalizeParameters?> ShowAsync(
-            Window owner, bool isMultiFrame, bool isVirtual, bool isLinkWindow = false)
+            Window owner, bool isMultiFrame, IMatrixData? src, bool isLinkWindow = false)
         {
-            var dlg = new NormalizeDialog(isMultiFrame, isVirtual, isLinkWindow);
+            var dlg = new NormalizeDialog(isMultiFrame, src, isLinkWindow);
             return dlg.ShowDialog<NormalizeParameters?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
-        private NormalizeDialog(bool isMultiFrame, bool isVirtual, bool isLinkWindow) : base("Normalize", isLinkWindow: isLinkWindow)
+        private NormalizeDialog(bool isMultiFrame, IMatrixData? src, bool isLinkWindow)
+            : base("Normalize", isLinkWindow: isLinkWindow, src: src, thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null)
         {
+            bool isVirtual = src?.IsVirtual == true;
             // ── "Normalize to:" row ───────────────────────────────────────────
             var targetNud = ControlFactory.MakeNumericUpDown(100m, 0.001m, 1_000_000m, 1m, width: 80);
             targetNud.FormatString = "G6";
@@ -105,34 +108,31 @@ namespace MxPlot.UI.Avalonia.Views
             scopePanel.Children.Add(globalRadio);
             scopePanel.Children.Add(warnRow);
 
-            // ── "This frame only" checkbox (multi-frame only) ─────────────────
-            var thisFrameCheck = ControlFactory.MakeCheckBox(
-                "This frame only",
-                hint: "Normalize only the currently active frame");
-            thisFrameCheck.Margin = new Thickness(0, 4, 0, -7);
-            thisFrameCheck.IsVisible = isMultiFrame;
-
             // disable scope radios when "This frame only" is checked
-            thisFrameCheck.IsCheckedChanged += (_, _) =>
+            if (ThisFrameOnlyCheckBox != null)
             {
-                bool single = thisFrameCheck.IsChecked == true;
-                perFrameRadio.IsEnabled = !single;
-                globalRadio.IsEnabled = !single;
-                if (single) warnRow.IsVisible = false;
-            };
+                ThisFrameOnlyCheckBox.IsCheckedChanged += (_, _) =>
+                {
+                    bool single = ThisFrameOnlyCheckBox.IsChecked == true;
+                    perFrameRadio.IsEnabled = !single;
+                    globalRadio.IsEnabled = !single;
+                    if (single) warnRow.IsVisible = false;
+                };
+            }
 
             // ── Assemble main content ─────────────────────────────────────────
             var main = new StackPanel { Spacing = 2 };
             main.Children.Add(targetRow);
             main.Children.Add(scopePanel);
-            main.Children.Add(thisFrameCheck);
+            if (ThisFrameOnlyCheckBox != null)
+                main.Children.Add(ThisFrameOnlyCheckBox);
 
             FinalizeContent(main, onOk: () =>
             {
                 _result = new NormalizeParameters(
                     Target: (double)(targetNud.Value ?? 100m),
                     Scope: globalRadio.IsChecked == true ? NormalizeScope.Global : NormalizeScope.PerFrame,
-                    ThisFrameOnly: thisFrameCheck.IsChecked == true,
+                    ThisFrameOnly: ThisFrameOnlyCheckBox?.IsChecked == true,
                     ReplaceData: ReplaceDataCheckBox.IsChecked == true);
                 Close(_result);
             }, okLabel: "Apply");

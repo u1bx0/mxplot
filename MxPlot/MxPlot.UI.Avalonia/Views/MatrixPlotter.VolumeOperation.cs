@@ -4,7 +4,6 @@
 //#define RESTACK_DIAG
 using Avalonia.Controls;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.Core.IO;
 using MxPlot.Core.IO.CacheStrategies;
 using MxPlot.Core.Processing;
@@ -289,7 +288,7 @@ namespace MxPlot.UI.Avalonia.Views
                 _xyProjectionWindow.ColorCodedParamsChanged += OnXYProjectionColorCodedParamsChanged;
                 PlotWindowNotifier.SetParentLink(_xyProjectionWindow, this);
                 PositionBesideParent(_xyProjectionWindow, this);
-                ApplyCompositeStateToProjectionWindow(_xyProjectionWindow);
+                ApplyCompositeStateToProjectionWindow(_xyProjectionWindow, establishMode: true);
                 if (colorCoded)
                 {
                     _xyProjectionWindow.EnterColorCodedProjectionMode(
@@ -308,18 +307,29 @@ namespace MxPlot.UI.Avalonia.Views
                 // whatever RenderingMode is already set. ExitColorCodedProjectionMode already
                 // cleared ColorCodedInfo to null, so the ColorCoded->Lut transition itself cannot
                 // render stale winner-index/depth-colour data against the new plain projection --
-                // but RenderingMode itself still needs to move off ColorCoded whenever we're not
-                // staying there, or nothing else ever would. ApplyCompositeStateToProjectionWindow
-                // below may then re-target it to Composite if that's the appropriate mode instead.
-                if (!colorCoded && wasColorCoded) _xyProjectionWindow.ExitColorCodedProjectionMode();
-                if (!colorCoded) _xyProjectionWindow._view.RenderingMode = RenderingMode.Lut;
+                // but RenderingMode itself still needs to move off ColorCoded, or nothing else
+                // ever would. Strictly on the transition, though: forcing Lut on every refresh
+                // also stomped Composite (which used to need re-asserting further down) and, worse,
+                // any mode the user had picked in this window.
+                bool leftColorCoded = !colorCoded && wasColorCoded;
+                if (leftColorCoded)
+                {
+                    _xyProjectionWindow.ExitColorCodedProjectionMode();
+                    _xyProjectionWindow._view.RenderingMode = RenderingMode.Lut;
+                }
+                // A Composite payload and a plain projection are different stack shapes, so the
+                // parent going in or out of Composite changes the layout under this window. Its
+                // chrome is rebuilt for the new shape (UpdateProjectionData handles that), and the
+                // mode it was in no longer describes anything - it has to be established again.
+                bool layoutChanged = !HasSameAxisLayout(_xyProjectionWindow.MatrixData, projectionData);
                 // Use UpdateProjectionData instead of ViewModel.MatrixData= to avoid a full
                 // SetMatrixData re-initialization that would clear overlay state (ROI mode,
                 // line profiles, region statistics) on every parent frame change.
                 _xyProjectionWindow.UpdateProjectionData(projectionData);
-                ApplyCompositeStateToProjectionWindow(_xyProjectionWindow);
-                // ApplyCompositeStateToProjectionWindow's "parent not in Composite" branch resets
-                // to RenderingMode.Lut -- wrong while staying ColorCoded, so restore it after.
+                // Leaving ColorCoded is the other moment this window has no mode of its own to
+                // keep: it landed on Lut by default, not by choice.
+                ApplyCompositeStateToProjectionWindow(_xyProjectionWindow,
+                                                     establishMode: leftColorCoded || layoutChanged);
                 // EnterColorCodedProjectionMode only runs on the LUT/Max/Min -> ColorCoded
                 // transition (swaps the details panel, seeds the header controls); once already a
                 // ColorCoded child, only the RenderingMode needs restoring on every frame -- rebuilding
@@ -382,57 +392,62 @@ namespace MxPlot.UI.Avalonia.Views
         /// anything below reads it, on every call, not just the first.
         /// </para>
         /// <para>
-        /// <see cref="EnterCompositeMode"/> itself is called only once, though (rebuilding the
-        /// header/details UI on every parent frame step would be wasteful and would drop any
-        /// in-progress interaction, e.g. an open flyout). The channel axis's position is stable
-        /// across updates — <c>BuildChannelComposite</c> always merges in the same shape — so
-        /// later calls only need the cheap per-frame refresh <see cref="ApplyCompositeFrameIndices"/>
-        /// already does for an ordinary window's Z/T navigation. The window's Composite state is
-        /// seeded from the parent only on that first call, via <see cref="SeedChildCompositeState"/>
-        /// (shared with Extract's live-extract windows) - and deliberately not re-seeded
-        /// afterward, since the window is meant to become independently tunable; see that method's
-        /// doc comment for the full reasoning.
+        /// <see cref="EnterCompositeMode"/> itself runs only while the window's mode is being
+        /// established (rebuilding the header/details UI on every parent frame step would be
+        /// wasteful and would drop any in-progress interaction, e.g. an open flyout). The channel
+        /// axis's position is stable across updates — <c>BuildChannelComposite</c> always merges in
+        /// the same shape — so later calls only need the cheap per-frame refresh
+        /// <see cref="ApplyCompositeFrameIndices"/> already does for an ordinary window's Z/T
+        /// navigation. The state itself comes from <see cref="SeedChildCompositeState"/> (shared
+        /// with Extract's live-extract windows), which hands the window a starting point and then
+        /// leaves it independently tunable; see that method's doc comment for the full reasoning.
         /// </para>
         /// </remarks>
-        private void ApplyCompositeStateToProjectionWindow(MatrixPlotter window)
+        /// <param name="establishMode">
+        /// <c>true</c> while the window has no rendering mode of its own to keep: it was just
+        /// created, or it just left ColorCoded because the projection type changed. Then Composite
+        /// is seeded from this parent, so a Composite parent opens a Composite projection.
+        /// <para>
+        /// <c>false</c> for an ordinary data refresh. Whatever mode the window is in is its own
+        /// from then on — including LUT, if the user chose "Switch to LUT mode" from the Composite
+        /// header. That is a legitimate destination, not a state to correct: the projection payload
+        /// keeps its channel axis either way, so LUT mode simply browses the channels one at a
+        /// time through the axis tracker. Re-seeding here would undo the choice on the parent's
+        /// very next frame step.
+        /// </para>
+        /// </param>
+        private void ApplyCompositeStateToProjectionWindow(MatrixPlotter window, bool establishMode)
         {
-            if (_isCompositeMode)
-            {
-                window.SyncCurrentDataFromView();
-                // Look the axis up by the parent's composited axis name, not a hardcoded "Channel" --
-                // Composite is no longer restricted to that one name (see
-                // ColorCoded_View_InitialDesign.md section 3.3.7).
-                if (_currentData == null || _compositeAxisDimIndex < 0
-                    || _compositeAxisDimIndex >= _currentData.Dimensions.AxisCount) return;
-                string parentAxisName = _currentData.Dimensions[_compositeAxisDimIndex].Name;
-                var channelAxis = window._currentData?.Axes.FindAxis(parentAxisName);
-                if (channelAxis == null) return;
+            window.SyncCurrentDataFromView();
 
-                if (!window._isCompositeMode)
-                    SeedChildCompositeState(window, channelAxis);
-                else
-                {
-                    window.ApplyCompositeFrameIndices();
-                    // ApplyCompositeFrameIndices only refreshes composite frame data/ranges, not
-                    // RenderingMode -- EnterCompositeMode (called once, inside SeedChildCompositeState
-                    // above) is the only other place that sets it. OnXYProjectionChanged's caller
-                    // unconditionally forces RenderingMode.Lut just before this whenever the new
-                    // projection isn't ColorCoded (see its own comment on why), which silently broke
-                    // this steady-state Composite path: the window stayed on Composite frame data but
-                    // rendered it through Lut (grayscale) until something else happened to reset the
-                    // mode again. Re-assert it explicitly every call instead of assuming it survived.
-                    window._view.RenderingMode = RenderingMode.Composite;
-                }
-            }
-            else if (window._isCompositeMode)
+            // Look the axis up by the parent's composited axis name, not a hardcoded "Channel" --
+            // Composite is no longer restricted to that one name (see
+            // ColorCoded_View_InitialDesign.md section 3.3.7).
+            Axis? channelAxis = null;
+            if (_isCompositeMode && _currentData != null && _compositeAxisDimIndex >= 0
+                && _compositeAxisDimIndex < _currentData.Dimensions.AxisCount)
             {
-                // The parent left Composite mode while this window was open — follow it back to LUT.
-                window.ExitCompositeMode();
+                string parentAxisName = _currentData.Dimensions[_compositeAxisDimIndex].Name;
+                channelAxis = window._currentData?.Axes.FindAxis(parentAxisName);
             }
-            else
+
+            if (channelAxis == null)
             {
-                window._view.RenderingMode = RenderingMode.Lut;
+                // No Composite payload is coming any more - typically the parent just left
+                // Composite mode. A window still rendering as Composite has to follow: its
+                // CompositeFrameIndices stays sized for the old channel count, and the mismatch
+                // surfaces later as an out-of-range read (e.g. from the hover value overlay).
+                if (window._isCompositeMode) window.ExitCompositeMode();
+                return;
             }
+
+            if (window._isCompositeMode)
+            {
+                window.ApplyCompositeFrameIndices();
+                return;
+            }
+
+            if (establishMode) SeedChildCompositeState(window, channelAxis);
         }
 
         private void OnXYProjectionWindowClosed(object? sender, EventArgs e)
@@ -515,7 +530,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             var p = await CreateProjectionDialog.ShowAsync(
-                this, initialMode, planeLabel, alongLabel, axisName, axes, IsSyncFollower, colorCodedInfo);
+                this, initialMode, planeLabel, alongLabel, axisName, axes, IsReplaceDataBlocked, colorCodedInfo);
             if (p == null) return;
 
             // Composite blends channels at render time, so a projection taken at a single position

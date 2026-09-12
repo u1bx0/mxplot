@@ -9,14 +9,14 @@ using System.Reflection;
 namespace MxPlot.App.Plugins
 {
     /// <summary>
-    /// Central registry for <see cref="IMxPlotPlugin"/> instances.
+    /// Central registry for <see cref="IMxPlotAppPlugin"/> instances.
     /// </summary>
     public static class MxPlotAppPluginRegistry
     {
-        private static readonly List<IMxPlotPlugin> _plugins = [];
+        private static readonly List<IMxPlotAppPlugin> _plugins = [];
 
         /// <summary>All currently registered plugins (read-only snapshot).</summary>
-        public static IReadOnlyList<IMxPlotPlugin> Plugins => _plugins.AsReadOnly();
+        public static IReadOnlyList<IMxPlotAppPlugin> Plugins => _plugins.AsReadOnly();
 
         /// <summary>
         /// Fired on the UI thread whenever the plugin list changes.
@@ -25,7 +25,7 @@ namespace MxPlot.App.Plugins
         public static event Action? PluginsChanged;
 
         /// <summary>Registers a plugin programmatically.</summary>
-        public static void AddPlugin(IMxPlotPlugin plugin)
+        public static void AddPlugin(IMxPlotAppPlugin plugin)
         {
             _plugins.Add(plugin);
             if (Dispatcher.UIThread.CheckAccess())
@@ -36,7 +36,7 @@ namespace MxPlot.App.Plugins
 
         /// <summary>
         /// Scans <paramref name="pluginsDir"/> for DLLs and registers every exported
-        /// class that implements <see cref="IMxPlotPlugin"/>.
+        /// class that implements <see cref="IMxPlotAppPlugin"/>.
         /// </summary>
         public static void LoadFromDirectory(string pluginsDir)
         {
@@ -49,8 +49,8 @@ namespace MxPlot.App.Plugins
                     foreach (var type in asm.GetExportedTypes())
                     {
                         if (type.IsClass && !type.IsAbstract
-                            && typeof(IMxPlotPlugin).IsAssignableFrom(type)
-                            && Activator.CreateInstance(type) is IMxPlotPlugin plugin)
+                            && typeof(IMxPlotAppPlugin).IsAssignableFrom(type)
+                            && Activator.CreateInstance(type) is IMxPlotAppPlugin plugin)
                         {
                             AddPlugin(plugin);
                         }
@@ -63,7 +63,7 @@ namespace MxPlot.App.Plugins
         // ── Default IPlotWindowService ────────────────────────────────────────
 
         /// <summary>
-        /// The <see cref="IPlotWindowService"/> used when building <see cref="IMxPlotContext"/>.
+        /// The <see cref="IPlotWindowService"/> used when building <see cref="IMxPlotAppContext"/>.
         /// Replace with a richer implementation at application start-up if needed.
         /// </summary>
         public static IPlotWindowService WindowService { get; set; }

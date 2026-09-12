@@ -1,5 +1,4 @@
-﻿using MxPlot.Core.Imaging;
-using System;
+﻿using System;
 using System.Numerics;
 
 namespace MxPlot.UI.Avalonia.Rendering

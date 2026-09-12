@@ -1,5 +1,6 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input.Platform;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -325,6 +326,13 @@ namespace MxPlot.App.Views
 
             foreach (var sep in new[] { "\t", "," })
             {
+                // Skip a candidate separator that doesn't occur anywhere in the text. Without this,
+                // trying "\t" first against genuine comma-separated data would still "succeed": each
+                // whole line becomes a single unsplit field, and CsvHandler.CreateFrom never throws
+                // on an unparseable cell -- it substitutes NaN (see its NumberStyles.Any TryParse
+                // fallback) -- so the result is a degenerate 1-column, all-NaN grid that still
+                // passes the XCount/YCount >= 1 check below, and the comma fallback never even runs.
+                if (!lines.Any(l => l.Contains(sep))) continue;
                 var structure = TryParseCsvStructure(lines, sep);
                 if (structure != null) return (structure, sep);
             }
@@ -473,9 +481,13 @@ namespace MxPlot.App.Views
 
             var (suggestedFormat, isAmbiguous) = DetectProfileFormat(md);
 
+            // Raw-line preview for the dialog: lets the user visually spot structure (e.g. a
+            // repeated header column) that plain column/row counts don't convey.
+            var previewLines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+
             var choice = await ShowCsvPlotterTypeDialogAsync(
                 md.XCount, md.YCount, sepLabel, suggestedFormat, isAmbiguous,
-                structure.NanIndices.Count);                        // ← 追加
+                structure.NanIndices.Count, previewLines);
             if (choice == null) return;
 
             var (plotterType, profileFormat, nanPadding) = choice.Value;
@@ -508,7 +520,7 @@ namespace MxPlot.App.Views
         /// <returns>Selected plotter type and profile format, or null if cancelled.</returns>
         private async Task<(PlotterType Type, ProfileDataFormat Format, double? NanPadding)?> ShowCsvPlotterTypeDialogAsync(
             int cols, int rows, string sepLabel, ProfileDataFormat suggestedFormat, bool isAmbiguous,
-            int nanCount)
+            int nanCount, string[] previewLines)
         {
             PlotterType? selectedType = null;
             ProfileDataFormat selectedFormat = suggestedFormat;
@@ -579,6 +591,35 @@ namespace MxPlot.App.Views
                 Opacity = 0.6,
                 Margin = new Thickness(0, 0, 0, 4)
             });
+
+            // ── Raw-line preview ──────────────────────────────────────
+            // Plain columns/rows counts don't show structure like a repeated header column;
+            // the raw text does, at a glance. No wrap + horizontal scroll so a wide row is
+            // still readable rather than squashed to fit.
+            const int PreviewLineCount = 3;
+            var previewText = string.Join("\n", previewLines.Take(PreviewLineCount));
+            if (previewLines.Length > PreviewLineCount)
+                previewText += $"\n… ({previewLines.Length - PreviewLineCount} more rows)";
+            stack.Children.Add(new Border
+            {
+                BorderThickness = new Thickness(1),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 128, 128, 128)),
+                Margin = new Thickness(0, 0, 0, 8),
+                Child = new ScrollViewer
+                {
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                    Content = new TextBlock
+                    {
+                        Text = previewText,
+                        FontFamily = new FontFamily("Consolas,Menlo,monospace"),
+                        FontSize = 10,
+                        TextWrapping = TextWrapping.NoWrap,
+                        Margin = new Thickness(6, 4),
+                    }
+                }
+            });
+
             stack.Children.Add(new TextBlock
             {
                 Text = "Load as:",
@@ -671,8 +712,15 @@ namespace MxPlot.App.Views
             var dlg = new Window
             {
                 Title = "Open from Clipboard",
-                SizeToContent = SizeToContent.WidthAndHeight,
-                CanResize = false,
+                // Width is fixed at open (a reasonable default the button row already fits) and left
+                // to manual resize from there; SizeToContent only tracks Height (which does need to
+                // keep auto-fitting, e.g. when the NaN section appears). If Width were included here
+                // too, the window would keep re-fitting to content on every layout pass, permanently
+                // capping the preview's stretch-to-fill width right back down regardless of how far
+                // the user drags the window.
+                Width = 480,
+                SizeToContent = SizeToContent.Height,
+                CanResize = true,
                 WindowStartupLocation = WindowStartupLocation.CenterOwner,
                 FontSize = 11,
                 Content = stack

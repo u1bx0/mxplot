@@ -641,6 +641,7 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.ComplexValueMode = mode;
                 SyncComplexValueModeChanged();
             };
+            _orthoPanel.BottomView.MatrixDataChanged += (_, _) => OnSideViewMatrixDataChanged(_orthoPanel.BottomView);
 
             // ── Right orthogonal view ─────────────────────────────────────────
             _orthoPanel.RightView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
@@ -657,6 +658,7 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.ComplexValueMode = mode;
                 SyncComplexValueModeChanged();
             };
+            _orthoPanel.RightView.MatrixDataChanged += (_, _) => OnSideViewMatrixDataChanged(_orthoPanel.RightView);
 
             // ── Dirty badge ───────────────────────────────────────────────────
             IsModifiedChanged += (_, _) => UpdateDirtyBadge();

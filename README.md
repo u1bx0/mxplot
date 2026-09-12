@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.3.1-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.4.0-orange)](https://github.com/u1bx0/mxplot/releases)
 [![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -277,7 +277,7 @@ For **scripts, console tools, and notebook cells** — anything without a pre-ex
 
 ```csharp
 // app.cs — a .NET 10 file-based app (dotnet run app.cs)
-#:package MxPlot@0.3.0
+#:package MxPlot@0.4.0
 
 using MxPlot.Core;
 using MxPlot.UI.Avalonia;
@@ -530,6 +530,17 @@ For detailed guides and technical references, see the **[Documentation Index](./
 
 ## 📊 Version History
 
+**v0.4.0** (ROI View, Transpose, Composite/side-view consistency, and rendering performance)
+- 🔍 **ROI View (New)**: "Open ROI View" opens a Rectangle/Oval overlay's enclosed region in its own synced window.
+- 🔄 **Transpose**: Now a `MatrixPlotter` operation, streaming Virtual sources in RAM-bounded bands.
+- 🎨 **Composite Consistency**: Auto/All ranges survive `Refresh()`, line profiles take channel colours, side views stay in sync.
+- ⚡ **Composite RGB Fast Path**: `CompositeBitmapWriter` bypasses the general per-pixel path for byte/3-channel pure-RGB Fixed(0,255) recipes — a raw byte-interleave-speed render instead. New `CompositeRecipes` Facade property lets a host (e.g. a live camera) opt in explicitly.
+- ⚡ **Rendering Performance**: Parallel LUT rendering (previously single-threaded), a redundant full-frame re-render on unchanged Composite recipes, and a histogram recompute that could livelock under a fast live feed — all fixed. New `Parallelism` control caps render threads per host.
+- 🔌 **External Control**: `AllowDataReplace`/`AutoUpdateWindowIcon` host opt-outs; `ControlFactory` is now public.
+- 📁 **LUTs Folder**: External palettes are now found by file-based apps (`dotnet run app.cs`) and macOS `.app` bundles.
+- 🐛 **Bug Fixes**: Composite→LUT→Composite value-range loss, ColorThemes red/blue swap, region rounding/orientation, custom LUT levels, and more.
+- ⚠️ **Breaking Changes**: `LookupTable`/`ColorThemes` moved to `MxPlot.UI.Avalonia.Rendering`; `IBitmapWriter` gained `ParallelPolicy`; plugin API renames. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
+
 **v0.3.0** (Composite workflow completion, ColorCoded rendering, live-link refactor, and stability/performance improvements)
 - 🌈 **ColorCoded Rendering (New)**: New live depth/time colour-coded projection mode — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection, in a linked child window.
 - 🎨 **Composite Rendering (Feature-complete)**: Promoted Composite mode from beta-level base to full workflow support with RGB auto-composite, grayscale conversion, and fallback dialog flow.
@@ -544,17 +555,8 @@ For detailed guides and technical references, see the **[Documentation Index](./
 - ⚠️ **Breaking Changes**: `MatrixPlotter.LinkedSource` / `LinkedSourceExcludedAxes` and `MatrixPlotterViewModel.ActiveFrame` removed; `BitmapWriter` deprecated in favour of `LutBitmapWriter`. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
 **v0.2.0** (Export extensions, Complex type support, and UI/UX enhancements)
-- 🎬 **AVI Export Plugin**: New package **MxPlot.UI.Avalonia.Video** added with `IRenderExportPlugin` / `IRenderHost` abstraction. Supports main view and orthogonal view video export with axis selection, FPS control, and overlay rendering.
-- 📐 **Extract Dimension Dialog**: New `Extract Along` / `Extract At` UI for extracting data along or at specific axis values. Unified title and history formatting.
-- 🔢 **Complex Type Support**: Full support for `System.Numerics.Complex` with `ValueMode` (Real/Imaginary/Magnitude/Phase) display switching in UI and core.
-- 📊 **Histogram Analysis**: New `HistogramPlotControl` with live bin calculation, LUT mode integration, and interactive overlay support.
-- 🖼️ **XY Projection Enhancements**: Introduced `LinkedSource` delegation model — overlay analysis (line profile, stats, ROI) now updates on parent frame change. AVI export supported via parent data delegation.
-- ✂️ **Crop Sync Overhaul**: Fixed crop synchronization bugs across volume axes. Added reentrancy guards and unified dirty-flag/secondary-window management.
-- 💾 **Configuration Persistence**: Settings now saved to `config` folder. Data reuse logic improves memory efficiency on viewer refresh.
-- 🧮 **Core Optimizations**: `GetGlobalValueRange` for multi-axis value range queries. `AsMemory<T>` optimizations for generic types. `forceInMemory` option added to `Duplicate()` / `Clone()`.
-- 🎨 **Composite Rendering Base** *(beta)*: Core rendering logic implemented (`CompositeBitmapWriter`). UI layer incomplete — full composite UI planned for future release.
-- 🐛 **Bug Fixes**: CSV `flipY` parameter ignored — now fixed. Profile plotter auto-axis setting not applied — fixed. Render thread safety improved.
-- 🔧 **Dependency Update**: Avalonia updated to **11.3.18** (from 11.3.14).
+- 🎬 **AVI Export**, 🔢 **Complex Type Support**, and 📊 **Histogram Analysis** (`HistogramPlotControl`).
+- ✂️ **Crop Sync Overhaul**, 💾 **Configuration Persistence**, and an early Composite Rendering core (`CompositeBitmapWriter`; UI followed in v0.3.0).
 
 **v0.1.x and earlier**
 - ✂️ **Crop / Substack Improvements**: Added hyperstack crop modes with ROI-aware behavior.

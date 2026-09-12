@@ -9,7 +9,7 @@ namespace MxPlot.App.Plugins
     /// <summary>
     /// Exposes the current state of the MxPlot main window to a plugin.
     /// </summary>
-    public interface IMxPlotContext
+    public interface IMxPlotAppContext
     {
         /// <summary>All datasets currently open in the main window.</summary>
         IReadOnlyList<IMatrixData> OpenDatasets { get; }

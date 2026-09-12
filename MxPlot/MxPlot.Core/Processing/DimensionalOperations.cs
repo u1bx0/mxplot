@@ -10,12 +10,14 @@ namespace MxPlot.Core.Processing
     // =========================================================================================
 
     /// <summary>
-    /// Transposes the matrix (swaps dimensions).
+    /// Transposes the matrix (swaps X/Y dimensions). Always a deep copy.
     /// </summary>
-    public record TransposeOperation : IMatrixDataOperation
+    public record TransposeOperation(
+        IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.Transpose();
+            => src.Transpose(Progress, CancellationToken);
     }
 
     /// <summary>

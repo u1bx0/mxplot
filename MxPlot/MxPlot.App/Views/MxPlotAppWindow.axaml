@@ -288,12 +288,20 @@
 				<Button.Flyout>
 					<MenuFlyout Placement="BottomEdgeAlignedLeft">
 						<MenuItem Header="Open File…"  Click="HamburgerOpenFile_Click" />
-						<Separator/>
-						<MenuItem Header="Tools">
+						<MenuItem Header="Open from Clipboard…" Click="HamburgerOpenFromClipboard_Click"
+								  IsEnabled="{Binding IsClipboardUsable}">
+							<MenuItem.Icon>
+								<PathIcon Data="M19,21H8V7H19M19,5H8A2,2 0 0,0 6,7V21A2,2 0 0,0 8,23H19A2,2 0 0,0 21,21V7A2,2 0 0,0 19,5M16,1H4A2,2 0 0,0 2,3V17H4V3H16V1Z"
+										  Width="14" Height="14" Foreground="#78909C"/>
+							</MenuItem.Icon>
+						</MenuItem>
+						<MenuItem Header="{Binding ExportMenuHeader}" Click="HamburgerExportAsPng_Click"
+								  IsEnabled="{Binding HasExportableSelection}"/>
+						<MenuItem Header="Samples">
 							<MenuItem Header="Create a Linear Scale…" Click="ToolsGenerateLinearScale_Click"
 									  ToolTip.Tip="Creates a linear scale data."/>
 							<MenuItem Header="Create Dummy for Color-Coded Scale…" Click="ToolsGenerateColorCodedScaleData_Click"
-									  ToolTip.Tip="Creates a dummy dataset for testing color-coded scale." />	
+									  ToolTip.Tip="Creates a dummy dataset for testing color-coded scale." />
 							<MenuItem Header="Sample 2D data…" Click="ToolsGenerate2DTestData_Click"
 									  ToolTip.Tip="Creates a sample 2D dataset and opens it."/>
 							<MenuItem Header="Sample Julia Set…" Click="ToolsGenerateJulia_Click"
@@ -301,6 +309,23 @@
 							<MenuItem Header="Sample Hyperstack…" Click="ToolsGenerateHyperstack_Click"
 									  ToolTip.Tip="Creates a sample C=3 / Z=10 / T=5 float hyperstack (256×256) and opens it."/>
 						</MenuItem>
+						<Separator/>
+						<MenuItem Header="Tools"/>
+						<Separator/>
+						<MenuItem Header="Always on Top" Click="HamburgerToggleAlwaysOnTop_Click">
+							<MenuItem.Icon>
+								<TextBlock Text="✓" FontSize="11" VerticalAlignment="Center"
+										   IsVisible="{Binding IsAlwaysOnTop}"/>
+							</MenuItem.Icon>
+						</MenuItem>
+						<MenuItem Header="Avoid Window Overlap" Command="{Binding ToggleAvoidWindowOverlapCommand}"
+								  ToolTip.Tip="Automatically nudges the dashboard and plot windows apart so they don't cover each other when activated.">
+							<MenuItem.Icon>
+								<TextBlock Text="✓" FontSize="11" VerticalAlignment="Center"
+										   IsVisible="{Binding IsAvoidWindowOverlapEnabled}"/>
+							</MenuItem.Icon>
+						</MenuItem>
+						<MenuItem Header="Memory Monitor" Command="{Binding OpenMemoryMonitorCommand}"/>
 						<Separator/>
 						<MenuItem Header="About"       Click="HamburgerAbout_Click"/>
 						<Separator/>
@@ -371,8 +396,11 @@
 						 BorderThickness="0">
 				</ListBox>
 
-				<!-- Empty-state hint -->
-				<StackPanel IsVisible="{Binding HasNoWindows}"
+				<!-- Empty-state hint. Starts fully transparent; MxPlotAppWindow.WelcomeAnimation.cs
+				     fades it in once the window is shown. -->
+				<StackPanel Name="EmptyStateHint"
+							IsVisible="{Binding HasNoWindows}"
+							Opacity="0"
 							VerticalAlignment="Center"
 							HorizontalAlignment="Center"
 							Spacing="6"
@@ -418,19 +446,22 @@
 					IsEnabled="{Binding HasVisibleMultiSelection}"
 					HorizontalAlignment="Stretch"
 					HorizontalContentAlignment="Center"
-					Margin="0,0,3,0"/>
+					Margin="0,0,3,0"
+					ToolTip.Tip="Arrange the selected windows across the screen"/>
 			<Button Content="Sync"
 					Name="SyncBtn"
 					IsEnabled="{Binding HasVisibleMultiSelection}"
 					HorizontalAlignment="Stretch"
 					HorizontalContentAlignment="Center"
-					Margin="3,0,3,0"/>
+					Margin="3,0,3,0"
+					ToolTip.Tip="Lock the selected windows together: LUT, value range, axis scale, crop, and frame index stay in sync (pan/zoom stay independent per window)"/>
 			<Button Content="Close"
 					Command="{Binding CloseSelectedWindowsCommand}"
 					IsEnabled="{Binding HasSelection}"
 					HorizontalAlignment="Stretch"
 					HorizontalContentAlignment="Center"
-					Margin="3,0,0,0"/>
+					Margin="3,0,0,0"
+					ToolTip.Tip="Close the selected windows"/>
 		</UniformGrid>
 
 		<!-- Loading overlay: covers menu bar + list + action bar while a file is reading -->

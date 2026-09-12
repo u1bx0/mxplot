@@ -141,23 +141,26 @@ namespace MxPlot.App.ViewModels
             window.Closed += (_, _) => window.PropertyChanged -= onTitleChanged;
 
             // Intercept minimize: hide the window instead (no taskbar entry to restore from).
+            // Windows only. The native yellow minimize button on macOS is handled directly by
+            // AppKit before our WindowState PropertyChanged notification ever fires, so by the
+            // time this handler runs, the native miniaturize animation has already started --
+            // reacting here is structurally too late to prevent it (confirmed: deferring the
+            // reaction one dispatcher tick, tried 2026-09-05, didn't change that, and additionally
+            // left IsWindowVisible desynced -- already false before a later dashboard-minimize
+            // batch ran, so that batch skipped this window as "already hidden" and stranded it on
+            // screen; reverted). Unlike Windows' taskbar, macOS's Dock gives each minimized window
+            // its own restorable thumbnail independent of the app's own Dock icon, so on macOS the
+            // native minimize is left alone entirely rather than fought.
             EventHandler<Avalonia.AvaloniaPropertyChangedEventArgs> onWindowStateChanged =
                 (_, e) =>
                 {
+                    if (OperatingSystem.IsMacOS()) return;
                     if (e.Property == Window.WindowStateProperty
                         && window.WindowState == WindowState.Minimized)
                     {
                         window.WindowState = WindowState.Normal;
                         window.Hide();
                         IsWindowVisible = false;
-                        /*
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                        {
-                            window.WindowState = WindowState.Normal;
-                            window.Hide();
-                            IsWindowVisible = false;
-                        }, Avalonia.Threading.DispatcherPriority.Background);
-                        */
                     }
                 };
             window.PropertyChanged += onWindowStateChanged;

@@ -1,5 +1,4 @@
 ﻿using MxPlot.Core;
-using MxPlot.Core.IO;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
@@ -39,7 +38,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (_activeAction is CropAction { Role: CropRole.Follower })
                 return;
 
-            var crop = new CropAction(CropRole.Leader);
+            var crop = new CropAction(CropRole.Leader) { IsReplaceDataBlocked = IsReplaceDataBlocked };
             if (_lastCropBounds is { } lb)
                 crop.InitialLeaderBounds = lb;
             crop.RoiBoundsChanged += OnCropRoiBoundsChanged;
@@ -782,7 +781,7 @@ namespace MxPlot.UI.Avalonia.Views
             HideMenuPanel();
 
             var axes = _currentData.Axes;
-            var p = await ExtractDimensionDialog.ShowAsync(this, axes, IsSyncFollower);
+            var p = await ExtractDimensionDialog.ShowAsync(this, axes, IsReplaceDataBlocked);
             if (p == null) return;
 
             IMatrixData result;
@@ -850,11 +849,8 @@ namespace MxPlot.UI.Avalonia.Views
             HideMenuPanel();
 
             var axes = _currentData.Axes;
-            var p = await ReverseStackDialog.ShowAsync(this, axes, IsSyncFollower);
+            var p = await ReverseStackDialog.ShowAsync(this, axes, IsReplaceDataBlocked, _currentData);
             if (p == null)
-                return;
-
-            if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Reverse Stack")) 
                 return;
 
             IMatrixData result;
@@ -890,6 +886,114 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
+        // ── Transpose ─────────────────────────────────────────────────────────
+        //
+        // Always opens a new window (never Replace) -- see TransposeDialog's constructor comment
+        // for why: overlays are in screen coordinates keyed to the old width/height, and swapping
+        // XY would misplace every one of them.
+
+        private CancellationTokenSource? _transposeCts;
+
+        private async Task InvokeTransposeAsync()
+        {
+            if (_currentData == null) return;
+            HideMenuPanel();
+
+            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
+            var p = await TransposeDialog.ShowAsync(this, isMultiFrame, _currentData);
+            if (p == null)
+                return;
+
+            // Forced on when Composite mode has no surviving axis besides the composited one --
+            // see IsThisFrameOnlyAChoice's remarks: the checkbox is hidden in that case, but the
+            // composite-cube extraction below must still run so the result re-enters Composite mode.
+            bool thisFrameOnly = p.ThisFrameOnly || (_isCompositeMode && !isMultiFrame);
+            bool singleFrame = thisFrameOnly || !isMultiFrame;
+            int frameIdx = _currentData.ActiveIndex;
+            // Composite + This Frame Only: transpose every channel at the current position
+            // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
+            var compositeCube = thisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
+            string detailSuffix = compositeCube != null
+                ? $" ([{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}])"
+                : singleFrame ? $" (frame {frameIdx})" : "";
+
+            IMatrixData result;
+            _transposeCts?.Dispose();
+            _transposeCts = new CancellationTokenSource();
+            var ct = _transposeCts.Token;
+            var progress = BeginProgress("Transposing…", blockInput: true, _transposeCts);
+            try
+            {
+                result = await Task.Run(() =>
+                {
+                    IMatrixData source = compositeCube?.Cube
+                        ?? (singleFrame ? _currentData.Apply(new SliceAtOperation(frameIdx)) : _currentData);
+                    return source.Apply(new TransposeOperation(progress, ct));
+                }, ct);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (OutOfMemoryException)
+            {
+                await ShowMessageDialogAsync("Out of Memory",
+                    "Not enough memory to transpose this dataset.\nOperation cancelled.");
+                return;
+            }
+            catch (Exception ex)
+            {
+                await ShowMessageDialogAsync("Transpose Failed", ex.Message);
+                return;
+            }
+            finally
+            {
+                _transposeCts?.Dispose();
+                _transposeCts = null;
+                EndProgress();
+            }
+
+            AppendHistory(result, "Transpose", Title, detailSuffix.Trim(' ', '(', ')'));
+
+            string resultTitle = $"Transposed {Title}";
+            MatrixPlotter resultPlotter;
+            if (p.SyncSource && singleFrame)
+            {
+                resultPlotter = CreateLinked(result, _view.Lut, resultTitle, linkRefresh: false);
+                CopyRangeAndLutStateTo(resultPlotter);
+                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
+                resultPlotter.Show();
+                StartTransposeSync(resultPlotter, this);
+            }
+            else
+            {
+                resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
+                CopyRangeAndLutStateTo(resultPlotter);
+                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
+                resultPlotter.Show();
+            }
+        }
+
+        /// <summary>
+        /// Keeps <paramref name="follower"/> showing the transpose of whatever <paramref name="source"/>
+        /// currently displays. Mirrors <see cref="StartFilterSync"/>.
+        /// </summary>
+        private static void StartTransposeSync(MatrixPlotter follower, MatrixPlotter source)
+        {
+            _ = new LinkedView(follower, source, (src, ct) =>
+            {
+                var sourceData = src.MatrixData;
+                if (sourceData == null) return Task.FromResult<LinkedViewUpdate?>(null);
+
+                var compositeCube = src.TryExtractCompositeFrameCube(sourceData);
+                IMatrixData opSource = compositeCube?.Cube
+                    ?? sourceData.Apply(new SliceAtOperation(sourceData.ActiveIndex));
+
+                return Task.Run<LinkedViewUpdate?>(() =>
+                {
+                    var updated = opSource.Apply(new TransposeOperation(CancellationToken: ct));
+                    return new LinkedViewUpdate(updated, compositeCube?.ChannelAxisName);
+                }, ct);
+            });
+        }
+
         /// <summary>
         /// Collapses the Channel axis into a single grayscale channel.
         /// </summary>
@@ -907,11 +1011,8 @@ namespace MxPlot.UI.Avalonia.Views
             var channelAxis = _currentData.Axes.FindAxis("Channel");
             if (channelAxis == null) return;
 
-            var dlg = await GrayscaleDialog.ShowAsync(this, IsSyncFollower);
+            var dlg = await GrayscaleDialog.ShowAsync(this, IsReplaceDataBlocked, _currentData);
             if (dlg == null)
-                return;
-
-            if (!await ConfirmLargeVirtualOperationAsync(_currentData, "Convert to Grayscale"))
                 return;
 
             bool luma = ColorAxis.IsRgbTriplet(channelAxis);
@@ -964,40 +1065,5 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
-        // ── Virtual OOM guard ─────────────────────────────────────────────────
-
-        /// <summary>
-        /// When <paramref name="data"/> is virtual and its total uncompressed size exceeds
-        /// <see cref="VirtualPolicy.ThresholdBytes"/>, shows a warning dialog and returns
-        /// <c>false</c> if the user chooses to cancel the operation.
-        /// Always returns <c>true</c> for in-memory data.
-        /// </summary>
-        /// <remarks>
-        /// This is a temporary guard until a Virtual→Virtual processing path is implemented.
-        /// The current deep-copy fallback for virtual data loads all frames into heap memory,
-        /// which risks OOM for large datasets.
-        /// </remarks>
-        private async Task<bool> ConfirmLargeVirtualOperationAsync(IMatrixData data, string operationName)
-        {
-            if (!data.IsVirtual) 
-                return true;
-
-            long totalBytes = 1L * data.FrameCount * data.XCount * data.YCount * data.ElementSize;
-            if (totalBytes <= VirtualPolicy.ThresholdBytes) 
-                return true;
-
-            string sizeStr = totalBytes switch
-            {
-                >= 1L << 30 => $"{totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB",
-                >= 1L << 20 => $"{totalBytes / (1024.0 * 1024.0):F1} MB",
-                _ => $"{totalBytes / 1024.0:F1} KB",
-            };
-
-            return await ShowConfirmDialogAsync(
-                $"{operationName} — Large Virtual Data",
-                $"This dataset is virtual (MMF-backed) and its total size is {sizeStr}.\n\n" +
-                $"{operationName} will load all frames into memory, which may cause an out-of-memory error.\n\n" +
-                $"Continue anyway?");
-        }
     }
 }

@@ -3,6 +3,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
 using MxPlot.App.ViewModels;
+using System.Diagnostics;
 using System.Linq;
 
 namespace MxPlot.App.Views
@@ -19,6 +20,10 @@ namespace MxPlot.App.Views
         private void OnManagedWindowFocused(Window window)
         {
             if (_isSyncActive) return;
+            // Ignore Activated fired by our own programmatic Show()/Activate() batch (dashboard
+            // minimize/restore, or the list-driven activation below) rather than a real user click --
+            // see _activatingFromList's remarks for why this guard has to cover the whole batch.
+            if (_activatingFromList) return;
             var item = ViewModel.ManagedWindows.FirstOrDefault(m => m.Window == window);
             if (item == null) return;
 
@@ -29,6 +34,34 @@ namespace MxPlot.App.Views
                 return;
 
             _windowList.SelectedItem = item;
+        }
+
+        /// <summary>
+        /// Called when a managed window's own content is actually clicked (as opposed to being
+        /// activated via Alt+Tab, taskbar, or the dashboard list itself). Ctrl held toggles the
+        /// window into/out of the current multi-selection; a plain click collapses the selection
+        /// down to just this window (no-op if it is already the sole selection, so that ordinary
+        /// interaction inside an already-solo-selected window doesn't keep re-touching selection).
+        /// </summary>
+        private void OnManagedWindowSelectionClicked(Window window, bool ctrlHeld)
+        {
+            if (_isSyncActive) return;
+            var item = ViewModel.ManagedWindows.FirstOrDefault(m => m.Window == window);
+            if (item == null) return;
+
+            Debug.WriteLine($"[WinSelectTest] Click on '{window.Title}', Ctrl={ctrlHeld}, wasSelected={item.IsSelected}");
+
+            if (ctrlHeld)
+            {
+                if (_windowList.SelectedItems!.Contains(item))
+                    _windowList.SelectedItems.Remove(item);
+                else
+                    _windowList.SelectedItems.Add(item);
+            }
+            else if (!(_windowList.SelectedItems?.Count == 1 && ReferenceEquals(_windowList.SelectedItem, item)))
+            {
+                _windowList.SelectedItem = item;
+            }
         }
 
         // ── Window list context menu ──────────────────────────────────────

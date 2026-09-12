@@ -95,9 +95,15 @@ namespace MxPlot.UI.Avalonia.Views
             _bothRadio = MakeRadio("Both", true);
 
             // Default Apply To based on geometry
-            if (dxZero) { _yOnlyRadio.IsChecked = true; }
-            else if (dyZero) { _xOnlyRadio.IsChecked = true; }
-            else { _bothRadio.IsChecked = true; }
+            //if (dxZero) { _yOnlyRadio.IsChecked = true; }
+            //else if (dyZero) { _xOnlyRadio.IsChecked = true; }
+            //else { _bothRadio.IsChecked = true; }
+
+            // Always default to Both, user can change if desired.
+            // This is probably the most intuitive choice because the calibration
+            // will be applied to both axes even if the line is horizontal in most cases.
+            _bothRadio.IsChecked = true;
+            
 
             // ── Preview ────────────────────────────────────────────────────
             _previewText = new TextBlock

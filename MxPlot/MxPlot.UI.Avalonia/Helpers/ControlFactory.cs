@@ -17,7 +17,17 @@ namespace MxPlot.UI.Avalonia.Helpers
     /// Factory methods for common Avalonia UI controls used throughout MxPlot.UI.Avalonia.
     /// All methods produce consistently styled widgets that match the application theme.
     /// </summary>
-    internal static class ControlFactory
+    /// <remarks>
+    /// The class itself is public so host applications can build widgets matching MxPlot's own
+    /// look (requires including <c>avares://MxPlot.UI.Avalonia/Themes/Default.axaml</c> in the
+    /// host's own <c>Application.Styles</c> for the style classes to resolve). The menu-item
+    /// builders (<see cref="MakeMenuItem"/>, <see cref="MakeChildMenuItem"/>,
+    /// <see cref="MakeToggleMenuItem"/>, <see cref="MakeCheckMenuItem"/>,
+    /// <see cref="MakeMenuGroup"/>) stay <see langword="internal"/> - they are shaped around
+    /// MatrixPlotter's own hamburger-menu chrome (indentation, icon placement) rather than being
+    /// general-purpose widgets.
+    /// </remarks>
+    public static class ControlFactory
     {
         // ── Color palette ───────────────────────────────────────────────
         // Default palette: prioritizes colors commonly used in composite imaging
@@ -44,7 +54,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         // ── Separators ────────────────────────────────────────────────
 
         /// <summary>Creates a thin horizontal separator line (1 px, 100-alpha grey by default).</summary>
-        internal static Border MakeSep(Thickness? margin = null, byte alpha = 100) =>
+        public static Border MakeSep(Thickness? margin = null, byte alpha = 100) =>
             new Border
             {
                 Height = 1,
@@ -281,7 +291,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// <see cref="RenderTransformOrigin"/> is set to the top-left corner so the left
         /// edge stays aligned regardless of content width.
         /// </summary>
-        internal static CheckBox MakeCheckBox(string label, double fontSize = 11, string? hint = null)
+        public static CheckBox MakeCheckBox(string label, double fontSize = 11, string? hint = null)
         {
             const double scale = 0.75;
             var chk = new CheckBox
@@ -301,10 +311,48 @@ namespace MxPlot.UI.Avalonia.Helpers
         // ── Numeric controls ──────────────────────────────────────────────────
 
         /// <summary>
+        /// Creates a <see cref="Slider"/> with a smaller thumb (12x12 vs the default 20x20) and a
+        /// thinner track (2px) -- the same compact look <see cref="AxisTracker"/>'s own slider and
+        /// <see cref="MakeColorSwatch"/>'s channel sliders use, for a row that needs to sit
+        /// comfortably at ~20px tall instead of the default template's full-size chrome.
+        /// </summary>
+        public static Slider MakeCompactSlider(double min, double max, double value, double width = 100)
+        {
+            var slider = new Slider
+            {
+                Minimum = min,
+                Maximum = max,
+                Value = value,
+                Width = width,
+                MinHeight = 0,
+                Height = 20,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            slider.TemplateApplied += (_, e) =>
+            {
+                if (e.NameScope.Find("thumb") is Thumb thumb)
+                {
+                    thumb.MinWidth = 0;
+                    thumb.MinHeight = 0;
+                    thumb.Width = 12;
+                    thumb.Height = 12;
+                }
+                if (e.NameScope.Find("PART_Track") is Track track)
+                {
+                    track.MinHeight = 2;
+                    track.Height = 2;
+                    if (track.IncreaseButton is Control inc) inc.Height = 1;
+                    if (track.DecreaseButton is Control dec) dec.Height = 1;
+                }
+            };
+            return slider;
+        }
+
+        /// <summary>
         /// Creates a compact <see cref="NumericUpDown"/> with consistent styling
         /// and the <c>compact</c> style class applied.
         /// </summary>
-        internal static NumericUpDown MakeNumericUpDown(
+        public static NumericUpDown MakeNumericUpDown(
             decimal value, decimal min, decimal max, decimal inc, double width = 76)
         {
             var nud = new NumericUpDown
@@ -329,7 +377,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// Creates a labeled horizontal row: [label] [NUD] [optional unit suffix].
         /// <paramref name="labelWidth"/> defaults to 50 to align multiple stacked rows.
         /// </summary>
-        internal static Control MakeNudRow(
+        public static Control MakeNudRow(
             string label, NumericUpDown nud, string unit = "", double labelWidth = 50)
         {
             var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -356,7 +404,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// Creates a compact channel row: [short label] [Slider] [NUD].
         /// Designed for RGB-style or per-channel property pickers.
         /// </summary>
-        internal static StackPanel MakeSliderRow(string label, Slider slider, NumericUpDown nud) =>
+        public static StackPanel MakeSliderRow(string label, Slider slider, NumericUpDown nud) =>
             new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -387,7 +435,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// When <c>true</c> (default), an alpha slider and NUD are included.
         /// When <c>false</c>, alpha is always 255 and the A row is hidden.
         /// </param>
-        internal static Button MakeColorSwatch(Color initial, Action<Color> onApply, bool showAlpha = true, Color[]? colorPalette = null)
+        public static Button MakeColorSwatch(Color initial, Action<Color> onApply, bool showAlpha = true, Color[]? colorPalette = null)
         {
             var swatch = new Button
             {
@@ -718,7 +766,7 @@ namespace MxPlot.UI.Avalonia.Helpers
 
         /// <summary>Wraps <see cref="RenderCompositeIconBitmap"/> for use as a toolbar/button icon.</summary>
         /// <param name="size">Overall square size in DIPs. Defaults to 14.</param>
-        internal static Control MakeCompositeIcon(double size = 14)
+        public static Control MakeCompositeIcon(double size = 14)
         {
             int px = Math.Max(1, (int)Math.Round(size));
             return new Image
@@ -736,7 +784,7 @@ namespace MxPlot.UI.Avalonia.Helpers
         /// rendered LUT gradient - see <c>LutSelector.CreateIcon</c> - so Composite gets an equally
         /// mode-specific icon rather than staying on whatever LUT icon was selected beforehand).
         /// </summary>
-        internal static WindowIcon CreateCompositeWindowIcon(int size = 32)
+        public static WindowIcon CreateCompositeWindowIcon(int size = 32)
         {
             using var bmp = RenderCompositeIconBitmap(size);
             using var ms = new MemoryStream();

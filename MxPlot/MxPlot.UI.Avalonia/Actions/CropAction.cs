@@ -143,6 +143,14 @@ namespace MxPlot.UI.Avalonia.Actions
         internal CropRoiBounds? FinalBounds => _finalBounds;
 
         /// <summary>
+        /// For <see cref="CropRole.Leader"/>: set before <see cref="Invoke"/> to disable the
+        /// panel's own "Replace data" checkbox - either because this window is a genuine
+        /// <see cref="MatrixPlotter.IsSyncFollower"/>, or because the host opted out via
+        /// <see cref="MatrixPlotter.AllowDataReplace"/>. See <see cref="MatrixPlotter.IsReplaceDataBlocked"/>.
+        /// </summary>
+        internal bool IsReplaceDataBlocked { get; set; }
+
+        /// <summary>
         /// For <see cref="CropRole.Follower"/>: set before <see cref="ForceApply"/> to inherit
         /// the leader's Replace-data setting (follower panel has no checkbox).
         /// </summary>
@@ -407,12 +415,21 @@ namespace MxPlot.UI.Avalonia.Actions
             roi.Height = Math.Floor(data.YCount / 2.0);
             if (initial is { } ib)
             {
-                // Convert data-index Y (bottom-left origin) to bitmap Y (top-left origin)
+                // ib.* is in data pixel-index (pixel-edge) space, per CropRoiBounds's own
+                // convention - e.g. X=0 means "starts exactly at the left edge of pixel 0". But
+                // roi.X/Y live in the pixel-CENTER-based coordinate space established by
+                // DataBounds above (pixel i's centre at world i, edges at i +/- 0.5) - the same
+                // space XyRoiToDataBounds rounds back out of. Position must shift by -0.5 to move
+                // between the two spaces; width/height do not (a length is the same in both, since
+                // they only differ by a constant offset). Without the shift, a restored ROI that
+                // exactly reproduces a previous pixel-edge-exact crop reappears half a pixel off,
+                // and rounds back out to a different index than the one that produced it.
                 double bitmapY = data.YCount - ib.Y - ib.Height;
-                roi.X = Math.Max(-0.5, Math.Min(ib.X, data.XCount - 1));
-                roi.Y = Math.Max(-0.5, Math.Min(bitmapY, data.YCount - 1));
-                roi.Width = Math.Max(1, Math.Min(ib.Width, data.XCount));
-                roi.Height = Math.Max(1, Math.Min(ib.Height, data.YCount));
+                roi.X = ib.X - 0.5;
+                roi.Y = bitmapY - 0.5;
+                roi.Width = ib.Width;
+                roi.Height = ib.Height;
+                ClampToDataBounds(roi);
             }
             return roi;
         }
@@ -863,6 +880,7 @@ namespace MxPlot.UI.Avalonia.Actions
             _replaceDataChk = ControlFactory.MakeCheckBox("Replace data", fontSize: PanelFontSize);
             _replaceDataChk.Margin = new Thickness(0, 0, 0, -10);
             _replaceDataChk.IsChecked = _lastReplaceData;
+            ProcessingDialogBase.LockReplaceCheckBoxForLinkWindow(_replaceDataChk, IsReplaceDataBlocked);
 
             _thisFrameOnlyChk = ControlFactory.MakeCheckBox("This frame only", fontSize: PanelFontSize);
             _thisFrameOnlyChk.Margin = new Thickness(0, 0, 0, -7);
@@ -1075,16 +1093,38 @@ namespace MxPlot.UI.Avalonia.Actions
         /// </summary>
         private CropRoiBounds XyRoiToDataBounds()
         {
-            int x = (int)(_xyRoi!.X + 0.5);
-            int w = (int)_xyRoi.Width;
-            int h = (int)_xyRoi.Height;
-            int bitmapY = (int)(_xyRoi.Y + 0.5);
-            int dataY = _ctx!.Data!.YCount - bitmapY - h;
+            // roi.X/Y live in the pixel-CENTER-based world space (pixel i's centre at world i,
+            // edges at i +/- 0.5 - see AvaloniaViewport/PixelSnapService) - so a left/top edge
+            // position e is the left edge of data index e+0.5 (pixel k's left edge sits at
+            // k-0.5, so k = e+0.5). Round each of the four EDGE positions (already shifted by
+            // +0.5) independently to the nearest integer *before* deriving width/height, rather
+            // than rounding position and truncating size separately: after ClampToDataBounds's
+            // double arithmetic (Math.Min/Math.Clamp), a value that should be exactly e.g. 4.0
+            // can carry floating-point noise (3.999999994), and (int) truncation on that silently
+            // drops a row/column - losing index 0 (or the opposite edge) exactly when the ROI
+            // sits right at a clamped boundary. Math.Round is immune to that noise and, deriving
+            // w/h from two independently-rounded edges, the two can never disagree by construction.
+            int left = (int)Math.Round(_xyRoi!.X + 0.5, MidpointRounding.AwayFromZero);
+            int right = (int)Math.Round(_xyRoi.X + _xyRoi.Width + 0.5, MidpointRounding.AwayFromZero);
+            int top = (int)Math.Round(_xyRoi.Y + 0.5, MidpointRounding.AwayFromZero);
+            int bottom = (int)Math.Round(_xyRoi.Y + _xyRoi.Height + 0.5, MidpointRounding.AwayFromZero);
+            int x = left;
+            int w = right - left;
+            int h = bottom - top;
+            int dataY = _ctx!.Data!.YCount - bottom;
             bool hasZ = _mode != CropMode.XY && _xzRoi != null;
+            int zStart = 0, zCount = -1;
+            if (hasZ)
+            {
+                int zTop = (int)Math.Round(_xzRoi!.Y + 0.5, MidpointRounding.AwayFromZero);
+                int zBottom = (int)Math.Round(_xzRoi.Y + _xzRoi.Height + 0.5, MidpointRounding.AwayFromZero);
+                zStart = zTop;
+                zCount = zBottom - zTop;
+            }
             return new CropRoiBounds(x, dataY, w, h,
                 ZAxisName: hasZ ? _ctx?.DepthAxisName : null,
-                ZStart: hasZ ? (int)(_xzRoi!.Y + 0.5) : 0,
-                ZCount: hasZ ? (int)_xzRoi!.Height : -1,
+                ZStart: zStart,
+                ZCount: zCount,
                 Mode: _mode);
         }
 

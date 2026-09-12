@@ -39,6 +39,13 @@ namespace MxPlot.UI.Avalonia.Overlays
         OverlayMenuEntry UseRoiForValueRange { get; }
 
         /// <summary>
+        /// Menu entry for "Open ROI View" - opens/closes a live linked window showing just the
+        /// data enclosed by this region. The host assigns the handler after the object is added;
+        /// the entry is hidden when no handler is assigned.
+        /// </summary>
+        OverlayMenuEntry OpenRoiView { get; }
+
+        /// <summary>
         /// Menu entry for copying the data within this region to the clipboard.
         /// The host assigns the handler after the object is added;
         /// the entry is hidden when no handler is assigned.
@@ -70,5 +77,12 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// context menu, or by deserialization when restoring saved state.
         /// </summary>
         bool IsValueRangeRoi { get; set; }
+
+        /// <summary>
+        /// Whether this overlay currently has an open "Open ROI View" linked window.
+        /// Set by <c>MatrixPlotter</c> when the user opens/closes the linked view, or when the
+        /// window is closed directly (e.g. by the user, or when this overlay is deleted).
+        /// </summary>
+        bool HasLinkedRoiView { get; set; }
     }
 }

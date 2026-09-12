@@ -1,8 +1,8 @@
 ﻿using Avalonia;
 using Avalonia.Threading;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Views;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Collections.Generic;
 using System.Reflection;

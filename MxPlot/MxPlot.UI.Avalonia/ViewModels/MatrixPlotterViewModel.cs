@@ -1,8 +1,8 @@
 ﻿using System;
 using CommunityToolkit.Mvvm.ComponentModel;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Controls;
+using MxPlot.UI.Avalonia.Rendering;
 
 namespace MxPlot.UI.Avalonia.ViewModels
 {

@@ -1,6 +1,6 @@
-﻿using MxPlot.Core.Imaging;
-using MxPlot.UI.Avalonia.Actions;
+﻿using MxPlot.UI.Avalonia.Actions;
 using MxPlot.UI.Avalonia.Controls;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
 using System.Collections.Generic;
 

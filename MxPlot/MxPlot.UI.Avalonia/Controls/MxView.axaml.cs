@@ -8,7 +8,6 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
@@ -467,6 +466,25 @@ namespace MxPlot.UI.Avalonia.Controls
         /// When true, the bitmap Y-axis is flipped so YMax is at the screen top (scientific convention).
         /// Defaults to true. Set to false for orthogonal side views whose ViewTransform handles orientation.
         /// </summary>
+        /// <summary>
+        /// How much of the machine the pixel loop that builds the bitmap may use.
+        /// <see cref="RenderSurface.ParallelismAuto"/> (the default) decides from the frame size,
+        /// <c>0</c> keeps it on one thread, <c>-1</c> is unrestricted, and a positive value caps
+        /// the degree of parallelism - the same encoding as <c>MatrixDataPlotter.Parallelism</c>
+        /// in the MatrixDataPlot library, plus Auto.
+        /// </summary>
+        /// <remarks>
+        /// Set this when the host would rather spend its cores elsewhere, on an acquisition or
+        /// processing thread that matters more than redraw latency. Measured on a 4096x4096 LUT
+        /// frame with 32 logical processors: a cap of 8 reaches 77% of the best time on a quarter
+        /// of the machine.
+        /// </remarks>
+        public int Parallelism
+        {
+            get => _surface.Parallelism;
+            set => _surface.Parallelism = value;
+        }
+
         public bool FlipY
         {
             get => _surface.FlipY;
@@ -518,6 +536,9 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Child controls ────────────────────────────────────────────────────
 
         private readonly RenderSurface _surface;
+
+        /// <summary>Test seam: lets the headless suite verify what this view forwards downstream.</summary>
+        internal RenderSurface Surface => _surface;
         private readonly ScrollBar _hScrollBar;
         private readonly ScrollBar _vScrollBar;
         private readonly BusyIndicator _busyIndicator;
@@ -556,7 +577,12 @@ namespace MxPlot.UI.Avalonia.Controls
 
         public MxView()
         {
-            _surface = new RenderSurface { ClipToBounds = true };
+            // LutDepth is pushed explicitly: OnPropertyChanged only forwards *changes*, and the
+            // two controls register different defaults (MxView 256, RenderSurface 0 = "use the
+            // LUT's own level count"). Without this the surface stays at 0 until the user first
+            // touches the Level box, so a custom .mlut with few levels renders at its own level
+            // count while the Level box already reads 256.
+            _surface = new RenderSurface { ClipToBounds = true, LutLevel = LutDepth };
 
             // Wire up overlay manager
             OverlayManager = new OverlayManager
@@ -932,6 +958,13 @@ namespace MxPlot.UI.Avalonia.Controls
                 return;
             }
 
+            // Right-click missed every overlay: clear any current selection before falling
+            // through to the plotter's own menu below, so a selected-but-not-hit overlay
+            // doesn't linger selected with no menu to show for it (PowerPoint-style click-away
+            // deselect, as opposed to Illustrator's selection-follows-the-object convention).
+            // A no-op when nothing is selected.
+            OverlayManager.ClearSelection();
+
             // Extra items injected by the host (e.g. Axis Scale… for side views)
             bool hasExtraItems = false;
             if (SideViewMenuItemsProvider != null)
@@ -1019,7 +1052,7 @@ namespace MxPlot.UI.Avalonia.Controls
             menu.Items.Add(new Separator());
 
             // ③ Crop shortcut
-            menu.Items.Add(MakeItem("Crop", () => CropRequested?.Invoke(this, EventArgs.Empty), MenuIcons.AutoFix));
+            menu.Items.Add(MakeItem("Crop", () => CropRequested?.Invoke(this, EventArgs.Empty), MenuIcons.Crop));
             if (ExtractFrameAllowed)
                 menu.Items.Add(MakeItem("Extract Frame", () => ExtractFrameRequested?.Invoke(this, EventArgs.Empty), MenuIcons.Duplicate));
             if (ExtractDimensionAllowed)

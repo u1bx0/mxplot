@@ -68,7 +68,7 @@ It is more than a demo. While it naturally showcases `MatrixData<T>` and the `Ma
 
 ### 🔌 Plugin System
 - Drop a `*.dll` implementing `IMxPlotAppPlugin` next to `MxPlot.exe` — it appears in **Tools** automatically
-- Plugins receive the full `IMxPlotContext` (open datasets, selected datasets, window service)
+- Plugins receive the full `IMxPlotAppContext` (open datasets, selected datasets, window service)
 
 ### 🎛️ Per-Window MatrixPlotter Features
 Each open window is a full `MatrixPlotter` instance from `MxPlot.UI.Avalonia`:
@@ -132,7 +132,7 @@ public class MyPlugin : IMxPlotAppPlugin
     public string CommandName => "My Analysis";
     public string Description => "Runs my custom analysis on the selected dataset.";
 
-    public void Run(IMxPlotContext ctx)
+    public void Run(IMxPlotAppContext ctx)
     {
         var data = ctx.PrimarySelection;
         if (data == null) return;

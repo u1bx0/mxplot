@@ -65,6 +65,47 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// <inheritdoc />
         public ParallelOptions? ParallelOptions { get; set; }
 
+        public ParallelRenderPolicy ParallelPolicy { get; set; } = ParallelRenderPolicy.Auto;
+
+        /// <remarks>
+        /// These loops have no serial branch of their own, so Never is expressed as a single
+        /// worker rather than by skipping Parallel.For. The body then runs sequentially, which is
+        /// what a caller asking to leave the cores alone actually wants; the residual scheduling
+        /// overhead is a few microseconds per frame.
+        /// Also replaces the previous <c>ParallelOptions ?? new ParallelOptions()</c>, which
+        /// allocated a fresh options object on every render loop invocation.
+        /// </remarks>
+        private ParallelOptions EffectiveParallelOptions => ParallelPolicy switch
+        {
+            // Never wins over explicitly supplied options: a caller that set both is saying
+            // "these options, if you ever go parallel", and Never says not to.
+            ParallelRenderPolicy.Never => SerialParallelOptions,
+            ParallelRenderPolicy.Always => ParallelOptions ?? SharedParallelOptions,
+            // The policy answers "should this go parallel", the options answer "with how many", so
+            // a supplied cap does not smuggle a sub-threshold frame onto the parallel path. Auto
+            // has to honour the threshold, or it is just Always under a name that says otherwise;
+            // before RenderCore has run there is no size to judge, hence the serial default.
+            _ => _autoWantsParallel ? ParallelOptions ?? SharedParallelOptions : SerialParallelOptions,
+        };
+
+        /// <remarks>
+        /// Far lower than LutBitmapWriter's 2^17, and measured rather than assumed: this loop
+        /// reads three planes, blends and packs per pixel, so parallel pays for itself much
+        /// sooner. On the same machine the crossover sits between 4k and 9k pixels - 64x64 is
+        /// 0.0126 ms serial against 0.0133 ms parallel, while 96x96 is 0.0366 against 0.0130, and
+        /// by 512x512 it is 1.22 against 0.20. Sharing LutBitmapWriter's constant would have left
+        /// everything from 8k to 131k pixels serial for no reason.
+        /// The serial side of that comparison is a plain loop; what this writer can actually
+        /// express below the threshold is MaxDegreeOfParallelism = 1, which measured no better
+        /// than a plain loop at any size. So the threshold buys nothing except avoiding a
+        /// pointless parallel setup on frames too small to care about either way.
+        /// </remarks>
+        private const int ParallelPixelThreshold = 1 << 13;
+        private static readonly ParallelOptions SharedParallelOptions = new();
+        private static readonly ParallelOptions SerialParallelOptions = new() { MaxDegreeOfParallelism = 1 };
+        private bool _autoWantsParallel;
+
+
         /// <summary>
         /// Gets or sets the converter used for struct-based values during Complex rendering.
         /// Must be set to <c>Func&lt;Complex, double&gt;</c> when <see cref="ValueType"/> is <see cref="Complex"/>.
@@ -75,13 +116,41 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         #region Cache Fields
 
-        // Reference-equality cache key — no rebuild when the same context and converter instance are reused.
+        // Structural-equality cache key (see EnsureLutCache) — no rebuild when the recipes/frame
+        // indices/blend mode are unchanged, even though RenderSurface.BuildCompositeContext
+        // constructs a new CompositeRenderingContext record on every single call.
         private CompositeRenderingContext? _lastContext;
         private object? _lastStructValueConverter;
 
         // Direct-index LUTs for byte / ushort / short.
         // Null entry means the layer is inactive (not visible or zero gain).
         private int[][]? _cachedDirectMaps;
+
+        // True only when ValueType is byte, there are exactly 3 active layers, and each one is a
+        // pure R/G/B channel at Gain=1/Gamma=1/ValueMin=0/ValueMax=255 in Additive mode - i.e. the
+        // rendered result is mathematically identical to a raw byte interleave (see
+        // IsRgbFastPathEligible), so RenderCore can skip the LUT lookup + blend + clamp entirely.
+        // Recomputed only when EnsureLutCache actually rebuilds, not per frame.
+        private bool _isRgbFastPathEligible;
+
+        // Diagnostic-only, computed alongside _isRgbFastPathEligible (see IsRgbFastPathEligible) -
+        // null when eligible, otherwise names the first condition that failed.
+        private string? _rgbFastPathRejectReason;
+
+        /// <summary>
+        /// Diagnostic-only: whether the last <see cref="Render"/> call actually took the pure-RGB
+        /// Fast Path (see <see cref="IsRgbFastPathEligible"/>) instead of the general LUT/blend
+        /// path. Not meant for rendering decisions - it only reports what already happened.
+        /// </summary>
+        public bool LastRenderUsedRgbFastPath => _isRgbFastPathEligible;
+
+        /// <summary>
+        /// Diagnostic-only: when <see cref="LastRenderUsedRgbFastPath"/> is <c>false</c>, names
+        /// the first Fast Path condition (see <see cref="IsRgbFastPathEligible"/>) that the last
+        /// render's <see cref="CompositeRenderingContext"/> failed to satisfy. Null when eligible
+        /// or before the first render.
+        /// </summary>
+        public string? LastRgbFastPathRejectReason => _rgbFastPathRejectReason;
 
         // Frame-sized scratch buffer; see EnsureScratch.
         private int[]? _scratch;
@@ -181,22 +250,77 @@ namespace MxPlot.UI.Avalonia.Rendering
         {
             var structConverter = StructValueConverter;
 
-            // Same context and same converter instance → skip rebuild.
-            if (ReferenceEquals(_lastContext, ctx)
+            // Structural equality (record Equals), not ReferenceEquals: BuildCompositeContext
+            // constructs a brand new CompositeRenderingContext on every single render call, so
+            // reference equality never hits for a source that Refreshes every frame (e.g. a live
+            // camera feed) - this rebuilt the cache every frame for nothing. Record equality still
+            // resolves cheaply here: Recipes (IReadOnlyList<BlendRecipe>) and FrameIndices (int[])
+            // have no structural equality of their own, so this is still just a couple of
+            // reference comparisons plus a BlendMode value comparison - identical cost to the old
+            // check when nothing changed, but it now actually skips the rebuild when it should.
+            if (_lastContext is not null && _lastContext.Equals(ctx)
                 && ReferenceEquals(_lastStructValueConverter, structConverter))
                 return;
 
             if (ValueType == typeof(byte))
+            {
                 BuildDirectMaps(ctx.Recipes, size: 256, indexOffset: 0);
+                _rgbFastPathRejectReason = RgbFastPathRejectReason(ctx);
+                _isRgbFastPathEligible = _rgbFastPathRejectReason == null;
+            }
             else if (ValueType == typeof(ushort))
+            {
                 BuildDirectMaps(ctx.Recipes, size: 65536, indexOffset: 0);
+                _isRgbFastPathEligible = false;
+                _rgbFastPathRejectReason = "ValueType is ushort, not byte";
+            }
             else if (ValueType == typeof(short))
+            {
                 BuildDirectMaps(ctx.Recipes, size: 65536, indexOffset: 32768);
+                _isRgbFastPathEligible = false;
+                _rgbFastPathRejectReason = "ValueType is short, not byte";
+            }
             else
+            {
                 BuildScaleMaps(ctx.Recipes, structConverter);
+                _isRgbFastPathEligible = false;
+                _rgbFastPathRejectReason = $"ValueType is {ValueType.Name}, not byte";
+            }
 
             _lastContext = ctx;
             _lastStructValueConverter = structConverter;
+        }
+
+        /// <summary>
+        /// True when <paramref name="ctx"/> describes exactly the pure-RGB-passthrough case: 3
+        /// layers, each a pure R/G/B channel (no color mixing) at Gain=1/Gamma=1/ValueMin=0/
+        /// ValueMax=255, blended Additively. Under those conditions <see cref="PackLayerColor"/>'s
+        /// LUT reduces to the identity map (v in -> v in the same byte position out) and
+        /// <see cref="BlendPixel"/>'s per-layer accumulation never has more than one nonzero
+        /// contributor per channel, so the general path's output is mathematically identical to a
+        /// raw byte interleave - see RenderByteCompositeFastRgb.
+        /// </summary>
+        private static string? RgbFastPathRejectReason(CompositeRenderingContext ctx)
+        {
+            if (ctx.BlendMode != BlendMode.Additive)
+                return $"BlendMode is {ctx.BlendMode}, not Additive";
+            if (ctx.Recipes.Count != 3)
+                return $"{ctx.Recipes.Count} active layer(s), not 3";
+
+            return PureChannelRejectReason(ctx.Recipes[0], unchecked((int)0xFFFF0000), "R")
+                ?? PureChannelRejectReason(ctx.Recipes[1], unchecked((int)0xFF00FF00), "G")
+                ?? PureChannelRejectReason(ctx.Recipes[2], unchecked((int)0xFF0000FF), "B");
+        }
+
+        private static string? PureChannelRejectReason(BlendRecipe r, int argb, string channelLabel)
+        {
+            if (!r.IsVisible) return $"{channelLabel} not visible";
+            if (r.ColorArgb != argb) return $"{channelLabel} color is 0x{r.ColorArgb:X8}, not 0x{argb:X8}";
+            if (r.Gain != 1.0) return $"{channelLabel} Gain is {r.Gain}, not 1.0";
+            if (r.Gamma != 1.0) return $"{channelLabel} Gamma is {r.Gamma}, not 1.0";
+            if (r.ValueMin != 0.0) return $"{channelLabel} ValueMin is {r.ValueMin}, not 0";
+            if (r.ValueMax != 255.0) return $"{channelLabel} ValueMax is {r.ValueMax}, not 255";
+            return null;
         }
 
         /// <summary>
@@ -284,6 +408,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             int width = source.XCount;
             int height = source.YCount;
             var scratch = EnsureScratch(width, height);
+            _autoWantsParallel = width * height >= ParallelPixelThreshold;
 
             fixed (int* pScratch = scratch)
             {
@@ -292,8 +417,11 @@ namespace MxPlot.UI.Avalonia.Rendering
                 int strideInts = FlipY ? -width : width;
 
                 // Rendered outside the bitmap lock on purpose — see BitmapBlit.
-                _renderLoop(source, ctx.FrameIndices, targetPtr, strideInts,
-                            width, height, ctx.BlendMode);
+                if (_isRgbFastPathEligible)
+                    RenderByteCompositeFastRgb(source, ctx.FrameIndices, targetPtr, strideInts, width, height);
+                else
+                    _renderLoop(source, ctx.FrameIndices, targetPtr, strideInts,
+                                width, height, ctx.BlendMode);
 
                 using var fb = target.Lock();
                 BitmapBlit.Rows(pScratch, width, height, fb);
@@ -379,7 +507,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<byte>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -391,6 +519,39 @@ namespace MxPlot.UI.Avalonia.Rendering
                         BlendPixel(blendMode, maps[a][memories[a].Span[rowOffset + ix]],
                                    ref r, ref g, ref b);
                     pRow[ix] = ClampAndPackPixel(blendMode, r, g, b);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Only ever called when <see cref="_isRgbFastPathEligible"/> is true (see
+        /// <see cref="IsRgbFastPathEligible"/>) - no LUT lookup, no per-layer blend accumulation,
+        /// no clamp: each output pixel is exactly the source R/G/B triplet packed into BGRA,
+        /// mathematically identical to what the general path above produces for this specific
+        /// configuration (pure R/G/B channels, Gain=1, Gamma=1, full 0-255 range, Additive).
+        /// </summary>
+        private unsafe void RenderByteCompositeFastRgb(
+            IMatrixData source, int[] frameIndices, int* targetPtr, int strideInts,
+            int width, int height)
+        {
+            var typedData = (MatrixData<byte>)source;
+            var rMem = typedData.AsMemory(frameIndices[0]);
+            var gMem = typedData.AsMemory(frameIndices[1]);
+            var bMem = typedData.AsMemory(frameIndices[2]);
+
+            var pOpts = EffectiveParallelOptions;
+            Parallel.For(0, height, pOpts, iy =>
+            {
+                var rSpan = rMem.Span;
+                var gSpan = gMem.Span;
+                var bSpan = bMem.Span;
+                int* pRow = targetPtr + iy * strideInts;
+                int rowOffset = iy * width;
+                for (int ix = 0; ix < width; ix++)
+                {
+                    int i = rowOffset + ix;
+                    pRow[ix] = unchecked((int)(0xFF000000u
+                        | ((uint)rSpan[i] << 16) | ((uint)gSpan[i] << 8) | bSpan[i]));
                 }
             });
         }
@@ -407,7 +568,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<ushort>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -435,7 +596,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<short>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -467,7 +628,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<int>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -503,7 +664,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<float>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -540,7 +701,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<double>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -581,7 +742,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var memories = new ReadOnlyMemory<Complex>[frameIndices.Length];
             foreach (int a in active) memories[a] = typedData.AsMemory(frameIndices[a]);
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;
@@ -614,7 +775,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             var offsets = _cachedOffsets!;
             int lutMax = ScaleLutSize - 1;
 
-            var pOpts = ParallelOptions ?? new ParallelOptions();
+            var pOpts = EffectiveParallelOptions;
             Parallel.For(0, height, pOpts, iy =>
             {
                 int* pRow = targetPtr + iy * strideInts;

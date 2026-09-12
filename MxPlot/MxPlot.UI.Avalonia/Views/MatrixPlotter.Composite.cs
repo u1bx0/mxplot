@@ -54,9 +54,14 @@ namespace MxPlot.UI.Avalonia.Views
         /// Every LUT-change call site used to set <c>Icon = _lutSelector.SelectedIcon</c> directly;
         /// they now all go through here so a LUT change made while Composite is active does not
         /// silently switch the titlebar back to a LUT icon.
+        /// No-op when <see cref="AutoUpdateWindowIcon"/> is <c>false</c>, so a host pinning its own
+        /// icon via <see cref="Window.Icon"/> is not overwritten on the next LUT/Composite change.
         /// </summary>
         private void UpdateWindowIcon()
-            => Icon = _isCompositeMode ? CompositeWindowIcon : _lutSelector.SelectedIcon;
+        {
+            if (!AutoUpdateWindowIcon) return;
+            Icon = _isCompositeMode ? CompositeWindowIcon : _lutSelector.SelectedIcon;
+        }
 
         private bool _isCompositeMode;
         private int _compositeAxisDimIndex = -1;
@@ -98,6 +103,16 @@ namespace MxPlot.UI.Avalonia.Views
         private CompositeRangeScope _compositeScope = CompositeRangeScope.Global;
 
         /// <summary>
+        /// The Scope flyout's own two radio buttons, kept so <see cref="SetCompositeScope"/> can
+        /// re-sync their IsChecked state when scope changes from somewhere other than the user
+        /// clicking one of them (e.g. <see cref="MatrixPlotter.CompositeRecipes"/> assigned
+        /// externally) -- built fresh each <see cref="BuildCompositeModeHeader"/> call, so these
+        /// are only valid while that header instance is the one currently shown.
+        /// </summary>
+        private RadioButton? _compositeScopeGlobalRadio;
+        private RadioButton? _compositeScopeChannelWiseRadio;
+
+        /// <summary>
         /// The header range bar -- the very same control the LUT toolbar uses, so Composite mode gets
         /// an identical Fixed/Current/All menu and imperfect badge. In Global scope it owns the
         /// shared range; in Channel-wise scope it shows a read-only union of the per-channel ranges
@@ -118,11 +133,12 @@ namespace MxPlot.UI.Avalonia.Views
         private BlendRecipeBar[]? _compositeBars;
 
         /// <summary>
-        /// Cancel pending Composite histogram calculation. Kept separate from
-        /// <c>MatrixPlotter.cs</c>'s <c>_lutHistogramCts</c> -- see that field's comment for why a
-        /// shared token source silently dropped Composite histogram updates.
+        /// Drives <see cref="UpdateCompositeHistograms"/>'s coalescing dirty/running loop. Kept
+        /// separate from <c>MatrixPlotter.cs</c>'s own LUT-histogram pair -- see that field's
+        /// comment for why a shared flag pair would silently drop one mode's updates.
         /// </summary>
-        private CancellationTokenSource? _compositeHistogramCts;
+        private bool _compositeHistogramDirty;
+        private bool _compositeHistogramRunning;
 
         internal bool IsCompositeMode => _isCompositeMode;
 
@@ -334,6 +350,8 @@ namespace MxPlot.UI.Avalonia.Views
             _compositeBars = null;
             _compositeSettingsPanel = null;
             _compositeSettingsBtn = null;
+            _compositeScopeGlobalRadio = null;
+            _compositeScopeChannelWiseRadio = null;
             UpdateWindowIcon();
         }
 
@@ -344,7 +362,16 @@ namespace MxPlot.UI.Avalonia.Views
         /// to call again while already active (e.g. from <see cref="SyncCompositeUiAfterRestore"/>)
         /// -- recomputes frame indices and re-applies the current recipe list without discarding it.
         /// </summary>
-        internal void EnterCompositeMode(Axis channelAxis)
+        /// <remarks>
+        /// Public so hosts can drive Composite mode programmatically (e.g. a live camera preview
+        /// pushing an RGB channel cube). <paramref name="channelAxis"/> must be one of
+        /// <see cref="MatrixData"/>'s own axis instances -- e.g.
+        /// <c>MatrixData.Axes.FindAxis("Channel")</c> after setting the data -- not a freshly
+        /// constructed <see cref="Axis"/>. No-ops silently if <see cref="MatrixData"/> is
+        /// <see langword="null"/> or <see cref="CompositeModeEnabled"/> is <see langword="false"/>,
+        /// the same as every internal call site.
+        /// </remarks>
+        public void EnterCompositeMode(Axis channelAxis)
         {
             if (!CompositeModeEnabled) return;
             if (_currentData == null) return;
@@ -377,7 +404,18 @@ namespace MxPlot.UI.Avalonia.Views
             // data is composited, so that is where a plain axis earns its promotion to a
             // ColorAxis. Doing it here means everything downstream - renaming, colour
             // round-tripping to OME-TIFF - can assume tags exist.
+            // Promotion rebuilds the tracker panel the first time a plain axis is composited, and
+            // that rebuild tears the orthogonal views down - closing any open XY projection window
+            // on the way out. It re-freezes the orthogonal axis afterwards, but the projection is
+            // not its to restore. Note it here and put it back at the very end, once the Composite
+            // state below is live so the recomputed projection is a Composite payload. Without
+            // this, compositing an axis behaved differently the first time (plain axis -> promotion
+            // -> projection closed) than every time after (already tagged, no rebuild, projection
+            // survived) - the "first open vs. second open" inconsistency.
+            bool xyProjectionWasOpen = _orthoPanel.ProjectionSelector.IsProjectionEnabled(ProjectionPlane.XY);
             channelAxis = PromoteToColorAxisIfNeeded(channelAxis);
+            bool restoreXyProjection = xyProjectionWasOpen
+                && !_orthoPanel.ProjectionSelector.IsProjectionEnabled(ProjectionPlane.XY);
 
             // Ortho/XY-Projection along the same axis about to be composited is not a coherent
             // combination: BuildChannelComposite pins bi[channelAxisDimIndex] to each channel, but
@@ -410,15 +448,6 @@ namespace MxPlot.UI.Avalonia.Views
             // Composite consumes the Channel axis, so the export menu's item set changes with it.
             InvalidateMenuPanel();
 
-            // Pin the Channel axis to 0 for the whole session. The blend itself never reads it
-            // (CompositeFrameIndices drives rendering), but ActiveIndex still feeds the pixel
-            // readout, overlay analysis and export naming. Leaving it wherever the user happened
-            // to be would make those depend on *when* Composite was entered, and would persist
-            // that arbitrary value through mxplot.axes.indices. Fixing it at 0 makes the rule
-            // simply: ActiveIndex is channel 0 at the current (Z, T). Exiting leaves it there -
-            // restoring the old index would contradict the axes.indices that was just saved.
-            if (channelAxis.Index != 0) channelAxis.Index = 0;
-
             var frameIndices = ComputeCompositeFrameIndices(_currentData, dimIndex);
             if (_compositeRecipes.Count != frameIndices.Length)
                 _compositeRecipes = BuildDefaultCompositeRecipes(_currentData, channelAxis, frameIndices);
@@ -443,6 +472,29 @@ namespace MxPlot.UI.Avalonia.Views
 
             _orthoController.SetCompositeState(true, dimIndex, frameIndices.Length, _compositeRecipes, _compositeBlendMode);
 
+            // Pin the Channel axis to 0 for the whole session. The blend itself never reads it
+            // (CompositeFrameIndices drives rendering), but ActiveIndex still feeds the pixel
+            // readout, overlay analysis and export naming. Leaving it wherever the user happened
+            // to be would make those depend on *when* Composite was entered, and would persist
+            // that arbitrary value through mxplot.axes.indices. Fixing it at 0 makes the rule
+            // simply: ActiveIndex is channel 0 at the current (Z, T). Exiting leaves it there -
+            // restoring the old index would contradict the axes.indices that was just saved.
+            //
+            // Deliberately done *after* SetCompositeState, not before: changing the axis's Index
+            // fires ActiveIndexChanged synchronously, which reaches
+            // OrthogonalViewController.RefreshSlicesIfAxisChanged (via MatrixPlotter's
+            // _activeIndexHandler). Pinning before SetCompositeState had that refresh capture
+            // _orthoController's Composite shape (active/channelCount) while it was still the old
+            // (not-yet-composited) state -- correct only for the single frame this pin itself moved
+            // away from, not for the merged multi-channel result about to replace it. That captured-
+            // stale run's completion would then briefly reassert LUT mode on the side views (with a
+            // frame-index/frame-count mismatch, since it built its result before the merge -- see
+            // ApplyCompositeViewState's captured-shape comment in UpdateSlicesAsync), which is what
+            // used to make Bottom/Right stay in LUT mode until an unrelated refresh (e.g. moving
+            // Time) happened to run UpdateSlicesAsync again with live state. Pinning after
+            // SetCompositeState means every refresh this triggers already sees Composite active.
+            if (channelAxis.Index != 0) channelAxis.Index = 0;
+
             // Adopt any per-channel modes recovered from metadata before the ranges are evaluated.
             if (_compositeRestoredModes != null && _compositeBars != null)
             {
@@ -466,6 +518,19 @@ namespace MxPlot.UI.Avalonia.Views
             // was already visible before the switch would keep showing the pre-Composite text
             // until some unrelated geometry/frame change happened to refresh it.
             RefreshAllRegionStatistics();
+
+            // Last, so the recompute this kicks off sees Composite fully established.
+            if (restoreXyProjection)
+            {
+                _orthoPanel.ProjectionSelector.SetEnabled(ProjectionPlane.XY, true);
+                _orthoPanel.ProjectionSelector.RaiseXySelection();
+            }
+
+            // Fires Refreshed, which is what LinkedView-based followers (ROI View, Log Transform
+            // sync, Spatial Filter sync, ...) subscribe to - without it, switching LUT -> Composite
+            // never reaches them, and they keep showing whatever they had before the switch until
+            // some unrelated trigger (geometry change, frame move) happens to fire a recompute.
+            Refresh();
         }
 
         /// <summary>
@@ -513,6 +578,34 @@ namespace MxPlot.UI.Avalonia.Views
             int[] baseIndices = data.Axes.Select(a => a.Index).ToArray();
             var cube = data.Apply(new ExtractAlongOperation(channelAxisName, baseIndices));
             return (cube, channelAxisName);
+        }
+
+        /// <summary>
+        /// Whether "This frame only" is a real choice for <paramref name="data"/> right now --
+        /// distinct from running on the whole stack, not just whether the checkbox should be
+        /// shown. Ordinarily that's simply <c>data.FrameCount &gt; 1</c> (ActiveIndex picks out a
+        /// genuine subset). But while Composite mode is active, "this frame" for these dialogs
+        /// means <see cref="TryExtractCompositeFrameCube"/>'s *whole* Channel-axis cube at the
+        /// current position of every OTHER axis -- so when there is no axis besides the
+        /// composited one (no "surviving" axis), that cube already IS every frame, and offering
+        /// the checkbox as a real choice would be misleading (there is no "which frame?" to ask).
+        /// Mirrors why <c>CreateProjectionDialog</c> hides "This position only" when it has no
+        /// surviving axes either.
+        /// </summary>
+        /// <remarks>
+        /// Callers should still force the underlying "this frame only" flag on when this returns
+        /// <see langword="false"/> under Composite mode (<c>_isCompositeMode &amp;&amp; !result</c>)
+        /// rather than just hiding the checkbox -- otherwise the composite-cube extraction (and
+        /// so <see cref="SeedChildCompositeMode"/> re-entering Composite mode on the result) would
+        /// never trigger for this data shape, since it was previously only reached via the
+        /// checkbox being checked.
+        /// </remarks>
+        private bool IsThisFrameOnlyAChoice(IMatrixData data)
+        {
+            if (!_isCompositeMode || _compositeAxisDimIndex < 0 || _compositeAxisDimIndex >= data.Dimensions.AxisCount)
+                return data.FrameCount > 1;
+            string channelAxisName = data.Dimensions[_compositeAxisDimIndex].Name;
+            return data.Axes.Any(a => !string.Equals(a.Name, channelAxisName, StringComparison.OrdinalIgnoreCase));
         }
 
         /// <summary>
@@ -689,13 +782,26 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Leaves Composite mode and restores the LUT header/panel and the Channel
-        /// <summary>
-        /// Leaves Composite mode and restores the LUT header/panel and the Channel
         /// <see cref="AxisTracker"/> visibility. No-op if Composite mode is not active.
         /// </summary>
-        internal void ExitCompositeMode()
+        public void ExitCompositeMode()
         {
             if (!_isCompositeMode) return;
+
+            // Recipes survive this call unchanged (see the "ResetCompositeUiState is what clears
+            // it, not this method" note below), but each bar's own RangeMode does not -- the next
+            // EnterCompositeMode rebuilds _compositeBars from scratch (BuildCompositeModeDetails),
+            // and a freshly constructed ValueRangeBar defaults to Current. Capture ChannelWise modes
+            // here the same way SeedChildCompositeState/CaptureCompositeCubeState/RestoreRenderMode
+            // already do, so a plain in-session Composite -> LUT -> Composite round trip (the "switch
+            // to LUT mode" header button, or an AxisTracker's Channel -> Composite toggle) does not
+            // silently discard a Fixed range and force a rescan on the next Refresh -- exactly the
+            // "defaulting to Current would silently discard a copied Fixed recipe" concern documented
+            // on SeedChildCompositeState above. Global scope needs no help: _compositeGlobalMode is a
+            // plain field that already survives untouched.
+            if (_compositeScope == CompositeRangeScope.ChannelWise && _compositeBars != null)
+                _compositeRestoredModes = _compositeBars.Select(b => b.RangeMode).ToArray();
+
             _isCompositeMode = false;
             // Composite consumes the Channel axis, so the export menu's item set changes with it.
             InvalidateMenuPanel();
@@ -732,6 +838,11 @@ namespace MxPlot.UI.Avalonia.Views
             UpdateExtractFrameAllowed();
             // See EnterCompositeMode's matching call for why.
             RefreshAllRegionStatistics();
+
+            // See EnterCompositeMode's matching call: fires Refreshed for LinkedView-based
+            // followers (ROI View, Log Transform sync, Spatial Filter sync, ...), which otherwise
+            // never learn that Composite -> LUT just happened here.
+            Refresh();
         }
 
         /// <summary>
@@ -1018,7 +1129,7 @@ namespace MxPlot.UI.Avalonia.Views
             // Display text only — CompositeRangeScope's member names ("Global"/"ChannelWise") are
             // also what gets written to mxplot.composite.scope via ToString(), so they stay as-is;
             // only the label a user reads needs to be clearer.
-            var globalRadio = new RadioButton
+            var globalRadio = _compositeScopeGlobalRadio = new RadioButton
             {
                 Content = "Shared",
                 GroupName = "CompositeRangeScope",
@@ -1029,7 +1140,7 @@ namespace MxPlot.UI.Avalonia.Views
             globalRadio.Classes.Add("compact");
             ToolTip.SetTip(globalRadio, "One Min/Max shared by every channel");
 
-            var channelWiseRadio = new RadioButton
+            var channelWiseRadio = _compositeScopeChannelWiseRadio = new RadioButton
             {
                 Content = "Per-Channel",
                 GroupName = "CompositeRangeScope",
@@ -1040,16 +1151,31 @@ namespace MxPlot.UI.Avalonia.Views
             channelWiseRadio.Classes.Add("compact");
             ToolTip.SetTip(channelWiseRadio, "Each channel evaluates and keeps its own Min/Max");
 
+            var flyout = new Flyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
+
+            // Both scope choices act immediately (no separate "Apply"), so closing the flyout on
+            // click - like switchToLutItem below - avoids leaving it open after the pick is done.
+            // Hide() is deferred a tick (Post, not called inline): calling it synchronously inside
+            // IsCheckedChanged interrupts RadioButton's own same-tick "uncheck my group sibling"
+            // step (Hide() tears down the flyout's visual tree mid-toggle), which left both radios
+            // showing checked next time the flyout opened.
             globalRadio.IsCheckedChanged += (_, _) =>
             {
-                if (globalRadio.IsChecked == true) SetCompositeScope(CompositeRangeScope.Global);
+                if (globalRadio.IsChecked == true)
+                {
+                    SetCompositeScope(CompositeRangeScope.Global);
+                    Dispatcher.UIThread.Post(() => flyout.Hide());
+                }
             };
             channelWiseRadio.IsCheckedChanged += (_, _) =>
             {
-                if (channelWiseRadio.IsChecked == true) SetCompositeScope(CompositeRangeScope.ChannelWise);
+                if (channelWiseRadio.IsChecked == true)
+                {
+                    SetCompositeScope(CompositeRangeScope.ChannelWise);
+                    Dispatcher.UIThread.Post(() => flyout.Hide());
+                }
             };
 
-            var flyout = new Flyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
             var switchToLutItem = ControlFactory.MakeMenuItem("Switch to LUT mode", () =>
             {
                 flyout.Hide();
@@ -1219,6 +1345,16 @@ namespace MxPlot.UI.Avalonia.Views
         {
             if (_compositeScope == scope) return;
             _compositeScope = scope;
+            // Keeps the flyout's own radio buttons correct when scope changes from somewhere
+            // other than the user clicking one of them (e.g. MatrixPlotter.CompositeRecipes
+            // assigned externally) - their own IsChecked was previously only ever set once, at
+            // BuildCompositeModeHeader construction time. Setting IsChecked here does re-raise
+            // IsCheckedChanged on the corresponding radio, which calls back into this method, but
+            // the guard above makes that a no-op (scope already matches).
+            if (_compositeScopeGlobalRadio != null)
+                _compositeScopeGlobalRadio.IsChecked = scope == CompositeRangeScope.Global;
+            if (_compositeScopeChannelWiseRadio != null)
+                _compositeScopeChannelWiseRadio.IsChecked = scope == CompositeRangeScope.ChannelWise;
             ConfigureCompositeRangeBars();
             ApplyCompositeRanges();
             MarkCompositeDirty();
@@ -1559,7 +1695,19 @@ namespace MxPlot.UI.Avalonia.Views
         private void PushCompositeRecipes()
         {
             SyncRecipeColorsToChannelAxis();
-            _view.CompositeRecipes = _compositeRecipes.ToList();
+
+            // Only assign when the recipes actually moved. ToList() produces a new instance every
+            // call, so the styled property changed identity even when the values were untouched,
+            // and RenderSurface's CompositeRecipes handler rebuilds the bitmap on every change.
+            // Refresh() calls ApplyCompositeRanges (which ends here) and then _view.Refresh(), so
+            // a live feed whose ranges never move - a camera on a fixed range - paid for two full
+            // frame renders per refresh instead of one. Measured at 4096x4096 RGB: composite draw
+            // 28.7 ms, of which 15.4 ms was this redundant render.
+            // BlendRecipe is a record, so the comparison is exact, and it is per channel, not per
+            // pixel. A recipe edit still differs and still pushes.
+            var next = _compositeRecipes.ToList();
+            if (!RecipeListEquals(_view.CompositeRecipes, next))
+                _view.CompositeRecipes = next;
             _orthoController.SetCompositeState(
                 true, _compositeAxisDimIndex, _compositeRecipes.Count, _compositeRecipes, _compositeBlendMode);
 
@@ -1575,42 +1723,75 @@ namespace MxPlot.UI.Avalonia.Views
                 _xyProjectionWindow.PushCompositeRecipes();
         }
 
+        private static bool RecipeListEquals(
+            System.Collections.Generic.IReadOnlyList<BlendRecipe>? current,
+            System.Collections.Generic.IReadOnlyList<BlendRecipe> next)
+        {
+            if (current == null || current.Count != next.Count) return false;
+            for (int i = 0; i < next.Count; i++)
+                if (!Equals(current[i], next[i])) return false;
+            return true;
+        }
+
         /// <summary>
-        /// Recomputes every channel's histogram: after the active frame changes, when the settings
-        /// panel is opened, and from <see cref="Refresh"/> (data-content changes / the
+        /// Requests a recompute of every channel's histogram: after the active frame changes, when
+        /// the settings panel is opened, and from <see cref="Refresh"/> (data-content changes / the
         /// <see cref="MxView.RefreshRequested"/> bypass). Histograms are only computed while the
         /// settings panel is actually expanded — the same "don't pay for hidden UI" rule the LUT
         /// panel follows via <see cref="UpdateHistogram"/>.
         /// </summary>
         /// <remarks>
-        /// <para>
+        /// Coalescing dirty-flag + single-in-flight loop, not cancel-and-restart -- see
+        /// <see cref="UpdateHistogram"/>'s own doc comment for the full rationale (shared here
+        /// verbatim: a computation slower than the caller's own call rate could otherwise never
+        /// finish, always pre-empted before painting anything). This is called on every Z/T step
+        /// while the panel is open (<see cref="ApplyCompositeFrameIndices"/>), so without
+        /// coalescing, a slow Debug-build binning pass (see <see cref="UpdateCompositeHistogramsOnceAsync"/>'s
+        /// own remarks) plus rapid frame-stepping was exactly the starvation case this replaces.
+        /// </remarks>
+        private async void UpdateCompositeHistograms()
+        {
+            _compositeHistogramDirty = true;
+            if (_compositeHistogramRunning) return;
+            _compositeHistogramRunning = true;
+            try
+            {
+                while (_compositeHistogramDirty)
+                {
+                    _compositeHistogramDirty = false;
+                    await UpdateCompositeHistogramsOnceAsync();
+                }
+            }
+            finally
+            {
+                _compositeHistogramRunning = false;
+            }
+        }
+
+        /// <summary>
+        /// One histogram-recompute pass for every channel, always run to completion (see
+        /// <see cref="UpdateCompositeHistograms"/>'s own doc comment for why this is never
+        /// cancelled mid-flight).
+        /// </summary>
+        /// <remarks>
         /// The per-pixel binning in <c>HistogramAnalyzer.Compute</c> is only a few ms per channel
         /// in a Release build, but well over half a second per channel in Debug — the generic
         /// numeric conversion it calls per pixel simply isn't optimized away without the JIT's
         /// Release-mode passes. That's a normal day-to-day dev-loop condition (running via
         /// <c>dotnet run</c>/F5), not a shipped-build concern, but three channels run synchronously
         /// on the UI thread turns it into a multi-second freeze either way, which is the actual
-        /// bug: nothing should block the UI thread for a duration this variable. Same
-        /// background-thread + <see cref="_compositeHistogramCts"/> shape as LUT mode's
-        /// <see cref="UpdateHistogram"/> (a separate token source -- see that field's comment).
-        /// </para>
+        /// bug: nothing should block the UI thread for a duration this variable.
         /// <para>
         /// The three channels' binning — not their <see cref="IMatrixData.GetValueRange(int)"/>
         /// lookups, which share a plain <see cref="System.Collections.Generic.Dictionary{TKey,TValue}"/>
         /// cache and are not safe to race — run in parallel for in-memory data, each roughly
-        /// halving further with every additional core. This is also called on every Z/T step
-        /// while the panel is open (<see cref="ApplyCompositeFrameIndices"/>), so cancelling the
-        /// previous run discards a request superseded by a newer one before it ever reaches bars.
+        /// halving further with every additional core.
         /// </para>
         /// </remarks>
-        private async void UpdateCompositeHistograms()
+        private async Task UpdateCompositeHistogramsOnceAsync()
         {
             if (!_isCompositeMode || _compositeBars == null || _currentData == null) return;
             if (_compositeSettingsPanel?.IsVisible != true) return;
-
-            _compositeHistogramCts?.Cancel();
-            _compositeHistogramCts = new CancellationTokenSource();
-            var cts = _compositeHistogramCts;
 
             var data = _currentData;
             var bars = _compositeBars;
@@ -1622,16 +1803,12 @@ namespace MxPlot.UI.Avalonia.Views
                 var results = await Task.Run(() =>
                 {
                     var slots = new (int[] Bins, double Min, double Max)[count];
-                    if (cts.Token.IsCancellationRequested) return slots;
 
                     // GetValueRange populates the shared cache above on first touch, so these run
                     // sequentially; CreateHistogram, given an explicit min/max, only reads pixels.
                     var ranges = new (double Min, double Max)[count];
                     for (int i = 0; i < count; i++)
-                    {
-                        if (cts.Token.IsCancellationRequested) return slots;
                         ranges[i] = data.GetValueRange(frameIndices[i]);
-                    }
 
                     void ComputeOne(int i)
                     {
@@ -1644,12 +1821,11 @@ namespace MxPlot.UI.Avalonia.Views
                         // which is not safe to touch from multiple threads at once.
                         for (int i = 0; i < count; i++) ComputeOne(i);
                     else
-                        Parallel.For(0, count, new ParallelOptions { CancellationToken = cts.Token }, ComputeOne);
+                        Parallel.For(0, count, ComputeOne);
 
                     return slots;
-                }, cts.Token);
+                });
 
-                if (cts.Token.IsCancellationRequested) return;
                 for (int i = 0; i < count; i++)
                     bars[i].SetHistogram(results[i].Bins, results[i].Min, results[i].Max);
             }

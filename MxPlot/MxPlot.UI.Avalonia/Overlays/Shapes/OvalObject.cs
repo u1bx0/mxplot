@@ -18,14 +18,16 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         // ── IAnalyzableOverlay ────────────────────────────────────
 
-        public OverlayMenuEntry FindMinMax { get; } = new("Find Min/Max", icon: null, tooltip: "Set value range to min/max within this region");
+        public OverlayMenuEntry FindMinMax { get; } = new("Find Min/Max", icon: MenuIcons.FindMinMax, tooltip: "Set value range to min/max within this region");
         public OverlayMenuEntry ToggleShowStatistics { get; } = new("Show Statistics", icon: null, tooltip: "Show/hide statistics label");
         public OverlayMenuEntry UseRoiForValueRange { get; } = new("Use ROI for Value Range", icon: null, tooltip: "Use this region as the value range ROI");
-        public OverlayMenuEntry CopyData { get; } = new("Copy Data", icon: null, tooltip: "Copy data within the rect as image/ascii");
+        public OverlayMenuEntry OpenRoiView { get; } = new("Open ROI View", icon: null, tooltip: "Open a live linked window showing just this region");
+        public OverlayMenuEntry CopyData { get; } = new("Copy Image in Region…", icon: MenuIcons.Image, tooltip: "Copy data within the rect as image/ascii");
         public bool ShowStatistics { get; set; } = false;
         public RegionStatistics? CachedStatistics { get; set; }
         public string? CachedStatisticsLabel { get; set; }
         public bool IsValueRangeRoi { get; set; } = false;
+        public bool HasLinkedRoiView { get; set; } = false;
 
         public bool ContainsWorldPoint(Point worldPoint)
         {
@@ -87,8 +89,8 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
                 var label = CachedStatisticsLabel ?? CachedStatistics?.ToLabel();
                 if (label != null) DrawStatisticsLabel(g, label);
             }
-            if (IsValueRangeRoi)
-                DrawRoiLabel(g);
+            if (IsValueRangeRoi || HasLinkedRoiView)
+                DrawRoiLabel(g, IsValueRangeRoi, HasLinkedRoiView);
         }
 
         public override HandleType HitTest(Point location, AvaloniaViewport vp)

@@ -1,5 +1,4 @@
 ﻿using MxPlot.Core;
-using MxPlot.Core.Imaging;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Rendering;

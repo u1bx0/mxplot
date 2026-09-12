@@ -501,7 +501,7 @@ namespace MxPlot.UI.Avalonia.Views
             actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [.. editItems], icon: MenuIcons.Edit));
             var processingItems = new List<Control>
             {
-                ControlFactory.MakeChildMenuItem("Crop", Act(InvokeCropAction), "Crop the image to ROI selection", icon: MenuIcons.AutoFix),
+                ControlFactory.MakeChildMenuItem("Crop", Act(InvokeCropAction), "Crop the image to ROI selection", icon: MenuIcons.Crop),
             };
             if (_cropUndoData != null)
             {
@@ -513,9 +513,9 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 processingItems.Add(ControlFactory.MakeChildMenuItem("Reverse Stack\u2026", ActAsync(InvokeReverseStackAsync), "Reverse the frame order along a selected axis", icon: MenuIcons.Layers));
             }
+            processingItems.Add(ControlFactory.MakeChildMenuItem("Transpose…", ActAsync(InvokeTransposeAsync), "Swap X and Y; result opens in a new window", icon: MenuIcons.AutoFix));
             /*
             //NOTE: These are placeholders for potential future features, currently disabled until implemented
-            processingItems.Add(ControlFactory.MakeChildMenuItem("Transpose", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));
             if (_currentData?.FrameCount > 1)
             {
                 processingItems.Add(ControlFactory.MakeChildMenuItem("Reorder", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));

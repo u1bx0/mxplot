@@ -30,18 +30,22 @@ namespace MxPlot.UI.Avalonia.Views
             if (_currentData == null) return;
             HideMenuPanel();
 
-            bool isMultiFrame = _currentData.FrameCount > 1;
+            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
             var (minVal, _) = _currentData.GetValueRange(_currentData.ActiveIndex);
             bool hasNegOrZero = !double.IsNaN(minVal) && minVal <= 0;
 
-            var p = await LogTransformDialog.ShowAsync(this, isMultiFrame, hasNegOrZero, IsSyncFollower);
+            var p = await LogTransformDialog.ShowAsync(this, isMultiFrame, hasNegOrZero, IsReplaceDataBlocked, _currentData);
             if (p == null) return;
 
-            bool singleFrame = p.ThisFrameOnly || !isMultiFrame;
+            // Forced on when Composite mode has no surviving axis besides the composited one --
+            // see IsThisFrameOnlyAChoice's remarks: the checkbox is hidden in that case, but the
+            // composite-cube extraction below must still run so the result re-enters Composite mode.
+            bool thisFrameOnly = p.ThisFrameOnly || (_isCompositeMode && !isMultiFrame);
+            bool singleFrame = thisFrameOnly || !isMultiFrame;
             int frameIdx = _currentData.ActiveIndex;
             // Composite + This Frame Only: process every channel at the current position
             // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
-            var compositeCube = p.ThisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
+            var compositeCube = thisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
 
             string baseLabel = p.Base switch
             {
