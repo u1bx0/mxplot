@@ -1,8 +1,7 @@
 ﻿# MatrixPlotter — Composite Rendering Guide
 
 **Created**: 2026-08-20  
-**Updated**: 2026-08-24  
-**Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), MxPlot 0.3.0+
+**Updated**: 2026-09-23
 
 Composite mode renders several frames along a chosen axis at once, each tinted with its own colour
 and contrast, and blends them into a single image — the standard way multi-channel fluorescence
@@ -39,13 +38,14 @@ named `Channel`; that restriction is gone, but the common case — a genuine mul
 dataset — still just works the same way it always did, since that axis is still usually named
 `Channel`.)
 
-There are three ways a window enters Composite mode:
+There are four ways a window enters Composite mode:
 
 | Trigger | Behaviour |
 |---|---|
 | **Axis context menu** | Right-click any axis tracker → **Switch to Composite Mode**. Offered for every axis, not just one named `Channel` |
 | **RGB auto-open** | A `byte` dataset whose Channel axis is tagged R/G/B opens directly in Composite mode with the original colours reproduced. See [RGB Colour Images](#rgb-colour-images) |
 | **Metadata restore** | A file carrying `mxplot.render.mode = Composite` reopens in Composite mode on the axis named by `mxplot.composite.axis`, with its saved recipes. See [Persistence](#persistence) |
+| **Host code** | `plotter.EnterCompositeMode(axis)`, a public Facade a host can call programmatically. See [Controlling Composite from Code](#controlling-composite-from-code) |
 
 While Composite mode is active:
 
@@ -248,8 +248,28 @@ for the full key table.
 
 ## Controlling Composite from Code
 
-Composite has **no Facade property on `MatrixPlotter`** yet. The underlying `MxView` properties are
-public and up-sync normally, so they can be driven directly:
+`MatrixPlotter` exposes a public Facade for driving Composite mode programmatically (since 0.4.0) —
+a host (e.g. a live camera preview pushing an RGB channel cube) does not need to reach into `MainView`:
+
+```csharp
+plotter.EnterCompositeMode(plotter.MatrixData.Axes.FindAxis("Channel")); // must be the data's own axis instance
+plotter.CompositeRecipes = recipes; // IReadOnlyList<BlendRecipe>, one per channel
+```
+
+`EnterCompositeMode(Axis channelAxis)` performs the same orchestration `MatrixPlotter` runs when the
+user switches modes from the axis context menu — promoting the axis to a `ColorAxis`, building
+default recipes, pinning the composited axis's coordinate to `0` (see
+[Requirements and Entry Points](#requirements-and-entry-points) for why that isn't the same as
+pinning `ActiveIndex` itself), rebuilding the header and settings panel, wiring the orthogonal
+views. It no-ops silently if `MatrixData` is `null`; `channelAxis` must be one of the data's own
+`Axis` instances (e.g. `MatrixData.Axes.FindAxis("Channel")`), not a freshly constructed one.
+`CompositeRecipes` can only be set once already in Composite mode, and its count must match the
+number of channels `EnterCompositeMode` was called with.
+
+Underneath the Facade, these are the `MxView` properties that actually get driven —
+`RenderingMode`, `CompositeRecipes`, `CompositeBlendMode`, `CompositeFrameIndices` — available
+directly should a host need finer control than the Facade gives (e.g. `CompositeFrameIndices[i]`,
+the real source-frame index channel `i` currently maps to):
 
 ```csharp
 plotter.MainView.RenderingMode = RenderingMode.Composite;
@@ -258,18 +278,13 @@ plotter.MainView.CompositeBlendMode = BlendMode.Additive;
 plotter.MainView.CompositeFrameIndices = frameIndices; // source frame per channel
 ```
 
-This is the low-level rendering contract: `CompositeFrameIndices[i]` is the real source-frame
-index that channel `i` currently maps to, and the caller is responsible for keeping it consistent
-with the data on screen. The orchestration `MatrixPlotter` performs when the user switches modes —
-promoting the axis to a `ColorAxis`, building default recipes, pinning the composited axis's
-coordinate to `0` (see [Requirements and Entry Points](#requirements-and-entry-points) for why
-that isn't the same as pinning `ActiveIndex` itself), rebuilding
-the header and settings panel, wiring the orthogonal views — is `internal` and is **not** reachable
-from outside the assembly.
+At this level the caller is responsible for keeping `CompositeFrameIndices` consistent with the
+data on screen — none of the orchestration `EnterCompositeMode` does happens automatically.
 
-In practice, external code should let the user (or the saved metadata) enter Composite mode, and
-limit itself to supplying data whose Channel axis is shaped and tagged the way it wants. For an
-RGB image, tagging the axis `R`/`G`/`B` is enough to get a correct composite automatically:
+In practice, most external code should either use the Facade above, or let the user (or the saved
+metadata) enter Composite mode, and limit itself to supplying data whose Channel axis is shaped and
+tagged the way it wants. For an RGB image, tagging the axis `R`/`G`/`B` is enough to get a correct
+composite automatically:
 
 ```csharp
 using MxPlot.Core;
@@ -295,7 +310,6 @@ var rgbAxis = ColorAxis.CreateRgb();   // tags R/G/B + pure primary colours
   through the Composite axis-context-menu path this guide describes) and is deliberately mutually
   exclusive with Composite — see [Blend Modes](#blend-modes) for why it does not actually share
   `CompositeBitmapWriter` despite the conceptual similarity to `Maximum` blending.
-- **No external Facade.** See [Controlling Composite from Code](#controlling-composite-from-code).
 - **`BlendMode` is fixed to `Additive`** for channel composites.
 
 ---
