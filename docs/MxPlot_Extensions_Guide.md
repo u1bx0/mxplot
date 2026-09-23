@@ -1,6 +1,6 @@
-﻿# MxPlot Extension Development Guide (BluePaper)
+﻿# MxPlot Extension Development Guide
 
-**Version Date:** 2026-04-24  
+**Version Date:** 2026-09-23  
 **Audience:** Developers who want to extend MxPlot via external DLLs
 
 ---
@@ -44,6 +44,7 @@ and if the DLL name is `MxPlot.Extensions.{Name}.dll` it is registered automatic
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
     <!-- Follow naming convention: MxPlot.Extensions.{Name}.dll -->
     <AssemblyName>MxPlot.Extensions.Zarr</AssemblyName>
   </PropertyGroup>
@@ -68,6 +69,20 @@ namespace MxPlot.Extensions.Zarr
         public string FormatName => "Zarr";
         public IReadOnlyList<string> Extensions { get; } = [".zarr"];
 
+        // Required by IMatrixDataReader even if you never check it — CancellationToken.None
+        // (the struct's own default) is a valid, always-available value.
+        public CancellationToken CancellationToken { get; set; }
+
+        // Type-safe overload: read as a specific element type, or fail if the file holds another.
+        public MatrixData<T> Read<T>(string filePath) where T : unmanaged
+        {
+            IMatrixData raw = Read(filePath);
+            if (raw is MatrixData<T> typed) return typed;
+            throw new InvalidOperationException(
+                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+        }
+
+        // Type-agnostic overload: caller doesn't know (or care) which element type the file holds.
         public IMatrixData Read(string path)
         {
             var md = new MatrixData<float>(256, 256);
@@ -75,7 +90,9 @@ namespace MxPlot.Extensions.Zarr
             return md;
         }
 
-        public void Write(IMatrixData data, string path)
+        // accessor exposes the destination's backing store (e.g. an MMF) for formats that stream
+        // straight into it instead of building the whole result in RAM first; ignore it otherwise.
+        public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             // ... writing logic ...
         }
@@ -121,13 +138,16 @@ public sealed class ZarrFormat : IMatrixDataReader, IProgressReportable
 
 #### Optional: Cancellation Support
 
-`CancellationToken` is a plain property on `IMatrixDataReader`.
-MxPlot's UI sets it automatically. Call `ThrowIfCancellationRequested()` at frame boundaries.
+The `CancellationToken` property itself is required (see the base sample above), but MxPlot's UI only
+shows a Cancel button and sets the token if the reader declares it actually checks it — override
+`IsCancellable` (`false` by default) to `true`, then call `ThrowIfCancellationRequested()` at frame
+boundaries:
 
 ```csharp
 public sealed class ZarrFormat : IMatrixDataReader
 {
     public CancellationToken CancellationToken { get; set; }
+    public bool IsCancellable => true;
 
     public IMatrixData Read(string path)
     {
@@ -141,8 +161,9 @@ public sealed class ZarrFormat : IMatrixDataReader
 }
 ```
 
-Because `CancellationToken` is a struct with a natural default of `CancellationToken.None`,
-the cost of having but not using it is zero.
+Leaving `IsCancellable` at its default `false` (i.e. having the property but never checking it) is
+also valid — the cost of the unused property is zero, since `CancellationToken.None` is its own
+struct default.
 
 #### Optional: Virtual Loading
 
@@ -395,14 +416,36 @@ Has access to all currently open datasets; suited for cross-window processing or
 
 ### 5.2 Project Setup
 
+`MxPlot.App` is the reference application, not a library, and is not published as a NuGet package
+(a future version is planned to split `IMxPlotAppPlugin`/`IMxPlotAppContext` into a small
+`MxPlot.App.Plugins` package for a plain `PackageReference`). Until then, reference the two interface
+types either of two ways:
+
+- **Clone the source and add a `ProjectReference`** to `MxPlot.App\MxPlot.App.csproj`.
+- **Reference the built `MxPlot.App.dll` directly**, pointing `HintPath` at wherever MxPlot.App is
+  installed locally (the folder containing `MxPlot.exe`) — works from just the released app, no
+  source clone needed:
+
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- Must match MxPlot.App's own TFM: a plugin DLL is loaded into MxPlot.App's own process
+         (Assembly.LoadFrom), so a mismatched TFM will not load. -->
+    <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>MyCompany.MxPlotAppPlugin.BatchExport</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="MxPlot.App" Version="x.x.x" />
+    <PackageReference Include="MxPlot" Version="x.x.x" />
+
+    <!-- MxPlot.App itself isn't a NuGet package -- reference the local install's DLL directly, just
+         for IMxPlotAppPlugin/IMxPlotAppContext. Private=false (CopyLocal=false) keeps it out of this
+         plugin's own build output: MxPlot.App.exe already has its own copy, and MxPlotAppPluginRegistry
+         .LoadFromDirectory() tries to load every DLL in the plugins folder, so a redundant copy of
+         MxPlot.App.dll sitting there is at best wasted work. -->
+    <Reference Include="MxPlot.App">
+      <HintPath>C:\Path\To\Installed\MxPlot.App\MxPlot.App.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
 ```
@@ -428,7 +471,10 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
                 var path = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
                     $"{data.XCount}x{data.YCount}.csv");
-                FormatRegistry.CreateWriter(path)?.Write(data, path);
+                // data is IMatrixData (the caller doesn't know its element type), so go through
+                // IMatrixData.SaveAs rather than IMatrixDataWriter.Write<T> directly.
+                var writer = FormatRegistry.CreateWriter(path);
+                if (writer != null) data.SaveAs(path, writer);
             }
         }
     }
@@ -444,7 +490,10 @@ public async void Run(IMxPlotAppContext ctx)
     var file = await ctx.Owner.StorageProvider.SaveFilePickerAsync(
         new FilePickerSaveOptions { Title = "Save Result", SuggestedFileName = "result.csv" });
     if (file?.TryGetLocalPath() is { } path && ctx.PrimarySelection is { } data)
-        FormatRegistry.CreateWriter(path)?.Write(data, path);
+    {
+        var writer = FormatRegistry.CreateWriter(path);
+        if (writer != null) data.SaveAs(path, writer);
+    }
 }
 ```
 
@@ -452,8 +501,16 @@ public async void Run(IMxPlotAppContext ctx)
 
 ```csharp
 MxPlotAppPluginRegistry.AddPlugin(new BatchCsvExportPlugin());
-// or directory scan — same pattern as IMatrixPlotterPlugin
+
+// Directory scan (called automatically from App.axaml.cs, same pattern as IMatrixPlotterPlugin)
+var pluginsDir = Path.Combine(AppContext.BaseDirectory, "plugins");
+MxPlotAppPluginRegistry.LoadFromDirectory(pluginsDir);
 ```
+
+`LoadFromDirectory()` is called automatically from `App.axaml.cs`. If you use MxPlot.App as-is, just
+place the plugin DLL in the `plugins/` folder — nothing else to do. Direct registration (`AddPlugin`)
+is for a custom host app that embeds `MatrixPlotter`/`MxPlot.UI.Avalonia` without MxPlot.App's own
+directory scan, or a plugin compiled directly into the host rather than shipped as a separate DLL.
 
 ---
 
@@ -499,41 +556,17 @@ working across Avalonia and WinForms hosts.
 ├─ MxPlot.Extensions.OmeTiff.dll          ← auto-scanned by FormatRegistry
 ├─ MxPlot.Extensions.Hdf5.dll
 ├─ MxPlot.Extensions.MyPropFormat.dll
-└─ plugins/
+└─ plugins/                               ← auto-scanned by MxPlot.App at startup
    ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
    └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
 ```
 
 | Type | Naming convention | Auto-detected |
 |---|---|---|
-| File format DLL | `MxPlot.Extensions.{Name}.dll` | ✅ From `AppContext.BaseDirectory` |
-| MatrixPlotter plugin DLL | Any (`*.dll`) | Via `LoadFromDirectory()` |
-| MxPlot.App plugin DLL | Any (`*.dll`) | Via `LoadFromDirectory()` |
+| File format DLL | `MxPlot.Extensions.{Name}.dll` | ✅ `AppContext.BaseDirectory`, scanned by `FormatRegistry` |
+| MatrixPlotter plugin DLL | Any (`*.dll`) | ✅ `plugins/`, scanned by MxPlot.App at startup |
+| MxPlot.App plugin DLL | Any (`*.dll`) | ✅ Same as above |
 
----
-
-## 9. Quick Start Checklist
-
-### Adding a File Format
-
-- [ ] Implement `IMatrixDataReader`
-- [ ] Return `FormatName` and `Extensions`
-- [ ] Name the DLL `MxPlot.Extensions.{Name}.dll` and place alongside the exe
-- [ ] (Optional) `IProgressReportable` — progress bar support
-- [ ] (Optional) `CancellationToken` property — cancellation support
-- [ ] (Optional) `IVirtualLoadable` — virtual loading (§3.4)
-  - [ ] Build offset table by header scan
-  - [ ] `StrippedMmfFrames<T>` (strips) or `TiledMmfFrames<T>` (tiles) — or a `VirtualFrames<T>` subclass for per-frame compressed data
-  - [ ] `MatrixData<T>.CreateAsVirtualFrames()`
-  - [ ] `VirtualPolicy.Resolve()` for Auto mode
-
-### Adding a MatrixPlotter Plugin
-
-- [ ] Implement `IMatrixPlotterPlugin`; return `CommandName` and `Description`
-- [ ] Optionally return `GroupName`
-- [ ] Place DLL in `plugins/`
-
-### Adding a MxPlot.App Plugin
-
-- [ ] Implement `IMxPlotAppPlugin`; return `CommandName` and `Description`
-- [ ] Place DLL in `plugins/`
+`LoadFromDirectory()` itself is a generic API that takes any directory as an argument — it isn't hardcoded
+to `plugins/`. MxPlot.App just happens to call it with that path at startup, so a plugin DLL placed there
+is auto-detected as long as you're using MxPlot.App as-is (see §4.4 / §5.4).

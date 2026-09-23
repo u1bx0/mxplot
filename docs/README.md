@@ -75,7 +75,7 @@
 
 ## Extension Development
 
-- **[MxPlot Extension Development Guide](./BluePaper_MxPlot_Extensions_Guide.md)** ([日本語](./BluePaper_MxPlot_Extensions_Guide_ja.md))  
+- **[MxPlot Extension Development Guide](./MxPlot_Extensions_Guide.md)** ([日本語](./MxPlot_Extensions_Guide_ja.md))  
   How to extend MxPlot with external DLLs: file format readers/writers (`IMatrixDataReader`, `IVirtualLoadable`), MatrixPlotter plugins (`IMatrixPlotterPlugin`), and MxPlot.App plugins (`IMxPlotAppPlugin`). Covers progress reporting, cancellation, virtual loading implementation, and deployment conventions.
 
 ---

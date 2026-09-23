@@ -1,6 +1,6 @@
-﻿# MxPlot 拡張開発ガイド（BluePaper）
+﻿# MxPlot 拡張開発ガイド
 
-**バージョン対応日：** 2026-04-24
+**バージョン対応日：** 2026-09-23
 **対象読者：** MxPlot を外部 DLL で拡張したい開発者
 
 ---
@@ -25,8 +25,8 @@ MxPlot は 3 種類の外部拡張ポイントを持っています。
 | 機能 | 実装状況 | 備考 |
 |---|---|---|
 | `FormatRegistry.ScanAndRegister()` | ✅ 動作 | 起動時に自動実行 |
-| `MatrixPlotterPluginRegistry.LoadFromDirectory()` | ✅ 動作 | **手動呼び出しが必要** |
-| `MxPlotAppPluginRegistry.LoadFromDirectory()` | ✅ 動作 | **手動呼び出しが必要** |
+| `MatrixPlotterPluginRegistry.LoadFromDirectory()` | ✅ 動作 | 起動時に自動実行 |
+| `MxPlotAppPluginRegistry.LoadFromDirectory()` | ✅ 動作 | 起動時に自動実行 |
 | `FormatRegistry` の起動時自動スキャン | ✅ 動作 | `MxPlot.Extensions.*.dll` を自動検出 |
 | Plugin Registry の起動時自動スキャン | ✅ 動作 | `App.axaml.cs` から `plugins/` を自動スキャン |
 
@@ -46,6 +46,7 @@ MxPlot は 3 種類の外部拡張ポイントを持っています。
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
     <!-- 出力 DLL 名を規約に従う: MxPlot.Extensions.{Name}.dll -->
     <AssemblyName>MxPlot.Extensions.Zarr</AssemblyName>
   </PropertyGroup>
@@ -80,6 +81,20 @@ namespace MxPlot.Extensions.Zarr
 
         // ── IMatrixDataReader ────────────────────────────────────────────
 
+        // IMatrixDataReaderの必須メンバー。使わなくても実装は必須 — CancellationToken.None
+        // （structの既定値）で問題ない。
+        public CancellationToken CancellationToken { get; set; }
+
+        // 型を指定して読む版。ファイルの実データ型と異なる場合は例外にする。
+        public MatrixData<T> Read<T>(string filePath) where T : unmanaged
+        {
+            IMatrixData raw = Read(filePath);
+            if (raw is MatrixData<T> typed) return typed;
+            throw new InvalidOperationException(
+                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+        }
+
+        // 型を問わず読む版。呼び出し側がファイルの実データ型を知らない場合に使う。
         public IMatrixData Read(string path)
         {
             // 実際の読み込みロジックをここに実装
@@ -90,7 +105,9 @@ namespace MxPlot.Extensions.Zarr
 
         // ── IMatrixDataWriter ────────────────────────────────────────────
 
-        public void Write(IMatrixData data, string path)
+        // accessorは書き込み先（MMFなど）の裏側ストレージへのアクセスを提供する。結果全体をRAM上に
+        // 組み立てずにストリーミングで書き込む実装向けで、使わない場合は無視してよい。
+        public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             // 実際の書き込みロジックをここに実装
         }
@@ -141,14 +158,16 @@ public sealed class ZarrFormat : IMatrixDataReader, IProgressReportable
 
 #### オプション：キャンセル対応
 
-`CancellationToken` は `IMatrixDataReader` のプロパティとして直接公開されており、
-MxPlot の UI はトークンを自動的に設定します。
-フレーム境界で `ThrowIfCancellationRequested()` を呼ぶだけでキャンセルに対応できます。
+`CancellationToken` プロパティ自体は必須（上の基本サンプル参照）ですが、MxPlot の UI が Cancel
+ボタンを出してトークンを実際に設定するのは、リーダー側が「本当にチェックしている」と宣言した場合
+だけです。既定 `false` の `IsCancellable` を `true` にオーバーライドし、フレーム境界で
+`ThrowIfCancellationRequested()` を呼びます。
 
 ```csharp
 public sealed class ZarrFormat : IMatrixDataReader
 {
     public CancellationToken CancellationToken { get; set; }
+    public bool IsCancellable => true;
 
     public IMatrixData Read(string path)
     {
@@ -162,8 +181,8 @@ public sealed class ZarrFormat : IMatrixDataReader
 }
 ```
 
-`CancellationToken` は struct であり、設定されなければ `CancellationToken.None` のままになるため、
-未使用のコストはゼロです。
+`IsCancellable` を既定の `false` のままにする（プロパティは持つがチェックしない）のも問題ありません。
+`CancellationToken.None` が struct 自体の既定値なので、未使用のコストはゼロです。
 
 #### オプション：仮想読み込み対応
 
@@ -456,14 +475,10 @@ plugins/
   MyCompany.MxPlotPlugin.Deconvolution.dll
 ```
 
-### 4.5 ~~⚠️ 現状の制限~~
-
-`MatrixPlotterPluginRegistry.LoadFromDirectory()` および `MxPlotAppPluginRegistry.LoadFromDirectory()` は
-**`App.axaml.cs` の `OnFrameworkInitializationCompleted` で自動的に呼ばれます。**
-スキャン対象は `AppContext.BaseDirectory/plugins/` ディレクトリです。
-
-アプリ開発者は何も追加する必要はありません。
-プラグイン DLL を `plugins/` フォルダに置くだけで動作します。
+`LoadFromDirectory()` は `MxPlot.App` の `App.axaml.cs`（`OnFrameworkInitializationCompleted`）から
+自動的に呼ばれます。MxPlot.App をそのまま使う場合、アプリ開発者は何もする必要はなく、プラグイン DLL を
+`plugins/` フォルダに置くだけで動作します。方法 A の直接登録は、MxPlot.App を使わず自前のホストアプリを
+作る場合など、この自動スキャンに乗らないケースで使います。
 
 ---
 
@@ -477,15 +492,31 @@ MxPlot ダッシュボード（メインウィンドウ）の **☰ → Tools �
 
 ### 5.2 プロジェクト設定
 
+`MxPlot.App` はリファレンスアプリケーションであってライブラリではないため、NuGetパッケージとしては公開されていません（将来のバージョンで `IMxPlotAppPlugin`/`IMxPlotAppContext` を小さな `MxPlot.App.Plugins` パッケージに切り出し、通常の `PackageReference` で参照できるようにする予定です）。それまでは、次の2通りのいずれかでこの2つのインターフェース型を参照してください。
+
+- **ソースをクローンして `ProjectReference`** — `MxPlot.App\MxPlot.App.csproj` を直接参照する。
+- **ビルド済みの `MxPlot.App.dll` を直接参照** — `HintPath` に、ローカルにインストール済みのMxPlot.App（`MxPlot.exe` があるフォルダ）を指す。リポジトリのクローンなしで、リリース版のアプリだけで開発できる。
+
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <!-- MxPlot.App自体のTFMと一致させる必要がある — プラグインDLLはMxPlot.App自身のプロセスに
+         （Assembly.LoadFromで）読み込まれるため、TFMが一致しないと読み込めない。 -->
+    <TargetFramework>net10.0</TargetFramework>
     <AssemblyName>MyCompany.MxPlotAppPlugin.BatchExport</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
-    <!-- MxPlot.App を参照する必要がある -->
-    <PackageReference Include="MxPlot.App" Version="x.x.x" />
+    <PackageReference Include="MxPlot" Version="x.x.x" />
+
+    <!-- MxPlot.App自体はNuGetパッケージではないので、ローカルにインストール済みのDLLを直接参照する。
+         IMxPlotAppPlugin/IMxPlotAppContextのためだけに必要。Private=false（CopyLocal=false）が重要 —
+         これがないとこのプラグイン自身のビルド出力にMxPlot.App.dllがコピーされてしまい、
+         MxPlotAppPluginRegistry.LoadFromDirectory()がplugins フォルダ内の全DLLを読み込もうとする際に、
+         MxPlot.App.dllの重複コピーが無駄な読み込みの原因になる。 -->
+    <Reference Include="MxPlot.App">
+      <HintPath>C:\Path\To\Installed\MxPlot.App\MxPlot.App.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
 ```
@@ -524,8 +555,10 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
                     Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
                     $"{data.XCount}x{data.YCount}.csv");
 
+                // dataはIMatrixData（呼び出し側は要素型を知らない）なので、
+                // IMatrixDataWriter.Write<T>を直接ではなく、IMatrixData.SaveAs経由で呼ぶ。
                 var writer = FormatRegistry.CreateWriter(path);
-                writer?.Write(data, path);
+                if (writer != null) data.SaveAs(path, writer);
             }
         }
     }
@@ -555,7 +588,10 @@ public async void Run(IMxPlotAppContext ctx)
 
     // PrimarySelection: リストで最後にフォーカスされたデータ
     if (ctx.PrimarySelection is { } data)
-        FormatRegistry.CreateWriter(path)?.Write(data, path);
+    {
+        var writer = FormatRegistry.CreateWriter(path);
+        if (writer != null) data.SaveAs(path, writer);
+    }
 }
 ```
 
@@ -567,10 +603,15 @@ public async void Run(IMxPlotAppContext ctx)
 // 直接登録
 MxPlotAppPluginRegistry.AddPlugin(new BatchCsvExportPlugin());
 
-// ディレクトリスキャン（App.axaml.cs で）
+// ディレクトリスキャン（App.axaml.cs から自動的に呼ばれる）
 MxPlotAppPluginRegistry.LoadFromDirectory(
     Path.Combine(AppContext.BaseDirectory, "plugins"));
 ```
+
+`LoadFromDirectory()` は `App.axaml.cs` から自動的に呼ばれます。MxPlot.App をそのまま使う場合、
+プラグイン DLL を `plugins/` フォルダに置くだけで動作し、他に何もする必要はありません。
+直接登録（`AddPlugin`）は、MxPlot.App を使わず `MatrixPlotter`/`MxPlot.UI.Avalonia` を組み込んだ
+自前のホストアプリを作る場合や、プラグインを別 DLL ではなくホストに直接コンパイルして組み込む場合に使います。
 
 ---
 
@@ -637,7 +678,7 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 ├─ MxPlot.Extensions.Hdf5.dll             ← 同上
 ├─ MxPlot.Extensions.MyPropFormat.dll     ← 同上（命名規約を守れば自動）
 │
-└─ plugins/                               ← Plugin Registry がスキャン（要 LoadFromDirectory 呼び出し）
+└─ plugins/                               ← MxPlot.App が起動時に自動スキャン
    ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
    └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
 ```
@@ -646,37 +687,10 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 
 | 種別 | 規約 | 自動検出 |
 |---|---|---|
-| ファイルフォーマット DLL | `MxPlot.Extensions.{Name}.dll` | ✅ `AppContext.BaseDirectory` から自動 |
-| MatrixPlotter プラグイン DLL | 任意（`*.dll`） | `LoadFromDirectory()` で任意ディレクトリを指定 |
-| MxPlot.App プラグイン DLL | 任意（`*.dll`） | `LoadFromDirectory()` で任意ディレクトリを指定 |
+| ファイルフォーマット DLL | `MxPlot.Extensions.{Name}.dll` | ✅ `AppContext.BaseDirectory` から `FormatRegistry` が自動スキャン |
+| MatrixPlotter プラグイン DLL | 任意（`*.dll`） | ✅ `plugins/` を MxPlot.App が起動時に自動スキャン |
+| MxPlot.App プラグイン DLL | 任意（`*.dll`） | ✅ 同上 |
 
----
-
-## 9. クイックスタート：最小実装チェックリスト
-
-### ファイルフォーマット追加
-
-- [ ] `IMatrixDataReader` を実装
-- [ ] `FormatName` と `Extensions` を返す
-- [ ] DLL 名を `MxPlot.Extensions.{Name}.dll` にする
-- [ ] exe と同じフォルダに配置
-- [ ] （オプション）`IProgressReportable` で進捗報告
-- [ ] （オプション）`IsCancellable` + `CancellationToken` (explicit impl) でキャンセル対応
-- [ ] （オプション）`IVirtualLoadable` で仮想読み込み（3.4 節参照）
-  - [ ] ヘッダースキャンでオフセットテーブルを構築
-  - [ ] ストリップ形式 → `StrippedMmfFrames<T>`、タイル形式 → `TiledMmfFrames<T>` を選択（フレーム単位の圧縮なら `VirtualFrames<T>` を継承）
-  - [ ] `MatrixData<T>.CreateAsVirtualFrames()` で MatrixData に渡す
-  - [ ] `VirtualPolicy.Resolve()` で Auto 判定
-
-### MatrixPlotter プラグイン追加
-
-- [ ] `IMatrixPlotterPlugin` を実装
-- [ ] `CommandName`, `Description` を返す
-- [ ] （オプション）`GroupName` でグループ化
-- [ ] `MatrixPlotterPluginRegistry.LoadFromDirectory()` を App 起動時に呼ぶ
-
-### MxPlot.App プラグイン追加
-
-- [ ] `IMxPlotAppPlugin` を実装
-- [ ] `CommandName`, `Description` を返す
-- [ ] `MxPlotAppPluginRegistry.LoadFromDirectory()` を App 起動時に呼ぶ
+`LoadFromDirectory()` 自体はディレクトリを引数に取る汎用 API で、`plugins/` に固定されているわけでは
+ありません。MxPlot.App がその引数に `plugins/` を渡して起動時に呼んでいるだけなので、MxPlot.App を
+そのまま使う場合はこのフォルダに置くだけで自動検出されます（詳しくは 4.4 / 5.4 節）。

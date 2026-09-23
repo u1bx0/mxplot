@@ -8,7 +8,7 @@
 generic `VirtualFrames<T>` skeleton, the memory-mapped (MMF) backends built on it, and the
 decode-on-access (Lazy decode) backend for compressed TIFF.
 For how to consume Virtual data from a file format plugin, see the
-[Extension Development Guide](./BluePaper_MxPlot_Extensions_Guide.md) §3.4.*
+[Extension Development Guide](./MxPlot_Extensions_Guide.md) §3.4.*
 
 ---
 
