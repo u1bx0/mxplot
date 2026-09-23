@@ -51,7 +51,9 @@ with a focus on high throughput, physical coordinate integrity, and seamless UI 
 | ✏️ ROI & overlays | Line, Rectangle, Oval with live statistics |
 | 📊 Built-in profile plots | Arbitrary-angle line profiles with Gaussian/Lorentzian fit |
 | 🪟 Multi-window dashboard | Sync, tile, and link multiple datasets |
+| 🧩 Processing menu | Filter, Normalize, Log Transform, FFT, Resample, Transpose and more — apply once, or keep a result live-synced to its source |
 | ✂️ Crop / Substack | Extract Z-range or 3D volume regions |
+| 🔌 Extensible | File formats and tools via plugin DLL, custom LUTs/colormaps by dropping in a palette file |
 
 
 📦 **Pre-built binaries** (Windows x64 / macOS Apple Silicon) →
@@ -98,6 +100,16 @@ This repository hosts the **MxPlot ecosystem**, organized into the following lib
 At its heart, **MatrixData\<T\>** serves as the central engine, engineered to maximize data throughput.
 The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from the core to keep `MxPlot.Core` dependency-free, while still providing a rich, ready-to-use UI for immediate data exploration.
 
+## 🗿 Design Concepts and Philosophy
+**MxPlot** is designed not as a general-purpose math library, but as a backend for scientific visualization.
+- **A List of Frames**: Held internally as `IList<T[]>` — one flat 2D array per frame — enabling shared references and zero-copy, high-performance access.
+- **Stateful "Active Cursor"**: `MatrixData<T>` maintains an internal state as a property of `ActiveIndex`, enabling seamless binding to UI sliders without external state management.
+- **Structure over Algebra**: Focuses on high-performance memory management, slicing, and reshaping of multi-dimensional data. Complex linear algebra is left to dedicated libraries.
+- **Pixel-Centered Coordinates**: Physical scaling measured on pixel centers (i.e. pixel size (or step) = (x<sub>max</sub> - x<sub>min</sub>) / (num - 1)).
+- **Left-Bottom Origin**: Coordinate origin is at the left-bottom corner (Y increases upwards).
+- **Immutable Matrix Size**: Matrix dimensions are fixed after creation for performance.
+- **Reactive Cache Synchronization**: Statistics (min/max) are synchronized via shared list references across shallow copies, ensuring data integrity without redundant calculations.
+- **Transparent Virtual Access**: The frame-list design enables frames to live in RAM, on disk (MMF), or anywhere else — the API never changes.
 
 ## ✨ Features
 
@@ -123,9 +135,11 @@ The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from 
 - ✂️ **Substack / 3D Crop**: Extract a Z-range substack or crop a full 3D volume region — with sync-group support across linked windows
 - 💾 **File Session Management**: Unsaved-change tracking (`DirtyFlags`), close confirmation dialog, and `SaveAsAsync` / `DuplicateAsync` APIs for programmatic control
 - 🎨 **Composite Rendering**: Multi-channel display with per-channel color, contrast, gain and gamma — as commonly used in fluorescence microscopy. RGB color images open composited automatically, and can be converted back to grayscale. See the [Composite Rendering Guide](./docs/MatrixPlotter_Composite_Guide.md)
-- 🌈 **ColorCoded Rendering**: Live depth/time colour-coded projection — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection tinted by winning depth (or `Color (RGB-Max)`/`Color (RGB-Add)`, which tint every slice by its depth and blend them so structures at different depths show through), in a linked child window with a drag-to-narrow depth histogram, adjustable palette, and Fixed/Auto intensity range. The projected data itself stays real values, so filtering, converting, and saving it all work normally — only the display is colour-coded.
+- 🌈 **Color-Coded Rendering**: Live depth/time colour-coded projection in a linked child window, with a drag-to-narrow depth histogram and adjustable palette
 - 🎛️ **External Control**: Drive the displayed LUT and value range from host code through Facade properties (`plotter.Lut`, `plotter.RangeMode`, `plotter.FixedRange`) — see the [MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)
 - 📜 **Scripting (`MxPlotScriptHost`)**: Open MatrixPlotter windows from .NET 10 file-based apps (`dotnet run app.cs`), console tools, or notebook cells — no host application required. `Run(script)` starts the message loop, runs your script off the UI thread, and returns when every window it opened has closed. See [MatrixPlotter Usage Guide § Scripting with MxPlotScriptHost](./docs/MatrixPlotter_Usage_Guide.md)
+
+📖 For tutorials, pipeline examples, and every other guide, see the **[Documentation Index](./docs/README.md)** — start with the **[MatrixData Operations Guide](./docs/MatrixData_Operations_Guide.md)**.
 
 ## 📦 Installation
 
@@ -159,19 +173,7 @@ Then add project references to `MxPlot.Core.csproj` and `MxPlot.UI.Avalonia.cspr
 - .NET 10.0 or .NET 8.0
 - `MxPlot.UI.Avalonia` requires **Avalonia 11.3.x** (host projects must pin `Avalonia.Win32` / `Avalonia.Skia` to the same version)
 
-
-## 🗿 Design Concepts and Philosophy
-**MxPlot** is designed not as a general-purpose math library, but as a backend for scientific visualization.
-- **Stateful "Active Cursor"**: `MatrixData<T>` maintains an internal state as a property of `ActiveIndex`, enabling seamless binding to UI sliders without external state management.
-- **Structure over Algebra**: Focuses on high-performance memory management, slicing, and reshaping of multi-dimensional data. Complex linear algebra is left to dedicated libraries.
-- **Pixel-Centered Coordinates**: Physical scaling measured on pixel centers (i.e. pixel size (or step) = (x<sub>max</sub> - x<sub>min</sub>) / (num - 1)).
-- **Left-Bottom Origin**: Coordinate origin is at the left-bottom corner (Y increases upwards).
-- **Immutable Matrix Size**: Matrix dimensions are fixed after creation for performance.
-- **Backing IList<T[]>**: Uses `IList<T[]>` for frame storage, allowing both in-memory arrays and MMF-backed virtual frames behind a unified interface.
-- **Reactive Cache Synchronization**: Statistics (min/max) are synchronized via shared list references across shallow copies, ensuring data integrity without redundant calculations.
-- **Transparent Virtual Access**: Frames may live in RAM, on disk (MMF), or anywhere else — the API never changes.
-
-## 🚀 Quick Start
+## 📝 Some Examples
 
 ### Basic 2D Matrix
 
@@ -277,7 +279,7 @@ For **scripts, console tools, and notebook cells** — anything without a pre-ex
 
 ```csharp
 // app.cs — a .NET 10 file-based app (dotnet run app.cs)
-#:package MxPlot@0.4.0
+#:package MxPlot@0.5.0
 
 using MxPlot.Core;
 using MxPlot.UI.Avalonia;
@@ -294,244 +296,10 @@ MxPlotScriptHost.Run(() =>
 For advanced usage of `MatrixPlotter`, see the **[MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)**.
 
 
-## 🎯 Key Features
-
-### Multi-Axis Data Management
-
-MxPlot.Core's **DimensionStructure** enables flexible multi-axis data organization:
-
-```csharp
-// Example: Hyperspectral Time-series Imaging
-// Structure: [X, Y] × [Wavelength, Time, FOV]
-var scale = new Scale2D(1024, -50, 50, 1024, -50, 50); // µm
-var hyperData = new MatrixData<double>(scale,
-    new Axis(31, 400, 700, "Wavelength"), // 400-700 nm, 31 channels
-    Axis.Time(100, 0, 10, "s"),           // 10 seconds, 100 frames
-    new FovAxis(4, 2)                      // 4×2 tiled FOV array with 8 tiles
-);
-
-// Total frames: 31 × 100 × 8 = 24,800 frames
-Console.WriteLine($"Total: {hyperData.FrameCount} frames");
-
-// Navigate axes
-hyperData["Wavelength"].Index = 15; // 550nm
-hyperData["Time"].Index = 50;       // 5 seconds
-hyperData["FOV"].Index = 3;         // FOV tile [1,0]
-
-// Extract data along specific axis
-var timeSeriesAt550nm = hyperData.ExtractAlong("Time", 
-    fixedCoords: new[] { 15, 0, 0 }); // Wavelength=15, FOV=0
-
-// Get min/max across all time points at specific wavelength
-var (minVal, maxVal) = hyperData.GetValueRange("Time", 
-    fixedCoords: new[] { 15, 0, 0 });
-```
-
-### ⚙️ Element-wise Operations (The best way to process pixel data)
-
-The recommended way to initialize or set the 5D matrix data efficiently is to use array data (T[]) directly.
-
-```csharp
-//Define 5D matrix data with Channel, Z, Time axes
-var axes = new Axis[] { 
-    Axis.Channel(3), //ch value= 0 - 2
-    Axis.Z(11, -2, 2), 
-    Axis.Time(21, 0, 20) 
-};
-//Note: Axif.Channel, .Z, .Time, .Frame are built-in axis types.
-//          Otherwise use: new Axis(num, min, max, "name");
-
-var scale = Scale2D.Centered(201, 201, 4, 4); // -2 to 2 for both X and Y
-var md = new MatrixData<double>(scale, axes);
-
-// Function providing the pixel value at (x,y,c,z,t)
-double PixelValue(double x, double y, double c, double z, double t)
-{
-    //just example
-    return x * y * c * z * t;
-}
-
-//  ================================//
-// Set the value to each pixel at each frame
-md.ForEach((i, array) => //parallel option is true by default
-{
-    //Axis values at the frame index i are returned as the order of axes.
-    var (c, z, t) = md.Dimensions.GetAxisValuesStruct(i);
-    //Best way to calculate the xy position from the array index
-    for (int iy = 0; iy < scale.YCount; iy++)
-    {
-        double y = scale.YValue(iy); //physical position (md.YValue(iy) is also available.)
-        int offset = iy * scale.XCount; //to access the array index directly
-        for (int ix = 0; ix < scale.XCount; ix++)
-        {
-            double x = scale.XValue(ix); //physical position (md.XValue(ix) is also available.)
-            //Evaluation of the value at (x, y, c, z, t)
-            double val = PixelValue(x, y, c, z, t);
-            //Set the value to the pixel
-            array[offset + ix] = val;
-        }
-    }
-}); //After ForEach action, the min and max values at each frame are updated automatically.
-
-// =================================//
-// If you like more simplified expression,
-// (But this way may be a bit slower than the previous one.)
-Enumerable.Range(0, md.FrameCount).AsParallel().ForAll( i =>
-{
-    var (c, z, t) = md.Dimensions.GetAxisValuesStruct(i);
-    //Each point is iterated sequentially.
-    md.Set(i, (ix, iy, x, y) => PixelValue(x, y, c, z, t));
-});  
-```
-### 🔧 Primitive Arithmetic Operations
-
-```csharp
-// Background subtraction (common in microscopy)
-var signal = new MatrixData<double>(512, 512);
-var background = new MatrixData<double>(512, 512);
-var corrected = signal.Subtract(background);
-
-// Flat-field correction
-var flatField = new MatrixData<double>(512, 512);
-var normalized = signal.Divide(flatField);
-
-// Gain and offset correction
-var gainCorrected = signal.Multiply(1.5);         // Gain: ×1.5
-var offsetCorrected = signal.Add(-100);  // Offset: -100
-```
-
-### 📊 Complex Number Support
-
-```csharp
-using System.Numerics;
-
-var fftResult = new MatrixData<Complex>(256, 256);
-fftResult.Set((ix, iy, x, y) => new Complex(x, y));
-
-// Complex-specific statistics
-var (magMin, magMax) = fftResult.GetMinMaxValues(0, ComplexValueMode.Magnitude);
-var (phaseMin, phaseMax) = fftResult.GetMinMaxValues(0, ComplexValueMode.Phase);
-var (powerMin, powerMax) = fftResult.GetMinMaxValues(0, ComplexValueMode.Power);
-```
-
-### 💾 Unified File I/O (Core + Extensions)
-MxPlot handles multi-dimensional data with a flexible, format-agnostic API. By adding extensions, you can bridge MxPlot with professional scientific software.
-
-```csharp
-using MxPlot.Core;
-using MxPlot.Core.IO.Formats;
-using MxPlot.Extensions.Tiff;  // For OME-TIFF
-
-// --- Saving: Choose your format ---
-var matrix = new MatrixData<float>(
-        Scale2D.Centered(512,512,2,2), 
-        Axis.Channel(3), 
-        Axis.Time(10, 0, 1, "s")); // XY + 3 Channels + 10 Timepoints
-
-// Native format (fast, compact, supports virtual MMF loading)
-matrix.SaveAs("data.mxd", new MxBinaryFormat());
-
-// OME-TIFF (compatible with Fiji/ImageJ and bio-imaging software)
-matrix.SaveAs("result.ome.tif", new OmeTiffFormat());
-
-// --- Virtual loading: open a 15 GB file without loading it into RAM ---
-var format = new OmeTiffFormat { LoadingMode = LoadingMode.Virtual };
-var big = MatrixData<ushort>.Load("big_stack.ome.tif", format);
-// big.IsVirtual == true: frames are decoded from MMF only on access
-
-// --- Loading: Dynamic and type-safe ---
-IMatrixData data = MatrixDataSerializer.LoadDynamic("data.mxd");
-Console.WriteLine($"Dimensions: {data.Dimensions}"); // e.g., "512x512, C:3, T:10"
-
-if (data is MatrixData<float> floatData)
-{
-    float val = floatData.GetValueAt(0, 0);
-}
-```
-
-### 📐 Data Processing
-
-```csharp
-using MxPlot.Core;
-using MxPlot.Core.Processing;
-
-// === DimensionalOperator: Multi-dimensional data manipulation ===
-
-// Transpose (swap X and Y axes for all frames)
-var transposed = matrix.Transpose();
-
-// Crop by pixel coordinates
-var cropped = matrix.Crop(startX: 25, startY: 25, width: 50, height: 50);
-
-// Crop by physical coordinates
-var physicalCrop = matrix.CropByCoordinates(xMin: -5, xMax: 5, yMin: -5, yMax: 5);
-
-// Center crop
-var centered = matrix.CropCenter(width: 50, height: 50);
-
-// Slice at the specific indices (params of tuple: (axisName, index))
-var timeSlice = data.SliceAt(("Time", 10)); // 2D image from XYT
-
-// Extract data along specific axis (creates new MatrixData with a single axis)
-var zStackAtTime5 = data.ExtractAlong("Z", new[] { 0, 5 }); // Extract Z-stack (3D) at Time=5
-
-// Select a specific index along an axis (reduces dimension by 1)
-var snapShot = data.SelectBy("Z", 2); // Extract hyperstack at Z=2 (N-1D)
-
-// Map: Apply function to each pixel across all frames
-var normalized = matrix.Map<double, double>((value, x, y, frame) => value / 255.0);
-
-// Reduce: Aggregate across frame axis
-var averaged = timeSeries.Reduce((x, y, values) =>
-{
-    double sum = 0;
-    foreach (var v in values) sum += v;
-    return sum / values.Length;
-});
-
-// === VolumeAccessor: 3D volume operations and projections ===
-
-var volume = data.AsVolume("Z");
-
-// Create orthogonal projections
-var projMaxZ = volume.CreateProjection(ViewFrom.Z, ProjectionMode.Maximum); // MIP along Z
-var projMaxX = volume.CreateProjection(ViewFrom.X, ProjectionMode.Maximum); // YZ plane
-var projMaxY = volume.CreateProjection(ViewFrom.Y, ProjectionMode.Maximum); // XZ plane
-
-// Simultaneous XZ + YZ extraction in one memory pass (zero-allocation buffer reuse)
-var (xzPlane, yzPlane) = data.Apply(new SliceOrthogonalOperation(X: 128, Y: 128));
-
-// Restack volume for different viewing axes
-var restackedX = volume.Restack(ViewFrom.X);
-
-// Direct voxel access (no bounds checking for performance)
-double voxelValue = volume[x: 10, y: 20, z: 5];
-
-// === LineProfileExtractor: Extract intensity profiles along arbitrary lines ===
-
-var profile = matrix.Apply(new LineProfileOperation(
-    startX: 10.5, startY: 20.3,
-    endX: 80.7, endY: 90.2,
-    numPoints: 100)); // Bilinear interpolation included
-
-// === SpatialFilterOperation: Apply spatial filters ===
-
-// Median filter 3×3
-var medianFiltered = matrix.Apply(new SpatialFilterOperation(new MedianKernel(radius: 1)));
-
-// Gaussian filter (radius=2, sigma=1.5)
-var gaussFiltered = matrix.Apply(new SpatialFilterOperation(new GaussianKernel(radius: 2, sigma: 1.5)));
-```
-
-## 📖 More Detailed Information
-
-For detailed guides and technical references, see the **[Documentation Index](./docs/README.md)**.
-
-
 ## 📊 Version History
 
 **v0.5.0** (Lazy-decode Virtual backends, Processing command unification, FFT, Resample)
-- 🗂️ **Lazy-Decode Virtual Backends**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand — TIFFs beyond 32,767 frames now load, and a 4,000-frame LZW stack drops from 31.1 s to 0.23 s.
+- 🗂️ **Lazy-Decode Virtual Backends**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand — TIFFs beyond 32,767 frames now load, and large LZW-compressed stacks open dramatically faster than before.
 - 🧩 **Processing Commands**: Every one-shot Processing/Conversion menu operation shares one implementation, offering "This frame only" / "Sync source data" / "Replace data" consistently. Menu regrouped into Data / Scale / Processing / Info tabs.
 - 🌀 **FFT 2D (New)** and 📐 **Resample (New)**: Forward/inverse FFT and pixel-count resampling, both as ordinary menu commands with the same This-frame/Sync/Replace options.
 - 📊 **All-Mode Range Scan** and 🔬 **Cache Monitor**: Large-dataset value-range scans now run in the background with Cancel; a new flat-grid cache view.
@@ -549,29 +317,7 @@ For detailed guides and technical references, see the **[Documentation Index](./
 - 🐛 **Bug Fixes**: Composite→LUT→Composite value-range loss, ColorThemes red/blue swap, region rounding/orientation, custom LUT levels, and more.
 - ⚠️ **Breaking Changes**: `LookupTable`/`ColorThemes` moved to `MxPlot.UI.Avalonia.Rendering`; `IBitmapWriter` gained `ParallelPolicy`; plugin API renames. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
-**v0.3.0** (Composite workflow completion, ColorCoded rendering, live-link refactor, and stability/performance improvements)
-- 🌈 **ColorCoded Rendering (New)**: New live depth/time colour-coded projection mode — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection, in a linked child window.
-- 🎨 **Composite Rendering (Feature-complete)**: Promoted Composite mode from beta-level base to full workflow support with RGB auto-composite, grayscale conversion, and fallback dialog flow.
-- 🧩 **Composite + Extract Integration**: `Extract Frame` / `This Frame Only` now work consistently in Composite mode, including orthogonal views and full-channel extraction.
-- 🔗 **Linked View Refactor**: Replaced `LinkedSource` with a unified `LinkedView` follower model; live-derived windows now preserve their own display settings.
-- 🔌 **External Control API**: New Facade properties on `MatrixPlotter` (`Lut`, `IsInvertedColor`, `LutDepth`, `RangeMode`, `IsFixedRange`, `FixedRange`); direct `MainView` assignments now up-sync to the ViewModel and UI chrome. `RangeMode` also fixes a bug where switching the value range to All or ROI silently landed in Fixed.
-- 🖥️ **`MxPlotScriptHost`**: Drive `MatrixPlotter` from .NET 10 file-based apps, console tools, and notebook cells — `Run`/`Start` manage the Avalonia message loop so the script itself always runs off the UI thread, on Windows, macOS, and Linux.
-- ⚡ **Live Update Pipeline Optimization**: Reduced projection/live update overhead by avoiding full re-initialization and committing lightweight content updates.
-- 🎬 **MP4 Export**: New `Mp4Exporter` (H.264 via external `ffmpeg`) for macOS/QuickTime-compatible video export, alongside AVI — both now share a reusable `VideoExporterBase` for third-party video-format plugins.
-- 🧊 **Restack Context Menu**: `Restack along X/Y` on the orthogonal side views reconstructs the volume as a new stack viewed from another axis, opened in its own window — Virtual output writes one whole frame at a time from a RAM-bounded band instead of buffering the whole result in memory or scattering individual rows across the output file.
-- 🐛 **Sync and Stability Fixes**: Multiple fixes across Composite/Histogram sync, orthogonal cache/slice behavior, ROI copy orientation, and replace-data interactions.
-- ⚠️ **Breaking Changes**: `MatrixPlotter.LinkedSource` / `LinkedSourceExcludedAxes` and `MatrixPlotterViewModel.ActiveFrame` removed; `BitmapWriter` deprecated in favour of `LutBitmapWriter`. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
-
-**v0.2.0** (Export extensions, Complex type support, and UI/UX enhancements)
-- 🎬 **AVI Export**, 🔢 **Complex Type Support**, and 📊 **Histogram Analysis** (`HistogramPlotControl`).
-- ✂️ **Crop Sync Overhaul**, 💾 **Configuration Persistence**, and an early Composite Rendering core (`CompositeBitmapWriter`; UI followed in v0.3.0).
-
-**v0.1.x and earlier**
-- ✂️ **Crop / Substack Improvements**: Added hyperstack crop modes with ROI-aware behavior.
-- 💾 **Session and File Operations**: Introduced unsaved-change tracking and programmatic `SaveAsAsync` / `DuplicateAsync` operations.
-- 🔁 **Live Loop Usability**: Added `ResumeSettingsEnabled` to preserve view settings during continuous updates.
-
-See [CHANGELOG](./CHANGELOG.md) for full history.
+**v0.3.0 and earlier** — Composite workflow completion, ColorCoded rendering, the `LinkedView` follower model, `MxPlotScriptHost`, MP4 export, and more. See [CHANGELOG.md](./CHANGELOG.md) for the full history.
 
 ---
 > **⚠️ Note**

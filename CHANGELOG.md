@@ -2,7 +2,7 @@
 
 
 **v0.5.0** (Lazy-decode Virtual backends, unified Processing commands, FFT, and Resample)
-- 🗂️ **Lazy-Decode Virtual Backends (New)**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand (`TiffDecodedFrames<T>`), where memory mapping cannot work. TIFFs beyond 32,767 frames now load. A priority-queue preload scheduler with per-worker readers follows the cursor: 4,000 LZW frames (256×256) load fully in 0.23 s instead of 31.1 s.
+- 🗂️ **Lazy-Decode Virtual Backends (New)**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand (`TiffDecodedFrames<T>`), where memory mapping cannot work. TIFFs beyond 32,767 frames now load. A priority-queue preload scheduler with per-worker readers follows the cursor, filling a large LZW-compressed stack dramatically faster than before.
 - 🧱 **Virtual Frames Hierarchy**: `VirtualFrames<T>` is now a backend-neutral cache/eviction/prefetch skeleton, with the memory-mapped parts in `MmfFrames<T>`. `IsVirtual` is no longer MMF-only, so the status-bar "(Cached NN%)" badge and the dashboard's Virtual badge follow a Lazy backend as it fills. Repeat reads of the same frame no longer cause preload churn, and eviction now drops the true LRU frame.
 - 📊 **All-Mode Range Scan**: Choosing All now scans large datasets on a worker thread with progress and Cancel instead of blocking the window; a 🔄 button forces a full scan for MMF / still-filling Lazy data.
 - 🔬 **Cache Monitor**: New flat-grid view (one cell per frame, square-ish) alongside the axis-grouped view, plus a Wrap toggle.
