@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Helpers;
 using System;
 
@@ -43,6 +44,15 @@ namespace MxPlot.UI.Avalonia.Views
         protected readonly CheckBox? ThisFrameOnlyCheckBox;
 
         /// <summary>
+        /// The shared "Sync source data" checkbox, or <see langword="null"/> when the constructor's
+        /// <c>showSyncSource</c> was <see langword="false"/>. It is always shown, and enabled only
+        /// while <see cref="ThisFrameOnlyCheckBox"/> is checked (or absent, i.e. single-frame data).
+        /// Checking it clears and disables <see cref="ReplaceDataCheckBox"/>, since a live result
+        /// cannot also overwrite its source. Place it with <see cref="BuildFrameOptions"/>.
+        /// </summary>
+        protected readonly CheckBox? SyncSourceCheckBox;
+
+        /// <summary>
         /// The materialization warning banner (or <see langword="null"/> if <c>src</c> was never
         /// given). <see cref="FinalizeContent"/> inserts this automatically; subclasses that build
         /// their own fully custom layout instead of calling it can place this control themselves.
@@ -78,6 +88,11 @@ namespace MxPlot.UI.Avalonia.Views
         /// Whether this dialog offers "Replace data" at all. Some operations (e.g. Spatial Filter,
         /// which instead offers a live "Sync source data" mode) never replace in place.
         /// </param>
+        /// <param name="showSyncSource">
+        /// Whether this dialog offers "Sync source data" (<see cref="SyncSourceCheckBox"/>). Only
+        /// for operations whose caller can keep the result live; the checkbox itself does nothing
+        /// without that.
+        /// </param>
         protected ProcessingDialogBase(
             string title,
             double width = 280,
@@ -85,7 +100,8 @@ namespace MxPlot.UI.Avalonia.Views
             bool canResize = true,
             IMatrixData? src = null,
             bool? thisFrameOnlyDefault = null,
-            bool showReplaceData = true)
+            bool showReplaceData = true,
+            bool showSyncSource = false)
         {
             Title = title;
             Width = width;
@@ -113,6 +129,33 @@ namespace MxPlot.UI.Avalonia.Views
                 ThisFrameOnlyCheckBox.IsCheckedChanged += (_, _) => UpdateMaterializationWarning();
             }
 
+            if (showSyncSource)
+            {
+                string hint = "Keep the result live: re-apply when the source's active frame changes or its data is refreshed";
+                if (ThisFrameOnlyCheckBox != null)
+                    hint += ". Available when \"This frame only\" is checked";
+                SyncSourceCheckBox = ControlFactory.MakeCheckBox("Sync source data", hint: hint);
+                ToolTip.SetShowOnDisabled(SyncSourceCheckBox, true);
+
+                var sync = SyncSourceCheckBox;
+                void UpdateSyncAvailability()
+                {
+                    bool available = ThisFrameOnlyCheckBox == null || ThisFrameOnlyCheckBox.IsChecked == true;
+                    sync.IsEnabled = available;
+                    if (!available) sync.IsChecked = false;
+                }
+                UpdateSyncAvailability();
+                if (ThisFrameOnlyCheckBox != null)
+                    ThisFrameOnlyCheckBox.IsCheckedChanged += (_, _) => UpdateSyncAvailability();
+
+                // A live result cannot also replace its source; a link window can never re-enable Replace.
+                sync.IsCheckedChanged += (_, _) =>
+                {
+                    if (sync.IsChecked == true) ReplaceDataCheckBox.IsChecked = false;
+                    ReplaceDataCheckBox.IsEnabled = !isLinkWindow && sync.IsChecked != true;
+                };
+            }
+
             if (src != null)
             {
                 _materializationWarningText = new TextBlock
@@ -134,6 +177,44 @@ namespace MxPlot.UI.Avalonia.Views
                 UpdateMaterializationWarning();
             }
         }
+
+        /// <summary>
+        /// Builds the "This frame only" / "Sync source data" pair (whichever of the two exist) as one
+        /// block with a fixed spacing, for the subclass to place in its content. Returns
+        /// <see langword="null"/> when neither exists.
+        /// </summary>
+        /// <param name="indent">Left indent of the block.</param>
+        protected Control? BuildFrameOptions(double indent = 0)
+        {
+            if (ThisFrameOnlyCheckBox == null && SyncSourceCheckBox == null) return null;
+
+            // The negative bottom margins trim the checkboxes' own padding; the top margin on the
+            // second one sets the gap between the two.
+            var block = new StackPanel { Margin = new Thickness(indent, 4, 0, 0) };
+            if (ThisFrameOnlyCheckBox != null)
+            {
+                ThisFrameOnlyCheckBox.Margin = new Thickness(0, 0, 0, -7);
+                block.Children.Add(ThisFrameOnlyCheckBox);
+            }
+            if (SyncSourceCheckBox != null)
+            {
+                SyncSourceCheckBox.Margin = new Thickness(0, ThisFrameOnlyCheckBox != null ? 5 : 0, 0, -7);
+                block.Children.Add(SyncSourceCheckBox);
+            }
+            return block;
+        }
+
+        /// <summary>
+        /// The checkboxes as the user left them, for the dialog's OK handler. A checkbox the dialog does not
+        /// offer reads as <see langword="false"/>.
+        /// </summary>
+        protected RunChoices ReadChoices() => new(
+            ThisFrameOnly: ThisFrameOnlyCheckBox?.IsChecked == true,
+            SyncSource: SyncSourceCheckBox?.IsChecked == true,
+            ReplaceData: _showReplaceData && ReplaceDataCheckBox.IsChecked == true);
+
+        /// <summary>The dialog's result: <paramref name="parameters"/> together with <see cref="ReadChoices"/>.</summary>
+        protected DialogAnswer<T> Answer<T>(T parameters) => new(parameters, ReadChoices());
 
         /// <summary>
         /// Shows/hides and updates the text of the materialization warning banner: visible

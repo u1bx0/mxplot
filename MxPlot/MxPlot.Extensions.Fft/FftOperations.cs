@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Threading;
 using System.Text;
 
 namespace MxPlot.Extensions.Fft
@@ -18,8 +19,6 @@ namespace MxPlot.Extensions.Fft
     /// stored in a separate matrix.</param>
     /// <param name="DstIndex">The index in the destination matrix where the result will be stored. A value of -1 indicates that the result
     /// will be appended to the destination matrix.</param>
-    /// <param name="SkipRefreshValueRange">Indicates whether to skip refreshing the value range of the destination matrix after the operation. The default
-    /// is false.</param>
     public record Fft2DOperation
         (ShiftOption Option,
             int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1) : IMatrixDataOperation
@@ -41,8 +40,6 @@ namespace MxPlot.Extensions.Fft
     /// stored in a separate matrix.</param>
     /// <param name="DstIndex">The index in the destination matrix where the result will be stored. The default value is -1, which indicates
     /// that the result will be stored starting from the beginning.</param>
-    /// <param name="SkipRefreshValueRange">Indicates whether to skip refreshing the value range of the destination matrix after the operation. The default
-    /// value is false.</param>
     public record InverseFft2DOperation
     (ShiftOption Option,
             int SrcIndex = -1, MatrixData<Complex>? Dst = null, int DstIndex = -1)
@@ -51,6 +48,35 @@ namespace MxPlot.Extensions.Fft
         public IMatrixData Execute<T>(MatrixData<T> data) where T : unmanaged
         {
             return data.InverseFft2D(Option, SrcIndex, Dst, DstIndex);
+        }
+    }
+
+    /// <summary>
+    /// Runs a 2D FFT (or inverse FFT) on every frame of an <see cref="IMatrixData"/>, used as a
+    /// non-generic operation. The result is a <c>MatrixData&lt;Complex&gt;</c> with the same frame
+    /// count. For a single frame, see <see cref="Fft2DOperation"/> and <see cref="InverseFft2DOperation"/>.
+    /// </summary>
+    /// <param name="Option">Where the DC component is placed, see <see cref="ShiftOption"/>.</param>
+    /// <param name="Inverse"><c>true</c> for the inverse transform, <c>false</c> for the forward transform.</param>
+    /// <param name="Progress">
+    /// Optional progress reporter; reports a negative total once, then <c>0 .. total-1</c> as frames complete.
+    /// </param>
+    /// <param name="CancellationToken">
+    /// Checked between frames: a frame that has started is transformed to the end, and the operation then
+    /// throws <see cref="OperationCanceledException"/>.
+    /// </param>
+    public record Fft2DAllFramesOperation(
+        ShiftOption Option,
+        bool Inverse = false,
+        IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default) : IMatrixDataOperation
+    {
+        /// <inheritdoc/>
+        public IMatrixData Execute<T>(MatrixData<T> data) where T : unmanaged
+        {
+            return Inverse
+                ? data.InverseFft2DAllFrames(Option, progress: Progress, cancellationToken: CancellationToken)
+                : data.Fft2DAllFrames(Option, progress: Progress, cancellationToken: CancellationToken);
         }
     }
 

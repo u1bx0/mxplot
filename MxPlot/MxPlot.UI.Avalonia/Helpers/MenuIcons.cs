@@ -56,6 +56,14 @@ namespace MxPlot.UI.Avalonia.Helpers
         // Original - no upstream match
         internal static readonly StreamGeometry ConvertType = StreamGeometry.Parse(
             "M 3,15 H 9 V 9 H 15 V 4 L 21,10 L 15,16 V 11 H 11 V 17 H 3 Z");
+
+        // MDI "briefcase" (verbatim)
+        internal static readonly StreamGeometry Briefcase = StreamGeometry.Parse(
+            "M10,2H14A2,2 0 0,1 16,4V6H20A2,2 0 0,1 22,8V19A2,2 0 0,1 20,21H4C2.89,21 2,20.1 2,19V8C2,6.89 2.89,6 4,6H8V4C8,2.89 8.89,2 10,2M14,6V4H10V6H14Z");
+
+        // MDI "view-grid-outline" (verbatim)
+        internal static readonly StreamGeometry ViewGrid = StreamGeometry.Parse(
+            "M3 11H11V3H3M5 5H9V9H5M13 21H21V13H13M15 15H19V19H15M3 21H11V13H3M5 15H9V19H5M13 3V11H21V3M19 9H15V5H19Z");
         // ── Actions ───────────────────────────────────────────────────────────
 
         // MDI "refresh" (verbatim)
@@ -65,14 +73,6 @@ namespace MxPlot.UI.Avalonia.Helpers
         // MDI "information" (verbatim)
         internal static readonly StreamGeometry Info = StreamGeometry.Parse(
             "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z");
-
-        // MDI "close" (verbatim)
-        internal static readonly StreamGeometry Close = StreamGeometry.Parse(
-            "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z");
-
-        // MDI "flash" (verbatim)
-        internal static readonly StreamGeometry Lightning = StreamGeometry.Parse(
-            "M7,2V13H10V22L17,10H13L17,2H7Z");
 
         /// <summary>Cube with a plus badge at the top-right corner — "create new data" action.
         /// Cube body from Material Design Icons "cube" (Apache 2.0), plus badge hand-crafted. 24×24 coordinate space.</summary>
@@ -123,6 +123,10 @@ namespace MxPlot.UI.Avalonia.Helpers
         // MDI "card-text-outline" (verbatim)
         internal static readonly StreamGeometry Metadata = StreamGeometry.Parse(
             "M20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20M4,6V18H20V6H4M6,9H18V11H6V9M6,13H16V15H6V13Z");
+
+        // MDI "database-outline" (verbatim)
+        internal static readonly StreamGeometry Database = StreamGeometry.Parse(
+            "M12 3C7.58 3 4 4.79 4 7V17C4 19.21 7.59 21 12 21S20 19.21 20 17V7C20 4.79 16.42 3 12 3M18 17C18 17.5 15.87 19 12 19S6 17.5 6 17V14.77C7.61 15.55 9.72 16 12 16S16.39 15.55 18 14.77V17M18 12.45C16.7 13.4 14.42 14 12 14C9.58 14 7.3 13.4 6 12.45V9.64C7.47 10.47 9.61 11 12 11C14.39 11 16.53 10.47 18 9.64V12.45M12 9C8.13 9 6 7.5 6 7S8.13 5 12 5C15.87 5 18 6.5 18 7S15.87 9 12 9Z");
 
         // Original - no upstream match
         internal static readonly StreamGeometry Processing = StreamGeometry.Parse(
@@ -278,10 +282,10 @@ namespace MxPlot.UI.Avalonia.Helpers
             [Paste] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400
             [Duplicate] = new SolidColorBrush(Color.Parse("#4DB6AC")),  // Teal 300
             [ConvertType] = new SolidColorBrush(Color.Parse("#7E57C2")),  // Deep Purple 400
+            [Briefcase] = new SolidColorBrush(Color.Parse("#A1887F")),  // Brown 300
+            [ViewGrid] = new SolidColorBrush(Color.Parse("#9575CD")),  // Deep Purple 300 -- same family as ConvertType
             [Refresh] = new SolidColorBrush(Color.Parse("#9CCC65")),  // Light Green 400
             [Info] = new SolidColorBrush(Color.Parse("#29B6F6")),  // Light Blue 400
-            [Close] = new SolidColorBrush(Color.Parse("#EF5350")),  // Red 400
-            [Lightning] = new SolidColorBrush(Color.Parse("#FFCA28")),  // Amber 400
             [Ruler] = new SolidColorBrush(Color.Parse("#AB47BC")),  // Purple 400
             [Palette] = new SolidColorBrush(Color.Parse("#EC407A")),  // Pink 400
             [Magnify] = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
@@ -290,6 +294,7 @@ namespace MxPlot.UI.Avalonia.Helpers
             [FindMinMax] = new SolidColorBrush(Color.FromRgb(180, 60, 60)),
             [Cube] = new SolidColorBrush(Color.Parse("#4FC3F7")),  // Light Blue 300
             [Metadata] = new SolidColorBrush(Color.Parse("#26C6DA")),  // Cyan 400
+            [Database] = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
             [Processing] = new SolidColorBrush(Color.Parse("#8D6E63")),  // Brown 400
             [Gear] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400 -- conventional neutral "settings" tone
             [AutoFix] = new SolidColorBrush(Color.Parse("#CE93D8")),  // Purple 200

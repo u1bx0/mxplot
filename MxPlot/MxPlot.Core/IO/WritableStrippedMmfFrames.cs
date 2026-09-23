@@ -19,7 +19,7 @@ namespace MxPlot.Core.IO
     /// are flushed to disk, ensuring data integrity. Thread safety is maintained for cache and dirty frame management.
     /// </remarks>
     /// <typeparam name="T">The type of the elements in the frames. Must be an unmanaged type.</typeparam>
-    public class WritableVirtualStrippedFrames<T> : VirtualStrippedFrames<T>, IWritableFrameProvider<T> where T : unmanaged
+    public class WritableStrippedMmfFrames<T> : StrippedMmfFrames<T>, IWritableFrameProvider<T> where T : unmanaged
     {
         // Manages indices of dirty (modified) frames
         private readonly HashSet<int> _dirtyIndices = new HashSet<int>();
@@ -32,7 +32,7 @@ namespace MxPlot.Core.IO
         /// </summary>
         private volatile bool _hasPendingWrites;
 
-        public WritableVirtualStrippedFrames(string filePath,
+        public WritableStrippedMmfFrames(string filePath,
             int w, int h, long[][] offsets, long[][] bytesCounts, bool isYFlipped, bool isTemporary)
             // Writable frames are only ever used for MxPlot's own output (temp vessels, clones,
             // direct .mxd/OME-TIFF writes) -- never for reading a pre-existing external file --
@@ -95,6 +95,7 @@ namespace MxPlot.Core.IO
                 _hasPendingWrites = true;
                 // Per-eviction flush is skipped for cost reasons — handled collectively by Flush()
             }
+            base.OnFrameEvicted(frameIndex, frameData); // raises FrameEvicted once the data is safely on disk
         }
 
         /// <summary>
@@ -156,12 +157,16 @@ namespace MxPlot.Core.IO
                     $"Array length mismatch: expected {_width * _height} ({_width}×{_height}), got {data.Length}.",
                     nameof(data));
 
-            // Evict cached copy (if any) so subsequent GetArray reads fresh MMF data.
+            // Discard pending edits first so the eviction below does not write them back over the
+            // data about to be written; then drop the cached copy (if any) so subsequent GetArray
+            // reads fresh MMF data. RemoveFromCache keeps the LRU list in step with the cache --
+            // removing from _cache alone used to leave a stale LRU entry that a later eviction would
+            // pick and fail on with KeyNotFoundException.
             lock (_cacheLock)
             {
-                _cache.Remove(frameIndex);
                 _dirtyIndices.Remove(frameIndex);
             }
+            RemoveFromCache(frameIndex);
 
             WriteBackToDisk(frameIndex, data);
             _hasPendingWrites = true;
@@ -210,13 +215,13 @@ namespace MxPlot.Core.IO
         public void SaveAs(string newPath, Action<string>? beforeRemount = null, IProgress<int>? progress = null)
         {
             if (IsDisposed) 
-                throw new ObjectDisposedException(nameof(WritableVirtualStrippedFrames<T>));
+                throw new ObjectDisposedException(nameof(WritableStrippedMmfFrames<T>));
 
             lock (_cacheLock)
             {
                 progress?.Report(-this.Count); // Report start of SaveAs operation
 
-                string currentPath = Path.GetFullPath(this.FilePath);
+                string currentPath = Path.GetFullPath(this.SourcePath);
                 string targetPath = Path.GetFullPath(newPath);
 
                 // 1. If the path is exactly the same, flush and optionally run the hook for in-place finalization.
@@ -257,14 +262,14 @@ namespace MxPlot.Core.IO
                     {
                         // Fast path: Same volume, OS-level move (O(1) time)
                         File.Move(currentPath, targetPath, overwrite: true);
-                        this.FilePath = targetPath;
+                        this.SourcePath = targetPath;
                         this.IsTemporary = false;
                     }
                     else
                     {
                         // Slow path: Cross-volume, physical bit-by-bit copy
                         File.Copy(currentPath, targetPath, overwrite: true);
-                        this.FilePath = targetPath;
+                        this.SourcePath = targetPath;
                         this.IsTemporary = false;
                         // Delete old temp file after copying to ensure we don't lose data if the copy fails
                         if (wasTemporary)
@@ -388,18 +393,18 @@ namespace MxPlot.Core.IO
                 base.Dispose();
 
                 // 2. Once the locks are released, perform cleanup for temporary files.
-                if (IsTemporary && !string.IsNullOrEmpty(FilePath) && File.Exists(FilePath))
+                if (IsTemporary && !string.IsNullOrEmpty(SourcePath) && File.Exists(SourcePath))
                 {
                     try
                     {
-                        File.Delete(FilePath);
-                        Debug.WriteLine($"[WritableVirtualFrameList] Successfully deleted temporary file: {FilePath}");
+                        File.Delete(SourcePath);
+                        Debug.WriteLine($"[WritableVirtualFrameList] Successfully deleted temporary file: {SourcePath}");
                     }
                     catch (Exception ex)
                     {
                         // Swallow the exception to prevent the application from crashing during disposal,
                         // but log the failure for debugging purposes.
-                        Debug.WriteLine($"[WritableVirtualFrameList] Error: Failed to delete temporary file '{FilePath}': {ex.Message}");
+                        Debug.WriteLine($"[WritableVirtualFrameList] Error: Failed to delete temporary file '{SourcePath}': {ex.Message}");
                     }
                 }
             }

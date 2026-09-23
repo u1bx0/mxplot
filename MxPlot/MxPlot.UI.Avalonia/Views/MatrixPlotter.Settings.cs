@@ -24,7 +24,7 @@ namespace MxPlot.UI.Avalonia.Views
         private const string KeyVrMin = "mxplot.vr.min";
         private const string KeyVrMax = "mxplot.vr.max";
         private const string KeyAxesIndices = "mxplot.axes.indices";
-        private const string KeyOverlays = "mxplot.overlays";
+        private const string KeyOverlays = OverlaySerializer.MetadataKey;
         private const string KeyOrthoScaleModePrefix = "mxplot.ortho.";
         private const string KeyOrthoScaleModeSuffix = ".scaleMode";
         private const string KeyOrthoCustomRatioSuffix = ".custom";
@@ -43,8 +43,7 @@ namespace MxPlot.UI.Avalonia.Views
         // mxplot.composite.{i}.max
         // mxplot.composite.{i}.gain
         // mxplot.composite.{i}.gamma
-        // Which axis is composited -- Composite is no longer restricted to one named "Channel"
-        // (see Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.7).
+        // Which axis is composited -- Composite is no longer restricted to one named "Channel".
         private const string KeyCompositeAxis = "mxplot.composite.axis";
         private const string KeyCompositeBlend = "mxplot.composite.blend";
         private const string KeyCompositePrefix = "mxplot.composite.";

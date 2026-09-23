@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Central registry for discoverable file format handlers.

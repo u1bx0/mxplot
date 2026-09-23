@@ -192,6 +192,10 @@ namespace MxPlot.UI.Avalonia.Controls
         // Minimum) even when this is true -- ColorCoded is an orthogonal "also colour it" flag,
         // not a separate mode value (see ColorCoded_View_InitialDesign.md section 3.3.3).
         private bool _xyColorCoded;
+        // Color (RGB-Max)/(RGB-Add)/(RGB-Avg): every slice colored by depth, then combined by this mode, instead of
+        // Color(Max)/(Min)'s single winning slice. Only meaningful while _xyColorCoded is true; the
+        // scan parameters below (Start/End/LUT/range/Invert) are shared with the winner modes.
+        private Rendering.ColorCodedBlend? _xyColorCodedBlendMode;   // null = winner-take-all (Color(Max)/(Min))
         // Start/End sweep range for the ColorCoded scan. Reset to the full axis whenever XY
         // ColorCoded is freshly (re-)enabled; from then on driven by the projection child
         // window's own details panel via SetColorCodedParams (design doc section 3.3.2).
@@ -637,6 +641,7 @@ namespace MxPlot.UI.Avalonia.Controls
             bool hadXYProjection = _xyProjectionMode != null;
             _xyProjectionMode  = null;
             _xyColorCoded      = false;
+            _xyColorCodedBlendMode = null;
             _xyProjectionCache = null;
             _data     = null;
             _axisName = string.Empty;
@@ -1325,13 +1330,20 @@ namespace MxPlot.UI.Avalonia.Controls
                     _cacheEpoch++;
                     break;
                 case ProjectionPlane.XY:
+                    bool wasColorCoded = _xyColorCoded;
                     _xyProjectionMode  = e.IsEnabled ? e.Mode : null;
                     _xyColorCoded      = e.IsEnabled && _panel.ProjectionSelector.IsColorCoded(ProjectionPlane.XY);
+                    _xyColorCodedBlendMode = e.IsEnabled ? _panel.ProjectionSelector.GetColorCodedBlend(ProjectionPlane.XY) : null;
                     _xyProjectionCache = null;
                     _cacheEpoch++;
                     if (e.IsEnabled)
                     {
-                        if (_xyColorCoded)
+                        // Only when entering ColorCoded from a plain mode (or from off). Switching
+                        // between the Color modes (RGB-Max/RGB-Add/Max/Min) keeps the scan parameters: the child
+                        // window's details panel is not re-seeded on such a switch, so resetting
+                        // here would leave its Start/End/LUT boxes showing values the scan no
+                        // longer uses.
+                        if (_xyColorCoded && !wasColorCoded)
                         {
                             // Reset to defaults on every fresh enable: full axis range, default
                             // (Spectrum) depth palette, Auto intensity range, no invert. The child
@@ -1403,6 +1415,7 @@ namespace MxPlot.UI.Avalonia.Controls
             // it gets its own unconditional check rather than trusting the UI never to reach here
             // with both set. Falls back to a plain projection instead of colouring.
             bool colorCoded = _xyColorCoded && !compositeActive;
+            var colorCodedBlendMode = _xyColorCodedBlendMode;
             int colorCodedStart = _xyColorCodedStart;
             int colorCodedEnd = _xyColorCodedEnd;
             var colorCodedDepthLut = _xyColorCodedDepthLut;
@@ -1475,8 +1488,19 @@ namespace MxPlot.UI.Avalonia.Controls
                             // Riding along with the ExtremumIndexOperation scan that already produced
                             // WinnerIndex means no extra pass is needed later, just a hand-off.
                             int[] hist = winnerIndex.CreateHistogram(0, scannedAxis.Count, 0, scannedAxis.Count);
+                            // Color (RGB-Max)/(RGB-Add)/(RGB-Avg): a second sweep over [Start, End], this time coloring
+                            // every slice and blending R/G/B independently. It has to follow the
+                            // extremum scan above, since Auto range takes its ValueMin/Max from
+                            // winnerValue -- and the value range is applied per voxel here, so a
+                            // range/palette/Invert change re-runs it (unlike Color(Max)'s render-time
+                            // range). The winner scan is kept: the window's own data is that
+                            // Maximum projection, and the histogram / read-out use WinnerIndex.
+                            int[]? blended = colorCodedBlendMode is { } blendMode
+                                ? ColorCodedRgbBlender.Blend(data, axisName, colorCodedStart, colorCodedEnd,
+                                    valueMin, valueMax, depthColors, blendMode).GetArray(0)
+                                : null;
                             resultRenderInfo = new ColorCodedRenderInfo(
-                                winnerIndex, colorCodedStart, depthColors, valueMin, valueMax, scannedAxis, hist);
+                                winnerIndex, colorCodedStart, depthColors, valueMin, valueMax, scannedAxis, hist, blended);
                         }
                     }
                     else
@@ -1538,6 +1562,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _xyProjectionMode  = null;
             _xyColorCoded      = false;
+            _xyColorCodedBlendMode = null;
             _xyProjectionCache = null;
             _cacheEpoch++;
         }

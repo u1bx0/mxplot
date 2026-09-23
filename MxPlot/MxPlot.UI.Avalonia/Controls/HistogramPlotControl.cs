@@ -36,7 +36,7 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Rendering ─────────────────────────────────────────────────────────
         private IBrush[]? _cachedLutBrushes;
         private readonly IBrush _grayoutBrush = new SolidColorBrush(Color.FromArgb(100, 128, 128, 128));
-        private readonly Pen _redBoundaryPen = new Pen(Brushes.Red, 2.0);
+        private Pen _boundaryPen = new Pen(Brushes.Red, 2.0);
 
         // ── Drag ──────────────────────────────────────────────────────────────
         private enum DragTarget { None, ViewMin, ViewMax }
@@ -88,6 +88,30 @@ namespace MxPlot.UI.Avalonia.Controls
             set => SetValue(LogViewEnabledProperty, value);
         }
 
+        /// <summary>
+        /// Color of the two boundary lines marking [ViewMin, ViewMax]. Defaults to red (the ordinary
+        /// value-range/LUT reading). Callers that reuse this control for something other than a value
+        /// range -- e.g. MatrixPlotter.ColorCoded's depth histogram, where the boundary lines mark the
+        /// frame range used for color coding -- should pick a different color here so the two readings
+        /// aren't visually confused with each other.
+        /// </summary>
+        public IBrush BoundaryBrush
+        {
+            get => _boundaryPen.Brush!;
+            set { _boundaryPen = new Pen(value, _boundaryPen.Thickness); InvalidateVisual(); }
+        }
+
+        /// <summary>
+        /// Optional text prepended to the tooltip, for callers that reuse this control for something
+        /// other than a value range (see <see cref="BoundaryBrush"/>).
+        /// </summary>
+        public string? Description
+        {
+            get => _description;
+            set { _description = value; UpdateTooltip(); }
+        }
+        private string? _description;
+
         protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
         {
             base.OnPropertyChanged(change);
@@ -115,9 +139,10 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             string mode = _logViewEnabled ? "Log" : "Linear";
             string next = _logViewEnabled ? "Linear" : "Log";
-            ToolTip.SetTip(this,
+            string baseText =
                 $"Y: {mode}  |  Right-click to switch to {next}\n" +
-                "Double-click to fit view");
+                "Double-click to fit view";
+            ToolTip.SetTip(this, string.IsNullOrEmpty(_description) ? baseText : $"{_description}\n{baseText}");
         }
 
         public HistogramPlotControl()
@@ -317,13 +342,13 @@ namespace MxPlot.UI.Avalonia.Controls
             // Draw lines even when ViewMin == ViewMax (single position) to maintain visibility.
             if (pixelViewMax >= pixelViewMin)
             {
-                double half = _redBoundaryPen.Thickness / 2.0;
+                double half = _boundaryPen.Thickness / 2.0;
                 double lineMin = Math.Clamp(pixelViewMin, half, width - half);
                 double lineMax = Math.Clamp(pixelViewMax, half, width - half);
-                context.DrawLine(_redBoundaryPen, new Point(lineMin, 0), new Point(lineMin, height));
+                context.DrawLine(_boundaryPen, new Point(lineMin, 0), new Point(lineMin, height));
                 // Only draw the second line if positions differ (avoids overdraw when overlapping)
                 if (Math.Abs(lineMax - lineMin) > 0.5)
-                    context.DrawLine(_redBoundaryPen, new Point(lineMax, 0), new Point(lineMax, height));
+                    context.DrawLine(_boundaryPen, new Point(lineMax, 0), new Point(lineMax, height));
             }
 
             // PASS 4: HUD badge (top-right, temporary, shared slot for zoom and scale mode)
@@ -576,7 +601,7 @@ namespace MxPlot.UI.Avalonia.Controls
             double pxMax = (_viewMax - _plotMin) / plotRange * w;
 
             // Apply same clamp as used in Render for red line drawing
-            double half = _redBoundaryPen.Thickness / 2.0;
+            double half = _boundaryPen.Thickness / 2.0;
             pxMin = Math.Clamp(pxMin, half, w - half);
             pxMax = Math.Clamp(pxMax, half, w - half);
 

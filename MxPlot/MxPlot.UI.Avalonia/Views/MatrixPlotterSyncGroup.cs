@@ -1,4 +1,4 @@
-﻿using MxPlot.UI.Avalonia.Actions;
+﻿using MxPlot.UI.Avalonia.Tools;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Rendering;
 using System;
@@ -238,7 +238,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             // If the closing plotter had an active Sync Crop, cancel all remaining members
             // to avoid orphaned Leader/Follower ROI panels in the surviving windows.
-            bool closedHadCrop = closed.HasActiveCropAction;
+            bool closedHadCrop = closed.HasActiveCropTool;
             Unsubscribe(closed);
             _snapshots.Remove(closed);
             _plotters.Remove(closed);

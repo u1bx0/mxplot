@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
@@ -18,21 +19,18 @@ namespace MxPlot.UI.Avalonia.Views
     ///   <item><b>Extract Along</b> — extracts a 1-D slice along the chosen axis at the current indices of all other axes (<see cref="MxPlot.Core.Processing.ExtractAlongOperation"/>).</item>
     ///   <item><b>Extract At</b> — fixes the chosen axis at its current index and returns the remaining hyperstack dimensions (<see cref="MxPlot.Core.Processing.SelectByOperation"/>).</item>
     /// </list>
-    /// Returns <see cref="ExtractDimensionParameters"/> on OK, or <c>null</c> on cancel.
+    /// Returns the <see cref="ExtractDimensionParameters"/> and the dialog's checkboxes on OK, or <c>null</c> on cancel.
     /// </summary>
     internal sealed class ExtractDimensionDialog : ProcessingDialogBase
     {
         internal enum ExtractMode { Along, At }
 
-        internal sealed record ExtractDimensionParameters(
-            ExtractMode Mode,
-            string AxisName,
-            bool ReplaceData);
+        internal sealed record ExtractDimensionParameters(ExtractMode Mode, string AxisName);
 
-        internal static Task<ExtractDimensionParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false)
+        internal static Task<DialogAnswer<ExtractDimensionParameters>?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false)
         {
             var dlg = new ExtractDimensionDialog(axes, isLinkWindow);
-            return dlg.ShowDialog<ExtractDimensionParameters?>(owner);
+            return dlg.ShowDialog<DialogAnswer<ExtractDimensionParameters>?>(owner);
         }
 
         private ExtractDimensionDialog(IReadOnlyList<Axis> axes, bool isLinkWindow) : base("Extract...", width: 300, isLinkWindow: isLinkWindow)
@@ -122,8 +120,7 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 var mode = modeCombo.SelectedIndex == 0 ? ExtractMode.Along : ExtractMode.At;
                 string axisName = axisCombo.SelectedItem as string ?? axes[0].Name;
-                bool replace = ReplaceDataCheckBox.IsChecked == true;
-                Close(new ExtractDimensionParameters(mode, axisName, replace));
+                Close(Answer(new ExtractDimensionParameters(mode, axisName)));
             });
         }
     }

@@ -18,7 +18,7 @@ namespace MxPlot.UI.Avalonia.Plugins
     /// <list type="number">
     ///   <item>Read <see cref="IRenderHost.Data"/>, <see cref="IRenderHost.CurrentRenderSize"/>,
     ///         and <see cref="IRenderHost.IsOverlayVisible"/> to populate a settings dialog.</item>
-    ///   <item>Show the settings dialog using <paramref name="parent"/>. Return early if cancelled.</item>
+    ///   <item>Show the settings dialog using the <c>parent</c> window. Return early if cancelled.</item>
     ///   <item>Loop over frames, calling <see cref="IRenderHost.RenderFrameAsync"/> from
     ///         a background task, reporting progress and honouring the cancellation token.</item>
     /// </list>

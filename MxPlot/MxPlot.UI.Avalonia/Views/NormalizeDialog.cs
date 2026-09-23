@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using System.Threading.Tasks;
@@ -11,32 +12,27 @@ namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
     /// Modal dialog for configuring a Normalize operation.
-    /// Returns a <see cref="NormalizeParameters"/> record on OK, or <c>null</c> on cancel.
+    /// Returns the <see cref="NormalizeParameters"/> and the dialog's checkboxes on OK, or <c>null</c> on cancel.
     /// </summary>
     internal sealed class NormalizeDialog : ProcessingDialogBase
     {
         /// <summary>Parameters collected from the dialog.</summary>
-        internal sealed record NormalizeParameters(
-            double Target,
-            NormalizeScope Scope,
-            bool ThisFrameOnly,
-            bool ReplaceData);
-
-        private NormalizeParameters? _result;
+        internal sealed record NormalizeParameters(double Target, NormalizeScope Scope);
 
         // ── Factory ───────────────────────────────────────────────────────────
 
-        internal static Task<NormalizeParameters?> ShowAsync(
+        internal static Task<DialogAnswer<NormalizeParameters>?> ShowAsync(
             Window owner, bool isMultiFrame, IMatrixData? src, bool isLinkWindow = false)
         {
             var dlg = new NormalizeDialog(isMultiFrame, src, isLinkWindow);
-            return dlg.ShowDialog<NormalizeParameters?>(owner);
+            return dlg.ShowDialog<DialogAnswer<NormalizeParameters>?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
         private NormalizeDialog(bool isMultiFrame, IMatrixData? src, bool isLinkWindow)
-            : base("Normalize", isLinkWindow: isLinkWindow, src: src, thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null)
+            : base("Normalize", isLinkWindow: isLinkWindow, src: src, thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null,
+                   showSyncSource: true)
         {
             bool isVirtual = src?.IsVirtual == true;
             // ── "Normalize to:" row ───────────────────────────────────────────
@@ -124,17 +120,15 @@ namespace MxPlot.UI.Avalonia.Views
             var main = new StackPanel { Spacing = 2 };
             main.Children.Add(targetRow);
             main.Children.Add(scopePanel);
-            if (ThisFrameOnlyCheckBox != null)
-                main.Children.Add(ThisFrameOnlyCheckBox);
+            var frameOptions = BuildFrameOptions();
+            if (frameOptions != null)
+                main.Children.Add(frameOptions);
 
             FinalizeContent(main, onOk: () =>
             {
-                _result = new NormalizeParameters(
+                Close(Answer(new NormalizeParameters(
                     Target: (double)(targetNud.Value ?? 100m),
-                    Scope: globalRadio.IsChecked == true ? NormalizeScope.Global : NormalizeScope.PerFrame,
-                    ThisFrameOnly: ThisFrameOnlyCheckBox?.IsChecked == true,
-                    ReplaceData: ReplaceDataCheckBox.IsChecked == true);
-                Close(_result);
+                    Scope: globalRadio.IsChecked == true ? NormalizeScope.Global : NormalizeScope.PerFrame)));
             }, okLabel: "Apply");
         }
     }

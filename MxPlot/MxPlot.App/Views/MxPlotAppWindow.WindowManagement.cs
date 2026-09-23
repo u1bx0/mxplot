@@ -3,6 +3,8 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
 using MxPlot.App.ViewModels;
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 
@@ -64,6 +66,66 @@ namespace MxPlot.App.Views
             }
         }
 
+        // ── Reordering the window list ────────────────────────────────────
+
+        /// <summary>
+        /// Slides the list's rows whenever their order changes. Created on first use, since the list
+        /// it animates is resolved during window construction.
+        /// </summary>
+        private ListReorderAnimator? _listReorder;
+
+        /// <summary>
+        /// Applies a reordering of the window list: slides the rows to their new places and keeps
+        /// the selection on the same items.
+        /// </summary>
+        /// <remarks>
+        /// The selection has to be restored explicitly because a ListBox selects by position, not by
+        /// item: after <c>ObservableCollection.Move</c> the selection is left sitting on whatever now
+        /// occupies the old index, so a moved row comes out of a reorder unselected even though its
+        /// window is still the active one.
+        /// </remarks>
+        internal void ReorderList(Action reorder)
+        {
+            var selected = _windowList.SelectedItems?.Cast<object>().ToList() ?? [];
+            (_listReorder ??= new ListReorderAnimator(_windowList)).Run(reorder);
+            RestoreListSelection(selected);
+        }
+
+        private void RestoreListSelection(List<object> wanted)
+        {
+            if (_windowList.SelectedItems is not { } current) return;
+
+            bool unchanged = current.Count == wanted.Count;
+            if (unchanged)
+            {
+                foreach (var item in wanted)
+                {
+                    if (current.Contains(item)) continue;
+                    unchanged = false;
+                    break;
+                }
+            }
+            if (unchanged) return;
+
+            // The SelectionChanged handler is suppressed for the repair itself: it re-activates the
+            // single selected window and nudges it clear of the dashboard, which is not something
+            // reordering a list should do.
+            _processingSelectionChange = true;
+            try
+            {
+                current.Clear();
+                foreach (var item in wanted) current.Add(item);
+            }
+            finally
+            {
+                _processingSelectionChange = false;
+            }
+
+            foreach (var item in ViewModel.ManagedWindows)
+                item.IsSelected = wanted.Contains(item);
+            ViewModel.RefreshSelectionState();
+        }
+
         // ── Window list context menu ──────────────────────────────────────
 
         /// <summary>
@@ -108,7 +170,7 @@ namespace MxPlot.App.Views
             {
                 bool ascending = ViewModel.NextSortIsAscending(clicked);
                 var sortItem = new MenuItem { Header = $"Sort by Name {(ascending ? "↑" : "↓")}" };
-                sortItem.Click += (_, _) => ViewModel.SortSiblingsByName(clicked);
+                sortItem.Click += (_, _) => ReorderList(() => ViewModel.SortSiblingsByName(clicked));
                 menu.Items.Add(sortItem);
                 menu.Items.Add(new Separator());
             }

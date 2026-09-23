@@ -12,7 +12,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 
-namespace MxPlot.UI.Avalonia.Actions
+namespace MxPlot.UI.Avalonia.Tools
 {
     internal enum CropRole { Leader, Follower }
 
@@ -44,9 +44,9 @@ namespace MxPlot.UI.Avalonia.Actions
     /// <c>XY.Y / XY.Height</c> ↔ <c>ZY.X / ZY.Width</c> (shared Y range)<br/>
     /// <c>XZ.Y / XZ.Height</c> ↔ <c>ZY.Y / ZY.Height</c> (shared Z/depth range)<br/>
     /// </remarks>
-    public sealed class CropAction : IPlotterAction
+    public sealed class CropTool : IPlotterTool
     {
-        private PlotterActionContext? _ctx;
+        private PlotterToolContext? _ctx;
         private RoiObject? _xyRoi;
         private RoiObject? _xzRoi;   // BottomView: X horizontal, Z vertical
         private RoiObject? _zyRoi;   // RightView data space: Y horizontal, Z vertical
@@ -176,16 +176,16 @@ namespace MxPlot.UI.Avalonia.Actions
 
         // ── Constructor ───────────────────────────────────────────────────────
 
-        public CropAction() { }
+        public CropTool() { }
 
-        internal CropAction(CropRole role)
+        internal CropTool(CropRole role)
         {
             _role = role;
         }
 
-        // ── IPlotterAction ────────────────────────────────────────────────────
+        // ── IPlotterTool ────────────────────────────────────────────────────
 
-        public void Invoke(PlotterActionContext ctx)
+        public void Invoke(PlotterToolContext ctx)
         {
             _ctx = ctx;
 
@@ -288,10 +288,10 @@ namespace MxPlot.UI.Avalonia.Actions
         /// the stored logical Z range.
         /// </para>
         /// </remarks>
-        public void NotifyContextChanged(PlotterActionContext newContext)
+        public void NotifyContextChanged(PlotterToolContext newContext)
         {
-            Debug.WriteLine($"[CropAction] NotifyContextChanged, depth={newContext.DepthAxisName}");
-            Debug.WriteLine($"[CropAction] _followerZStart - ZCount = {_followerZStart} - {_followerZCount}");
+            Debug.WriteLine($"[CropTool] NotifyContextChanged, depth={newContext.DepthAxisName}");
+            Debug.WriteLine($"[CropTool] _followerZStart - ZCount = {_followerZStart} - {_followerZCount}");
 
             if (_disposed || _xyRoi == null) return;
             var oldCtx = _ctx;

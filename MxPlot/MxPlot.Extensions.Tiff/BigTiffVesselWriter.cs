@@ -26,7 +26,7 @@ namespace MxPlot.Extensions.Tiff
     /// [OME-XML bytes (null-terminated)]
     /// </code>
     /// The pixel data regions are left as zero-filled sparse space; they will be written by
-    /// <see cref="MxPlot.Core.IO.WritableVirtualStrippedFrames{T}"/> via MMF.
+    /// <see cref="MxPlot.Core.IO.WritableStrippedMmfFrames{T}"/> via MMF.
     /// </para>
     /// </summary>
     internal static class BigTiffVesselWriter
@@ -54,7 +54,7 @@ namespace MxPlot.Extensions.Tiff
         /// <summary>
         /// Creates the BigTIFF vessel file and returns per-frame strip offset and
         /// byte-count arrays ready for use with
-        /// <see cref="MxPlot.Core.IO.WritableVirtualStrippedFrames{T}"/>.
+        /// <see cref="MxPlot.Core.IO.WritableStrippedMmfFrames{T}"/>.
         /// </summary>
         /// <param name="filePath">Destination file path.</param>
         /// <param name="width">Frame width in pixels.</param>

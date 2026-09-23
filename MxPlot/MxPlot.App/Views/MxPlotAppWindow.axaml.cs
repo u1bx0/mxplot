@@ -68,6 +68,11 @@ namespace MxPlot.App.Views
     ///         <description>List display mode (Details/Icons), card size step resource updates,
     ///                      and view-mode control initialization (toggle buttons, slider, wheel zoom).</description>
     ///   </item>
+    ///   <item><term>MxPlotAppWindow.ListDrag.cs</term>
+    ///         <description>Wires drag-to-reorder for the window list. The gesture itself lives in
+    ///                      <see cref="ListDragReorder"/>; this file supplies the dashboard's hierarchy,
+    ///                      layout mode and drop handler, and cancels the drag on Escape.</description>
+    ///   </item>
     ///   <item><term>MxPlotAppWindow.WindowManagement.cs</term>
     ///         <description>Window focus synchronization, dynamic context menu generation for rename/show/hide/close,
     ///                      and selection cleanup before tile/sync operations.</description>
@@ -330,6 +335,9 @@ namespace MxPlot.App.Views
 
             // ── View mode toggle buttons ──────────────────────────────────
             InitializeViewModeControls();
+
+            // ── Drag-to-reorder within the window list ────────────────────
+            InitializeListDrag();
 
             // Tile: after the command runs, deselect hidden items so only visible windows remain selected.
             // Dispatcher.UIThread.Post ensures this runs after TileWindowsCommand.Execute() completes.

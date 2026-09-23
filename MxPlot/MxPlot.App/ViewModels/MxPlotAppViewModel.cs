@@ -4,7 +4,6 @@ using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MxPlot.Core;
-using MxPlot.Core.IO;
 using MxPlot.UI.Avalonia;
 using MxPlot.UI.Avalonia.Views;
 using MxPlot.UI.Avalonia.Rendering;
@@ -19,6 +18,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MxPlot.App.Views;
+using MxPlot.Core.IO.Formats;
 
 namespace MxPlot.App.ViewModels
 {
@@ -352,12 +352,26 @@ namespace MxPlot.App.ViewModels
                 ? siblings.OrderBy(s => s.FileName, StringComparer.OrdinalIgnoreCase).ToList()
                 : siblings.OrderByDescending(s => s.FileName, StringComparer.OrdinalIgnoreCase).ToList();
 
-            // Reposition each sibling's whole block (itself + descendants) into the new order,
-            // starting right after the parent (or at index 0 for the root level).
-            // Uses ObservableCollection.Move (not Remove+Insert): Move raises a single "Move"
-            // change, not "Remove"+"Add", so it does not trip the CollectionChanged handler above
-            // that unsubscribes Window.Closed on Remove — a Remove+Insert pair here would silently
-            // detach that handler from every moved window, leaving it stuck in the list on close.
+            ApplySiblingOrder(parent, ordered);
+        }
+
+        /// <summary>
+        /// Rearranges <see cref="ManagedWindows"/> so that <paramref name="ordered"/> — one complete
+        /// sibling group in its new order — occupies consecutive positions starting right after
+        /// <paramref name="parent"/>, or at index 0 for the root-level group. Each sibling is
+        /// repositioned as a whole block together with its own descendant subtree, so linked (child)
+        /// windows always stay directly after their parent. <c>ChildItems</c> is kept in step with
+        /// the new order.
+        /// </summary>
+        /// <remarks>
+        /// Uses <see cref="ObservableCollection{T}.Move"/>, never Remove+Insert: Move raises a single
+        /// "Move" change rather than "Remove"+"Add", so it does not trip the CollectionChanged handler
+        /// in the constructor that unsubscribes <c>Window.Closed</c> on Remove. A Remove+Insert pair
+        /// here would silently detach that handler from every moved window, leaving it stuck in the
+        /// list when it is closed.
+        /// </remarks>
+        private void ApplySiblingOrder(WindowListItemViewModel? parent, List<WindowListItemViewModel> ordered)
+        {
             int insertAt = parent is not null ? ManagedWindows.IndexOf(parent) + 1 : 0;
             foreach (var sib in ordered)
             {
@@ -383,6 +397,44 @@ namespace MxPlot.App.ViewModels
                 parent.ChildItems.Clear();
                 parent.ChildItems.AddRange(ordered);
             }
+        }
+
+        /// <summary>
+        /// The sibling group <paramref name="item"/> belongs to, in the order the list displays it:
+        /// every item sharing its <see cref="WindowListItemViewModel.ParentItem"/>, or all root-level
+        /// windows when it has none. Read from <see cref="ManagedWindows"/> rather than from
+        /// <c>ChildItems</c> so the order always matches what is on screen.
+        /// </summary>
+        internal List<WindowListItemViewModel> GetVisualSiblings(WindowListItemViewModel item) =>
+            ManagedWindows.Where(m => m.ParentItem == item.ParentItem).ToList();
+
+        /// <summary>
+        /// Moves <paramref name="item"/>, together with its descendant subtree, into
+        /// <paramref name="slot"/> of its own sibling group. <paramref name="slot"/> is a gap index
+        /// counted with the item still in place: <c>0</c> is before the first sibling and
+        /// <c>Count</c> is after the last, so the gaps immediately before and after the item itself
+        /// both leave the order unchanged.
+        /// </summary>
+        /// <remarks>
+        /// Reordering is confined to a single sibling group, matching <see cref="SortSiblingsByName"/>:
+        /// an item can never be moved into another parent's children, which keeps every child directly
+        /// below its own parent.
+        /// </remarks>
+        /// <returns><see langword="true"/> when the order actually changed.</returns>
+        internal bool MoveSiblingToSlot(WindowListItemViewModel item, int slot)
+        {
+            var siblings = GetVisualSiblings(item);
+            int from = siblings.IndexOf(item);
+            if (from < 0) return false;
+
+            slot = Math.Clamp(slot, 0, siblings.Count);
+            if (slot == from || slot == from + 1) return false;
+
+            int to = slot > from ? slot - 1 : slot; // index once the item has been lifted out
+            siblings.RemoveAt(from);
+            siblings.Insert(to, item);
+            ApplySiblingOrder(item.ParentItem, siblings);
+            return true;
         }
 
         /// <summary>

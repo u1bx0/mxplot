@@ -107,8 +107,8 @@ namespace MxPlot.Core.Arithmetic
         /// Useful for gain correction and unit conversion.
         /// </summary>
         /// <typeparam name="T">The numeric type (must implement INumberBase&lt;T&gt;).</typeparam>
-        /// <param name="source">The source matrix.</param>
-        /// <param name="scalar">The scalar multiplier.</param>
+        /// <param name="data">The source matrix.</param>
+        /// <param name="scaleFactor">The scalar multiplier.</param>
         /// <returns>A new MatrixData with all elements multiplied by the scalar.</returns>
         public static MatrixData<T> Multiply<T>(this MatrixData<T> data, double scaleFactor) 
             where T : unmanaged, INumberBase<T>

@@ -1,6 +1,7 @@
 ﻿using BitMiracle.LibTiff.Classic;
 using MxPlot.Core;
 using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -143,28 +144,32 @@ namespace MxPlot.Extensions.Tiff
 
 
         /// <summary>
+        /// Returns true when <paramref name="path"/> ends in a canonical OME-TIFF extension
+        /// (<c>.ome.tif</c> or <c>.ome.tiff</c>), ignoring case.
+        /// </summary>
+        private static bool IsOmeTiffPath(string path)
+            => path.EndsWith(".ome.tif", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".ome.tiff", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
         /// Writes the specified matrix data to a file.
         /// </summary>
         /// <typeparam name="T">The unmanaged value type of the matrix elements.</typeparam>
         /// <param name="filePath">The destination path where the matrix data will be saved.</param>
         /// <param name="data">The <see cref="MatrixData{T}"/> instance containing the data to write.</param>
         /// <param name="accessor">
-        /// An accessor that safely provides the underlying backing store. The writer uses this to query 
-        /// for compatible virtual frames (e.g., <see cref="WritableVirtualStrippedFrames{T}"/>) 
+        /// An accessor that safely provides the underlying backing store. The writer uses this to query
+        /// for compatible virtual frames (e.g., <see cref="WritableStrippedMmfFrames{T}"/>)
         /// to execute highly optimized, zero-copy file moves.
         /// </param>
-        private static bool IsOmeTiffPath(string path)
-            => path.EndsWith(".ome.tif", StringComparison.OrdinalIgnoreCase)
-            || path.EndsWith(".ome.tiff", StringComparison.OrdinalIgnoreCase);
-
         public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {
             // Normalize short alias: .ome → .ome.tif (canonical OME-TIFF extension)
             if (filePath.EndsWith(".ome", StringComparison.OrdinalIgnoreCase) && !IsOmeTiffPath(filePath))
                 filePath += ".tif";
 
-            if (accessor.TryGet<WritableVirtualStrippedFrames<T>>(out var wvsf)
-                && IsOmeTiffPath(wvsf!.FilePath))
+            if (accessor.TryGet<WritableStrippedMmfFrames<T>>(out var wvsf)
+                && IsOmeTiffPath(wvsf!.SourcePath))
             {
                 // Fast path: backing file is already a valid OME-TIFF layout.
                 // OS-level move without re-encoding.
@@ -199,11 +204,21 @@ namespace MxPlot.Extensions.Tiff
             public OmeTiffVirtualBuilder(HyperstackMetadata spec) => _spec = spec;
 
             /// <summary>
-            /// 
+            /// Creates a writable, memory-mapped <see cref="MatrixData{T}"/> whose file already holds the
+            /// OME-TIFF structure (header, IFDs and pixel space) described by the builder's specification,
+            /// uncompressed so that frames can be accessed directly.
             /// </summary>
-            /// <typeparam name="T"></typeparam>
-            /// <param name="path"></param>
-            /// <returns></returns>
+            /// <typeparam name="T">The unmanaged value type of the matrix elements.</typeparam>
+            /// <param name="filePath">
+            /// The file to create, which must end in <c>.ome.tif</c> or <c>.ome.tiff</c>; the caller then
+            /// manages its lifetime. When <see langword="null"/> or blank, a temporary file is created
+            /// instead, which is deleted when the returned data is disposed unless it has been saved
+            /// or retained by then.
+            /// </param>
+            /// <returns>The new dataset, with the specification's scale and axes applied.</returns>
+            /// <exception cref="ArgumentException">
+            /// <paramref name="filePath"/> was given but does not end in an OME-TIFF extension.
+            /// </exception>
             public MatrixData<T> CreateWritable<T>(string? filePath) where T : unmanaged
             {
                 bool isTemporary = false;
@@ -234,11 +249,11 @@ namespace MxPlot.Extensions.Tiff
                 // No skeleton write, no re-read; offsets are returned directly from the builder.
                 var (offsets, byteCounts) = handler.BuildVesselFast(filePath, _spec);
 
-                // Open as WritableVirtualStrippedFrames (MMF, read-write)
+                // Open as WritableStrippedMmfFrames (MMF, read-write)
                 // isYFlipped=true: TIFF stores top-to-bottom, MatrixData uses bottom-left origin
                 // isTemporary: when the filePath is explicitly provided by the user, we assume they will manage the file lifecycle; 
                 // when we generate a temp path, we take responsibility for cleanup.
-                var wvsf = new WritableVirtualStrippedFrames<T>(
+                var wvsf = new WritableStrippedMmfFrames<T>(
                     filePath, _spec.Width, _spec.Height, offsets, byteCounts, isYFlipped: true, isTemporary: isTemporary);
 
                 // Wrap in MatrixData and apply scale / axis from spec

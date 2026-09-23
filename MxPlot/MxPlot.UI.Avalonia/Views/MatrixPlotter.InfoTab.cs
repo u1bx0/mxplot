@@ -500,37 +500,49 @@ namespace MxPlot.UI.Avalonia.Views
                 DeactivateOrthogonalViewIfShowing(axis);
                 ReplaceAxis(data, axis, new Axis(axis.Count, axis.Min, axis.Max, fovName, axis.Unit, false));
                 RefreshInfoTab();
-                SetScaleDirty(true);
+                SetScaleDirty(!ScaleMatchesSnapshot());
                 return;
             }
 
-            bool isColorAxis = axis is TaggedAxis;
+            // The checkbox is the axis's own IsIndexBased. Whether an axis is Composite-capable
+            // (tagged) is not decided here: a plain axis is promoted to a ColorAxis automatically
+            // the first time it is composited (PromoteToColorAxisIfNeeded).
+            bool isTagged = axis is TaggedAxis;
+            bool currentlyIndexBased = axis.IsIndexBased;
             bool isActiveCompositeAxis = _isCompositeMode && _compositeAxisDimIndex >= 0
                 && _compositeAxisDimIndex < data.Dimensions.AxisCount
                 && ReferenceEquals(data.Dimensions[_compositeAxisDimIndex], axis);
 
             var dlg = new AxisRenameDialog(
                 axis.Name,
-                isIndexBased: isColorAxis,
+                isIndexBased: currentlyIndexBased,
                 indexToggleEnabled: !isActiveCompositeAxis,
                 indexLockedReason: isActiveCompositeAxis
                     ? "Currently used by Composite mode (Index-based is required)."
-                    : null);
+                    : null,
+                axisKindText: DescribeAxisKind(axis));
             await dlg.ShowDialog(this);
             if (dlg.Result == null) return;
 
             string newName = dlg.Result.Trim();
-            bool wantsIndexBased = dlg.IsIndexBased ?? isColorAxis;
+            bool wantsIndexBased = dlg.IsIndexBased ?? currentlyIndexBased;
             if (string.IsNullOrEmpty(newName)) return;
-            if (newName == axis.Name && wantsIndexBased == isColorAxis) return;
+            if (newName == axis.Name && wantsIndexBased == currentlyIndexBased) return;
 
             if (await IsDuplicateAxisNameAsync(data, axis, newName)) return;
 
             DeactivateOrthogonalViewIfShowing(axis);
 
-            if (wantsIndexBased == isColorAxis)
+            if (isTagged && !wantsIndexBased)
             {
-                // No type change - a plain rename in place, no DefineDimensions/tracker rebuild needed.
+                // Tagged axes are always index-based, so unchecking one is a conversion to a plain
+                // axis: tags/colors are discarded (the dialog warned), Scale becomes editable.
+                ReplaceAxis(data, axis, new Axis(axis.Count, axis.Min, axis.Max, newName, axis.Unit, false));
+            }
+            else
+            {
+                // Rename and/or IsIndexBased flip in place - no DefineDimensions/tracker rebuild,
+                // so Composite and the other trackers are left alone.
                 string oldName = axis.Name;
                 axis.Name = newName; // AxisTracker updates its label automatically via Axis.NameChanged
                 if (_axisTrackers.TryGetValue(oldName, out var tracker))
@@ -538,24 +550,29 @@ namespace MxPlot.UI.Avalonia.Views
                     _axisTrackers.Remove(oldName);
                     _axisTrackers[axis.Name] = tracker;
                 }
-            }
-            else if (wantsIndexBased)
-            {
-                // Promote: plain -> Composite-compatible TaggedAxis, tags seeded the same way
-                // PromoteToColorAxisIfNeeded does for an implicit promotion on entering Composite.
-                string prefix = DefaultCompositeTagPrefix(newName);
-                var tags = Enumerable.Range(0, axis.Count).Select(i => $"{prefix}{i}").ToArray();
-                ReplaceAxis(data, axis, new ColorAxis(tags) { Unit = axis.Unit, Name = newName });
-            }
-            else
-            {
-                // Demote: discard tags/colors, falling back to a plain Scale-editable axis.
-                ReplaceAxis(data, axis, new Axis(axis.Count, axis.Min, axis.Max, newName, axis.Unit, false));
+                if (!isTagged && axis.IsIndexBased != wantsIndexBased)
+                    axis.IsIndexBased = wantsIndexBased;
             }
 
             RefreshInfoTab();
-            SetScaleDirty(true);
+            // Not a blanket "dirty": a conversion-only change (ColorAxis -> plain) was rebaselined in
+            // ReplaceAxis and leaves nothing for Revert to undo.
+            SetScaleDirty(!ScaleMatchesSnapshot());
         }
+
+        /// <summary>
+        /// One-line description of what a specialized axis carries beyond a plain axis, for the
+        /// rename dialog; <c>null</c> for a plain axis. Lists only what is actually present, so the
+        /// user sees what converting the axis to a plain one would discard.
+        /// </summary>
+        private static string? DescribeAxisKind(Axis axis) => axis switch
+        {
+            ColorAxis ca => "Color axis: tags"
+                + (ca.HasAssignedColors ? ", colors" : "")
+                + (ca.HasWavelengths ? ", wavelengths" : ""),
+            TaggedAxis => "Tagged axis: per-index tags",
+            _ => null,
+        };
 
         /// <summary>True (with a "name already exists" dialog shown) when <paramref name="newName"/> collides with "x", "y", or another axis.</summary>
         private async Task<bool> IsDuplicateAxisNameAsync(IMatrixData data, Axis axis, string newName)
@@ -590,6 +607,42 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>Swaps <paramref name="axis"/> for <paramref name="replacement"/> in <paramref name="data"/>'s dimensions and rebuilds the tracker panel/menu around it.</summary>
         private void ReplaceAxis(IMatrixData data, Axis axis, Axis replacement)
         {
+            // RebuildTrackerPanel drops Composite (ResetCompositeUiState), which is right for a data
+            // swap but not when the axis being replaced isn't the one being composited (e.g. the
+            // Frame axis of a Channel x Frame stack) - carry Composite across in that case. If the
+            // composited axis itself is being replaced, Composite has nothing left to blend, so it
+            // stays dropped.
+            CompositeCubeState? composite = null;
+            string? compositeAxisName = null;
+            if (_isCompositeMode && _compositeAxisDimIndex >= 0
+                && _compositeAxisDimIndex < data.Dimensions.AxisCount)
+            {
+                var compositeAxis = data.Dimensions[_compositeAxisDimIndex];
+                if (!ReferenceEquals(compositeAxis, axis))
+                {
+                    composite = CaptureCompositeCubeState();
+                    compositeAxisName = compositeAxis.Name;
+                }
+            }
+
+            // Revert Scale can put back Min/Max/Unit/Name/IsIndexBased and tag names on the axis it is
+            // looking at, but it cannot turn a plain axis back into the ColorAxis/FOV axis that was
+            // replaced here. Rebaseline just that axis's snapshot entry to the replacement's kind, so
+            // the conversion itself is not offered for revert (the dialog already warned that it
+            // discards the extra data) while its name/scale/unit values still are: they stay as
+            // they were on the outgoing axis.
+            int replacedIdx = data.Axes.ToList().FindIndex(a => ReferenceEquals(a, axis));
+            if (_scaleSnapshot is { } snap && replacedIdx >= 0 && replacedIdx < snap.Axes.Length)
+            {
+                var axesSnap = (AxisSnapshot[])snap.Axes.Clone();
+                axesSnap[replacedIdx] = axesSnap[replacedIdx] with
+                {
+                    Tags = replacement is TaggedAxis tagged ? tagged.Tags.ToArray() : null,
+                    IsIndexBased = replacement.IsIndexBased,
+                };
+                _scaleSnapshot = snap with { Axes = axesSnap };
+            }
+
             int savedIdx = axis.Index;
             var newAxes = data.Axes
                 .Select(a => ReferenceEquals(a, axis) ? replacement : a)
@@ -597,6 +650,8 @@ namespace MxPlot.UI.Avalonia.Views
             data.DefineDimensions(newAxes);
             replacement.Index = savedIdx;
             RebuildTrackerPanel(data);
+            if (composite.HasValue && compositeAxisName != null)
+                ReenterCompositeMode(composite.Value, compositeAxisName);
             InvalidateMenuPanel();
         }
 
@@ -879,7 +934,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             tabControl.Items.Add(new TabItem
             {
-                Header = TabHdr("Metadata", MenuIcons.Metadata),
+                Header = TabHdr("Info", MenuIcons.Metadata),
                 Padding = new Thickness(0),
                 Content = metaGrid,
             });

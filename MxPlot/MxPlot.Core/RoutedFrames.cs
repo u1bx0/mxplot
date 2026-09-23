@@ -33,7 +33,7 @@ namespace MxPlot.Core
         {
             get
             {
-                //indexはRoutedFramesのzero-based index、GetMappedIndexでframeListのindexに変換してからアクセスする
+                // index is a zero-based RoutedFrames index; convert it to the frameList index via GetMappedIndex before accessing.
                 return _frameList[GetMappedIndex(index)];
             }
             set
@@ -43,9 +43,11 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Gets whether the underlying frame list is virtual (i.e., it implements IVirtualFrameList).
+        /// Gets whether the underlying frame list currently does not hold every frame resident in
+        /// memory -- forwards to <see cref="ILazyDataSource.IsVirtual"/>, or <see langword="false"/>
+        /// for a plain in-memory list.
         /// </summary>
-        public bool IsVirtual => _frameList is IVirtualFrameList;
+        public bool IsVirtual => _frameList is ILazyDataSource lazy && lazy.IsVirtual;
 
         public int Count => _mappedIndex.Count;
 
@@ -70,7 +72,7 @@ namespace MxPlot.Core
             {
                 return provider.GetWritableArray(GetMappedIndex(index));
             }
-            // 親が特殊なプロバイダでなければ、そのまま配列の参照を返す
+            // e.g. InMemory frame list
             return _frameList[GetMappedIndex(index)];
         }
 
@@ -103,18 +105,17 @@ namespace MxPlot.Core
 
         public void CopyTo(T[][] array, int arrayIndex)
         {
-            //arrayIndexはコピー先の配列のインデックス、
-            //つまり、array[arrayIndex]からCount個分の要素をコピーする
+            // arrayIndex is the index in the destination array,
+            // so copy Count elements starting at array[arrayIndex].
             //
             if (array == null) throw new ArgumentNullException(nameof(array));
             if (arrayIndex < 0) throw new ArgumentOutOfRangeException(nameof(arrayIndex));
             if (array.Length - arrayIndex < Count) throw new ArgumentException("array.Length is less than arrayIndex + Count");
 
-            // 自分の要素を、指定されたインデックスから順番に詰め込むだけ
+            // Pack this collection's elements sequentially from the specified index.
             for (int i = 0; i < Count; i++)
             {
-                // ここで this[i] を呼ぶので、インデックスのルーティングや
-                // キャッシュからの読み出しは今まで通り完璧に機能します！
+                // Calling this[i] keeps index routing and cache reads working as expected.
                 array[arrayIndex + i] = this[i];
             }
         }
@@ -123,15 +124,22 @@ namespace MxPlot.Core
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 
 
+        /// <summary>
+        /// Returns the first index whose frame key (<see cref="GetKey"/>) is <paramref name="item"/>
+        /// by reference, or -1 -- the same key-based contract as the underlying Virtual frame lists.
+        /// </summary>
+        /// <remarks>
+        /// Compares keys, not frame data: for an in-memory list the key is the frame array itself, so
+        /// the result is unchanged, but over a Virtual list the key is a dummy array. Comparing it
+        /// against <c>this[i]</c> used to read (decode/copy) every frame through the underlying
+        /// list and could never match.
+        /// </remarks>
         public int IndexOf(T[] item)
         {
             for (int i = 0; i < Count; i++)
             {
-                // 参照の比較（配列のポインタが同じか）
-                if (EqualityComparer<T[]>.Default.Equals(this[i], item))
-                {
+                if (ReferenceEquals(GetKey(i), item))
                     return i;
-                }
             }
             return -1;
         }
@@ -144,11 +152,11 @@ namespace MxPlot.Core
         public void RemoveAt(int index) => throw new NotSupportedException();
 
         /// <summary>
-        /// Gets the underlying frame list if it implements IVirtualFrameList; otherwise, returns null.
-        /// This method is intended for internal use in diagnostic tools that need to access virtual list features directly.
+        /// Gets the underlying frame list if it implements <see cref="ICacheableFrameList"/>;
+        /// otherwise, returns null. One accessor for every on-demand backend -- see
+        /// <see cref="IMatrixData.GetDiagnosticCacheableList"/>'s own remarks.
         /// </summary>
-        /// <returns></returns>
-        internal IVirtualFrameList? GetUnderlyingVirtualList() => _frameList as IVirtualFrameList;
+        internal ICacheableFrameList? GetUnderlyingCacheableList() => _frameList as ICacheableFrameList;
     }
 
 }

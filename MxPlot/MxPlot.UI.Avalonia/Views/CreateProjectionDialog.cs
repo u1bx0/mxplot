@@ -21,10 +21,9 @@ namespace MxPlot.UI.Avalonia.Views
     /// </list>
     /// The projection mode (Maximum/Minimum/Average, plus ColorCoded's Color(Max)/Color(Min)) is not
     /// editable here — it is fixed to whatever <c>ProjectionSelector</c>'s combo showed at the moment
-    /// the "Create Data" button was pressed (<paramref name="initialMode"/>/<paramref name="colorCoded"/>
+    /// the "Create Data" button was pressed (<c>initialMode</c>/<c>colorCoded</c>
     /// of <see cref="ShowAsync"/>) and only shown read-only, since a numeric-only dialog gives no visual
-    /// feedback to pick a different mode by. See Tests.Documents/Working/ColorCoded/
-    /// ColorCoded_View_InitialDesign.md section 3.3.6 (2026/8/29 revision).
+    /// feedback to pick a different mode by.
     /// Returns <see cref="CreateProjectionParameters"/> on OK, or <c>null</c> on cancel.
     /// </summary>
     internal sealed class CreateProjectionDialog : ProcessingDialogBase

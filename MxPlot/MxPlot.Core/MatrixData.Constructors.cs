@@ -40,9 +40,9 @@ namespace MxPlot.Core
      * - Backing : Injects custom frame providers.
      * - Cache   : Uses IFrameKeyProvider<T> to prevent cache duplication.
      *
-     * 5. Virtual Frames (Memory-Mapped)
-     * - Purpose : Out-of-core / MMF datasets (Gigabyte-scale).
-     * - Backing : Injects VirtualFrames<T>.
+     * 5. Virtual Frames (on-demand: Memory-Mapped, format decode, ...)
+     * - Purpose : Out-of-core / MMF datasets (Gigabyte-scale), or any other on-demand backend.
+     * - Backing : Injects VirtualFrames<T> (MmfFrames<T>, a TIFF decoder, ...).
      * - Cache   : Evaluated on-demand. Takes ownership for safe Disposal.
      *
      * ======================================================================== */
@@ -413,13 +413,16 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Initializes a new instance of the <see cref="MatrixData{T}"/> class from a memory-mapped file (MMF) backed virtual frame list.
+        /// Initializes a new instance of the <see cref="MatrixData{T}"/> class from an on-demand
+        /// (<see cref="VirtualFrames{T}"/>-derived) backing frame list -- a memory-mapped file, a
+        /// format decoder, or any other lazy backend built on that skeleton.
         /// Configures read-only or on-demand writable data access and takes ownership of the resources if necessary.
         /// </summary>
         /// <param name="xnum">The width of the frame (number of pixels in the X direction). Must be greater than 0.</param>
         /// <param name="ynum">The height of the frame (number of pixels in the Y direction). Must be greater than 0.</param>
         /// <param name="frameList">
-        /// The backing virtual frame list. Accepts either <see cref="WritableVirtualStrippedFrames{T}"/> or <see cref="VirtualFrames{T}"/>.
+        /// The backing on-demand frame list. Any <see cref="VirtualFrames{T}"/> subclass works here,
+        /// writable (via <see cref="IWritableFrameProvider{T}"/>) or read-only.
         /// If the caller does not own the list, this instance takes over the disposal responsibility to prevent memory leaks.
         /// </param>
         /// <param name="minValueList">
@@ -441,6 +444,9 @@ namespace MxPlot.Core
         /// This constructor dynamically injects the <c>GetInternalArray</c> delegate to serve as the unified gateway for internal array access.
         /// This design eliminates the overhead of runtime type checking (the <c>is</c> operator) during data access,
         /// and safely handles dirty flag setting and cache invalidation (<c>Invalidate</c>) transparently when write access is intended.
+        /// The dispatch below checks only <see cref="IWritableFrameProvider{T}"/> -- not a closed list of concrete
+        /// types -- so any new <see cref="VirtualFrames{T}"/> subclass (MMF, a TIFF decoder, a future Remote backend)
+        /// is accepted here without needing a new case.
         /// </para>
         /// </remarks>
         internal MatrixData(int xnum, int ynum,
@@ -463,12 +469,12 @@ namespace MxPlot.Core
                 RequiresDisposal = true;
             }
 
-            // Injection of the  preloaded VirtualFrameList instance
+            // Injection of the preloaded VirtualFrames instance
             _arrayList = frameList;
-            // Dynamic injection of GetInternalArray implementation based on the actual type of frameList. The default GetInternalArray is overwritten.
+            // Dynamic injection of GetInternalArray implementation based on whether frameList is writable.
             GetInternalArray = _arrayList switch
             {
-                WritableVirtualStrippedFrames<T> writableVF => (frameIndex, needsInvalidate) =>
+                IWritableFrameProvider<T> writableVF => (frameIndex, needsInvalidate) =>
                 {
                     if (needsInvalidate)
                     {
@@ -477,18 +483,16 @@ namespace MxPlot.Core
                     }
                     else
                     {
-                        return writableVF[frameIndex]; //Readonly access without invalidation
+                        return frameList[frameIndex]; //Readonly access without invalidation
                     }
                 }
                 ,
-                VirtualFrames<T> readOnlyVF => (frameIndex, needsInvalidate) =>
+                _ => (frameIndex, needsInvalidate) =>
                 {
                     if (needsInvalidate)
-                        throw new InvalidOperationException("Cannot invalidate a read-only VirtualFrames. Invalidation is only supported for WritableVirtualStrippedFrames.");
-                    return readOnlyVF[frameIndex];
+                        throw new InvalidOperationException("Cannot invalidate a read-only VirtualFrames instance. Invalidation is only supported for writable providers.");
+                    return frameList[frameIndex];
                 }
-                ,
-                _ => throw new ArgumentException($"Invalid type for virtual list: {frameList.GetType()}")
             };
 
             int frameCount = frameList.Count;

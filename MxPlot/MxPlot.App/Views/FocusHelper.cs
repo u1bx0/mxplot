@@ -4,7 +4,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
 using MxPlot.App.ViewModels;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 
 namespace MxPlot.App.Views
 {

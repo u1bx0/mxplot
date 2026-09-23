@@ -20,9 +20,8 @@ namespace MxPlot.Core.Processing
         /// Normalizes pixel values so that the maximum maps to <paramref name="target"/>.
         /// The minimum is preserved proportionally — origin stays at 0 (i.e., value 0 maps to 0).
         /// <para>
-        /// When <paramref name="singleFrameIndex"/> is ≥ 0, only that frame is processed and
-        /// a single-frame result is returned. Otherwise the operation runs on all frames according
-        /// to <paramref name="scope"/>.
+        /// All frames are processed according to <paramref name="scope"/>. To normalize one frame, slice it
+        /// out first (<c>SliceAt</c>).
         /// </para>
         /// </summary>
         /// <remarks>
@@ -33,7 +32,6 @@ namespace MxPlot.Core.Processing
             this MatrixData<T> src,
             double target,
             NormalizeScope scope,
-            int singleFrameIndex = -1,
             double precomputedGlobalMax = double.NaN,
             IProgress<int>? progress = null,
             CancellationToken ct = default)
@@ -42,37 +40,30 @@ namespace MxPlot.Core.Processing
             if (src == null) throw new ArgumentNullException(nameof(src));
             if (target <= 0) throw new ArgumentOutOfRangeException(nameof(target), "Target must be positive.");
 
-            bool singleFrame = singleFrameIndex >= 0;
-            int frameCount = singleFrame ? 1 : src.FrameCount;
+            int frameCount = src.FrameCount;
             progress?.Report(-frameCount);
 
             double globalMax = double.NaN;
-            if (!singleFrame && scope == NormalizeScope.Global)
+            if (scope == NormalizeScope.Global)
                 globalMax = double.IsNaN(precomputedGlobalMax) ? ScanMax(src, ct) : precomputedGlobalMax;
-
-            int[] frameIndices = singleFrame
-                ? [singleFrameIndex]
-                : Enumerable.Range(0, src.FrameCount).ToArray();
 
             int width = src.XCount;
             int height = src.YCount;
-            var resultArrays = new T[frameIndices.Length][];
-            var minList = new double[frameIndices.Length];
-            var maxList = new double[frameIndices.Length];
+            var resultArrays = new T[frameCount][];
+            var minList = new double[frameCount];
+            var maxList = new double[frameCount];
             int completed = 0;
 
-            Parallel.For(0, frameIndices.Length, new ParallelOptions { CancellationToken = ct }, i =>
+            Parallel.For(0, frameCount, new ParallelOptions { CancellationToken = ct }, i =>
             {
                 ct.ThrowIfCancellationRequested();
 
-                int fi = frameIndices[i];
-                //var srcArr = src.GetArray(fi);
-                var srcSpan = src.AsSpan(fi);
+                var srcSpan = src.AsSpan(i);
                 var dstArr = new T[srcSpan.Length];
 
-                double frameMax = (!singleFrame && scope == NormalizeScope.Global)
+                double frameMax = scope == NormalizeScope.Global
                     ? globalMax
-                    : src.GetValueRange(fi).Max;
+                    : src.GetValueRange(i).Max;
 
                 double scale = (double.IsNaN(frameMax) || frameMax == 0.0)
                     ? 0.0
@@ -100,7 +91,7 @@ namespace MxPlot.Core.Processing
             var vminList = minList.Select(v => new List<double> { v }).ToList();
             var vmaxList = maxList.Select(v => new List<double> { v }).ToList();
             var result = new MatrixData<T>(width, height, resultArrays.ToList(), vminList, vmaxList);
-            result.CopyPropertiesFrom(src, copyScale: true, copyDimensions: !singleFrame);
+            result.CopyPropertiesFrom(src, copyScale: true, copyDimensions: true);
             return result;
         }
 
@@ -111,8 +102,9 @@ namespace MxPlot.Core.Processing
         private const double LogEpsilon = 1e-10;
 
         /// <summary>
-        /// Applies a per-element logarithm transform to all (or a single) frame(s),
+        /// Applies a per-element logarithm transform to all frames,
         /// always returning a <see cref="MatrixData{T}"/> of type <c>double</c>.
+        /// To transform one frame, slice it out first (<c>SliceAt</c>).
         /// <para>
         /// Non-positive values are handled according to <paramref name="handling"/>:
         /// <list type="bullet">
@@ -125,19 +117,14 @@ namespace MxPlot.Core.Processing
             this MatrixData<T> src,
             LogBase logBase = LogBase.Natural,
             NegativeHandling handling = NegativeHandling.Shift,
-            int singleFrameIndex = -1,
             IProgress<int>? progress = null,
             CancellationToken ct = default)
             where T : unmanaged
         {
             if (src == null) throw new ArgumentNullException(nameof(src));
 
-            bool singleFrame = singleFrameIndex >= 0;
-            int[] frameIndices = singleFrame
-                ? [singleFrameIndex]
-                : Enumerable.Range(0, src.FrameCount).ToArray();
-
-            progress?.Report(-frameIndices.Length);
+            int frameCount = src.FrameCount;
+            progress?.Report(-frameCount);
 
             Func<double, double> logFunc = logBase switch
             {
@@ -148,25 +135,23 @@ namespace MxPlot.Core.Processing
 
             int width = src.XCount;
             int height = src.YCount;
-            var resultArrays = new double[frameIndices.Length][];
-            var minList = new double[frameIndices.Length];
-            var maxList = new double[frameIndices.Length];
+            var resultArrays = new double[frameCount][];
+            var minList = new double[frameCount];
+            var maxList = new double[frameCount];
             int completed = 0;
 
-            Parallel.For(0, frameIndices.Length, new ParallelOptions { CancellationToken = ct }, i =>
+            Parallel.For(0, frameCount, new ParallelOptions { CancellationToken = ct }, i =>
             {
                 //Check for cancellation at the start of each frame processing
                 ct.ThrowIfCancellationRequested();
 
-                int fi = frameIndices[i];
-                //var srcArr = src.GetArray(fi);
-                var srcSpan = src.AsSpan(fi); 
+                var srcSpan = src.AsSpan(i);
                 var dstArr = new double[srcSpan.Length];
 
                 double shift = 0.0;
                 if (handling == NegativeHandling.Shift)
                 {
-                    var (frameMin, _) = src.GetValueRange(fi);
+                    var (frameMin, _) = src.GetValueRange(i);
                     shift = frameMin <= 0 ? Math.Abs(frameMin) + LogEpsilon : 0.0;
                 }
 
@@ -192,7 +177,7 @@ namespace MxPlot.Core.Processing
             var vminList = minList.Select(v => new List<double> { v }).ToList();
             var vmaxList = maxList.Select(v => new List<double> { v }).ToList();
             var result = new MatrixData<double>(width, height, resultArrays.ToList(), vminList, vmaxList);
-            result.CopyPropertiesFrom(src, copyScale: true, copyDimensions: !singleFrame);
+            result.CopyPropertiesFrom(src, copyScale: true, copyDimensions: true);
             return result;
         }
 

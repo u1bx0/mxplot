@@ -33,12 +33,11 @@ namespace MxPlot.Core.Processing
     public record LogTransformOperation(
         LogBase Base = LogBase.Natural,
         NegativeHandling Handling = NegativeHandling.Shift,
-        int SingleFrameIndex = -1,
         IProgress<int>? Progress = null,
         CancellationToken CancellationToken = default) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.LogTransform(Base, Handling, SingleFrameIndex, Progress, CancellationToken);
+            => src.LogTransform(Base, Handling, Progress, CancellationToken);
     }
 
     // =========================================================================================
@@ -64,21 +63,16 @@ namespace MxPlot.Core.Processing
     /// <summary>
     /// Normalizes pixel values so that the maximum maps to <see cref="Target"/>.
     /// The minimum is preserved proportionally (origin stays at 0).
-    /// <para>
-    /// When <see cref="SingleFrameIndex"/> is ≥ 0, only that one frame is processed and
-    /// the result is a single-frame <see cref="IMatrixData"/>. Otherwise all frames are
-    /// processed according to <see cref="Scope"/>.
-    /// </para>
+    /// All frames are processed according to <see cref="Scope"/>.
     /// </summary>
     public record NormalizeOperation(
         double Target,
         NormalizeScope Scope,
-        int SingleFrameIndex = -1,
         double PrecomputedGlobalMax = double.NaN,
         IProgress<int>? Progress = null,
         CancellationToken CancellationToken = default) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.Normalize(Target, Scope, SingleFrameIndex, PrecomputedGlobalMax, Progress, CancellationToken);
+            => src.Normalize(Target, Scope, PrecomputedGlobalMax, Progress, CancellationToken);
     }
 }

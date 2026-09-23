@@ -40,6 +40,7 @@
 	
   <ItemGroup>
 	<ProjectReference Include="..\MxPlot.Core\MxPlot.Core.csproj" />
+	<ProjectReference Include="..\MxPlot.Extensions.Fft\MxPlot.Extensions.Fft.csproj" />
   </ItemGroup>
 
   <ItemGroup>

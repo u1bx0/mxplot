@@ -461,7 +461,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static void BlendPixel(BlendMode mode, int color,
+        internal static void BlendPixel(BlendMode mode, int color,
                                        ref int r, ref int g, ref int b)
         {
             int cr = (color >> 16) & 0xFF;
@@ -472,7 +472,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int ClampAndPackPixel(BlendMode mode, int r, int g, int b)
+        internal static int ClampAndPackPixel(BlendMode mode, int r, int g, int b)
         {
             if (mode == BlendMode.Additive)
             {

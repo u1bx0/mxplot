@@ -346,7 +346,7 @@ namespace MxPlot.App.Views
         private static CsvStructure? TryParseCsvStructure(string[] lines, string sep)
         {
             MatrixData<double> md;
-            try { md = MxPlot.Core.IO.CsvHandler.CreateFrom<double>(lines, sep, flipY: true); }
+            try { md = Core.IO.Formats.CsvHandler.CreateFrom<double>(lines, sep, flipY: true); }
             catch { return null; }
 
             if (md.XCount < 1 || md.YCount < 1) return null;

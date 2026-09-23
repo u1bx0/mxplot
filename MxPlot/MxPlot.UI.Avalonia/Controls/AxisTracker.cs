@@ -84,6 +84,19 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Fired when the user releases the slider thumb after dragging.</summary>
         public event EventHandler? SliderDragEnded;
 
+        /// <summary>
+        /// Fired when the mouse pointer enters the slider's thumb (not the track). Useful for showing a
+        /// drag overlay in the plot.
+        /// </summary>
+        public event EventHandler? SliderPointerEntered;
+
+        /// <summary>
+        /// Fired when the mouse pointer exits the slider's thumb (not the track). Useful for hiding a
+        /// drag overlay in the plot.
+        /// </summary>
+        public event EventHandler? SliderPointerExited;
+
+
         public bool IsAnimating => _timer.IsEnabled;
         public double DisplayFrameRate => IsAnimating ? _frameRate : 0;
 
@@ -138,6 +151,15 @@ namespace MxPlot.UI.Avalonia.Controls
                     thumb.MinHeight = 0;
                     thumb.Width = 12;
                     thumb.Height = 12;
+
+                    // Re-subscribing on every TemplateApplied (rather than once at construction) is what lets
+                    // SliderPointerEntered/Exited track the thumb specifically instead of the whole slider
+                    // track -- the thumb doesn't exist until the template is applied. Unsubscribe first in
+                    // case the template is re-applied to a different Thumb instance later.
+                    thumb.PointerEntered -= OnSliderPointerEntered;
+                    thumb.PointerExited -= OnSliderPointerExited;
+                    thumb.PointerEntered += OnSliderPointerEntered;
+                    thumb.PointerExited += OnSliderPointerExited;
                 }
 
                 if (e.NameScope.Find("PART_Track") is Track track)
@@ -241,6 +263,9 @@ namespace MxPlot.UI.Avalonia.Controls
             _slider.AddHandler(PointerPressedEvent, OnSliderPointerPressed, handledEventsToo: true);
             _slider.AddHandler(PointerReleasedEvent, OnSliderPointerReleased, handledEventsToo: true);
             _slider.AddHandler(PointerWheelChangedEvent, OnSliderPointerWheelChanged, handledEventsToo: true);
+            // SliderPointerEntered/Exited are wired to the thumb, not _slider, once the template gives
+            // access to it -- see the TemplateApplied handler above.
+
             _indicator.GotFocus += OnIndicatorGotFocus;
             _indicator.LostFocus += OnIndicatorLostFocus;
             _indicator.KeyDown += OnIndicatorKeyDown;
@@ -352,6 +377,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _stopwatch.Reset();
             _frameRate = 0;
             _playButton.Content = "▶";
+            UpdatePlayButtonToolTip(); // drop the "actual" fps reading now that playback stopped
         }
 
         // ── Event handlers ────────────────────────────────────────────────────
@@ -372,6 +398,16 @@ namespace MxPlot.UI.Avalonia.Controls
         private void OnSliderPointerReleased(object? sender, PointerReleasedEventArgs e)
         {
             SliderDragEnded?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnSliderPointerEntered(object? sender, PointerEventArgs e)
+        {
+            SliderPointerEntered?.Invoke(this, EventArgs.Empty);
+        }
+
+        private void OnSliderPointerExited(object? sender, PointerEventArgs e)
+        {
+            SliderPointerExited?.Invoke(this, EventArgs.Empty);
         }
 
         private void OnSliderPointerWheelChanged(object? sender, PointerWheelEventArgs e)
@@ -461,8 +497,7 @@ namespace MxPlot.UI.Avalonia.Controls
             var menu = new ContextMenu { Items = { rename, scale } };
 
             // No longer restricted to an axis literally named "Channel" -- any axis can become the
-            // Composite axis. See Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md
-            // section 3.3.7. The scale-loss confirmation for a non-index-based axis (Z, Time, ...)
+            // Composite axis. The scale-loss confirmation for a non-index-based axis (Z, Time, ...)
             // lives at the click-handler side (MatrixPlotter.cs's WireAxisConfigButtons), not here.
             menu.Items.Add(new Separator());
             var composite = new MenuItem
@@ -539,6 +574,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 _stopwatch.Restart();
                 _playButton.Content = "■";
                 _timer.Start();
+                UpdatePlayButtonToolTip(); // switch to the "actual fps" wording before the first tick lands
             }
         }
 
@@ -550,6 +586,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _lastTick = elapsed;
 
             ApplyIndex((_axis.Index + 1) % _axis.Count);
+            UpdatePlayButtonToolTip(); // reflect the just-measured actual fps, not just the target
         }
 
         // ── Play button context menu ──────────────────────────────────────────
@@ -575,9 +612,11 @@ namespace MxPlot.UI.Avalonia.Controls
         private void UpdatePlayButtonToolTip()
         {
             int ms = AnimationInterval;
-            double fps = ms > 0 ? 1000.0 / ms : 0;
-            ToolTip.SetTip(_playButton,
-                $"Right-click to configure animation interval\n(Current: {ms} ms / {fps:F1} fps)");
+            double targetFps = ms > 0 ? 1000.0 / ms : 0;
+            string text = IsAnimating
+                ? $"Right-click to configure animation interval\n(Target: {ms} ms / {targetFps:F1} fps, actual: {DisplayFrameRate:F1} fps)"
+                : $"Right-click to configure animation interval\n(Current: {ms} ms / {targetFps:F1} fps)";
+            ToolTip.SetTip(_playButton, text);
         }
 
         // ── Cleanup ───────────────────────────────────────────────────────────

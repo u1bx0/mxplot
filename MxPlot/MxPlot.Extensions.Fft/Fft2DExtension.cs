@@ -12,6 +12,7 @@ using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Transactions;
 
@@ -229,11 +230,34 @@ namespace MxPlot.Extensions.Fft
             return Fft2DProcWithSwap(false, src, option, srcIndex, dst, dstIndex);
         }
 
-        private static Scale2D GetFrequencyDomainScale(Scale2D spatialScale, ShiftOption option)
+        /// <summary>
+        /// The XY scale of the transform's output for an input of scale <paramref name="inputScale"/>.
+        /// <para>
+        /// Only the pixel counts and the pitch of <paramref name="inputScale"/> are used: its min/max are
+        /// ignored, as they are by the transform itself, which takes index 0 (or the array center for
+        /// <see cref="ShiftOption.BothCentered"/>) as the origin. The output pitch is the reciprocal of the
+        /// input's full width (<c>1 / XLength</c>), so the same rule gives the frequency step of a forward
+        /// transform and the pixel pitch of an inverse one.
+        /// </para>
+        /// <para>
+        /// The output axis is centered on 0 when its origin (DC for a forward transform, the spatial origin
+        /// for an inverse one) lies at the array center: <see cref="ShiftOption.Centered"/> and
+        /// <see cref="ShiftOption.BothCentered"/> for a forward transform, only
+        /// <see cref="ShiftOption.BothCentered"/> for an inverse one. Otherwise it runs from 0.
+        /// </para>
+        /// </summary>
+        private static Scale2D GetTransformedScale(Scale2D inputScale, ShiftOption option, bool isForward)
         {
-            double dfx = 1.0 / spatialScale.XRange;
-            double dfy = 1.0 / spatialScale.YRange;
-            if (option == ShiftOption.Centered || option == ShiftOption.BothCentered)
+            bool centeredOutput = isForward
+                ? option == ShiftOption.Centered || option == ShiftOption.BothCentered
+                : option == ShiftOption.BothCentered;
+
+            // The N samples are one period of the periodic signal the DFT assumes, so the period is the
+            // full width of N pixel cells (XLength = N * step), not the distance between the first and last
+            // pixel centers (XRange = (N - 1) * step). Bin k lies at k * df.
+            double dfx = 1.0 / inputScale.XLength;
+            double dfy = 1.0 / inputScale.YLength;
+            if (centeredOutput)
             {
                 // --- Centered (Shifted) ---
                 // Goal: keep frequency step df while placing DC near the center
@@ -243,11 +267,11 @@ namespace MxPlot.Extensions.Fft
                 // Example checks:
                 // N=4 (even): indices -2,-1,0,1 -> Min=-2*df, Max=+1*df -> Range=3df -> Step=1df
                 // N=5 (odd):  indices -2,-1,0,1,2 -> Min=-2*df, Max=+2*df -> Range=4df -> Step=1df
-                double fxmin = -Math.Floor(spatialScale.XCount / 2.0) * dfx;
-                double fxmax = Math.Floor((spatialScale.XCount - 1) / 2.0) * dfx; // CeilingではなくFloorを使う
-                double fymin = -Math.Floor(spatialScale.YCount / 2.0) * dfy;
-                double fymax = Math.Floor((spatialScale.YCount - 1) / 2.0) * dfy;
-                return new Scale2D(spatialScale.XCount, fxmin, fxmax, spatialScale.YCount, fymin, fymax);
+                double fxmin = -Math.Floor(inputScale.XCount / 2.0) * dfx;
+                double fxmax = Math.Floor((inputScale.XCount - 1) / 2.0) * dfx; // CeilingではなくFloorを使う
+                double fymin = -Math.Floor(inputScale.YCount / 2.0) * dfy;
+                double fymax = Math.Floor((inputScale.YCount - 1) / 2.0) * dfy;
+                return new Scale2D(inputScale.XCount, fxmin, fxmax, inputScale.YCount, fymin, fymax);
             }
             else
             {
@@ -255,8 +279,8 @@ namespace MxPlot.Extensions.Fft
                 // Goal: frequency indices run from 0 to (N-1)*df
                 // Example N=4: indices 0..3 -> Min=0, Max=3*df -> Range=3df -> Step=1df
                 // Define a scale that increases from the origin using dfx/dfy for Shift=None
-                return new Scale2D(spatialScale.XCount, 0, (spatialScale.XCount - 1) * dfx,
-                                   spatialScale.YCount, 0, (spatialScale.YCount - 1) * dfy);
+                return new Scale2D(inputScale.XCount, 0, (inputScale.XCount - 1) * dfx,
+                                   inputScale.YCount, 0, (inputScale.YCount - 1) * dfy);
             }
         }
 
@@ -278,7 +302,7 @@ namespace MxPlot.Extensions.Fft
                 throw new InvalidOperationException("XRange/YRange must be positive to define frequency step (df).");
                         
             // 2. Scale (範囲) の決定
-            Scale2D ftScale = GetFrequencyDomainScale(src.GetScale(), option);
+            Scale2D ftScale = GetTransformedScale(src.GetScale(), option, isForward);
 
             if (dst == null)
             {
@@ -385,20 +409,32 @@ namespace MxPlot.Extensions.Fft
 
         #region Fft2D for frames
 
+        /// <summary>
+        /// Performs a forward 2D FFT on every frame; see <see cref="Fft2DAllFramesProc"/> for the parameters
+        /// and for what cancellation leaves behind.
+        /// </summary>
         public static MatrixData<Complex> Fft2DAllFrames<T>(this MatrixData<T> src,
             ShiftOption option,
-            MatrixData<Complex>? dst = null)
+            MatrixData<Complex>? dst = null,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default)
                 where T : unmanaged
         {
-            return Fft2DAllFramesProc(src, isForward: true, option, dst);
+            return Fft2DAllFramesProc(src, isForward: true, option, dst, progress, cancellationToken);
         }
-        
+
+        /// <summary>
+        /// Performs an inverse 2D FFT on every frame; see <see cref="Fft2DAllFramesProc"/> for the parameters
+        /// and for what cancellation leaves behind.
+        /// </summary>
         public static MatrixData<Complex> InverseFft2DAllFrames<T>(this MatrixData<T> src,
             ShiftOption option,
-            MatrixData<Complex>? dst = null)
+            MatrixData<Complex>? dst = null,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default)
                 where T : unmanaged
         {
-            return Fft2DAllFramesProc(src, isForward: false, option, dst);
+            return Fft2DAllFramesProc(src, isForward: false, option, dst, progress, cancellationToken);
         }
 
         /// <summary>
@@ -416,17 +452,29 @@ namespace MxPlot.Extensions.Fft
         /// same dimensions and frame count as the source matrix if provided.</param>
         /// <returns>A matrix containing the 2D FFT results for each frame of the source matrix. The returned matrix has the same
         /// dimensions and frame count as the source.</returns>
+        /// <param name="progress">Optional progress reporter; reports a negative total once, then <c>0 .. total-1</c> as frames complete.</param>
+        /// <param name="cancellationToken">Checked before each frame starts. A frame that has started is transformed to the end.</param>
         /// <exception cref="ArgumentException">Thrown if the destination matrix is provided and its dimensions or frame count do not match those of the
         /// source matrix.</exception>
+        /// <exception cref="OperationCanceledException">Thrown if <paramref name="cancellationToken"/> is cancelled. A destination
+        /// matrix that was passed in is then left partly filled.</exception>
         private static MatrixData<Complex> Fft2DAllFramesProc<T>(this MatrixData<T> src,
             bool isForward,
             ShiftOption option,
-            MatrixData<Complex>? dst = null
+            MatrixData<Complex>? dst = null,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default
             )
                 where T : unmanaged
         {
             if(src.FrameCount == 1)
-                return Fft2D(src, option, srcIndex: 0, dst, dstIndex: 0);
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                progress?.Report(-1);
+                var single = Fft2DProcWithSwap(isForward, src, option, srcIndex: 0, dst, dstIndex: 0);
+                progress?.Report(0);
+                return single;
+            }
 
             if(dst == null)
             {
@@ -434,12 +482,15 @@ namespace MxPlot.Extensions.Fft
             }
             else if (dst != null && (dst.FrameCount != src.FrameCount || dst.XCount != src.XCount || dst.YCount != src.YCount))
                 throw new ArgumentException("Destination MatrixData must have the same dimensions and frame count as the source.");
-                
-            Parallel.For(0, src.FrameCount, frameIndex =>
+
+            progress?.Report(-src.FrameCount);
+            long framesDone = 0;
+            Parallel.For(0, src.FrameCount, new ParallelOptions { CancellationToken = cancellationToken }, frameIndex =>
             {
                 Fft2DProcWithSwap(isForward, src, option, frameIndex, dst, frameIndex, useParallel:false, skipScaleSetup:true);
+                progress?.Report((int)(Interlocked.Increment(ref framesDone) - 1));
             });
-            var ftScale = GetFrequencyDomainScale(src.GetScale(), option);
+            var ftScale = GetTransformedScale(src.GetScale(), option, isForward);
             dst!.SetXYScale(ftScale.XMin, ftScale.XMax, ftScale.YMin, ftScale.YMax);
 
             return dst!;
@@ -504,8 +555,9 @@ namespace MxPlot.Extensions.Fft
                 secondary = ArrayPool<Complex>.Shared.Rent(len);
             }
 
-            double dfx = 1.0 / src.XRange;
-            double dfy = 1.0 / src.YRange;
+            var srcScale = src.GetScale();
+            double dfx = 1.0 / srcScale.XLength; // period = full width of N pixel cells, see GetTransformedScale
+            double dfy = 1.0 / srcScale.YLength;
             Scale2D ftScale;
             if (option == ShiftOption.Centered || option == ShiftOption.BothCentered)
             {

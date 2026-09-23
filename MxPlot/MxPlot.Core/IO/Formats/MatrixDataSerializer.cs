@@ -8,7 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Provides binary serialization and deserialization for MatrixData&lt;T&gt; objects.
@@ -42,7 +42,7 @@ namespace MxPlot.Core.IO
 
         /// <summary>
         /// Creates a temporary .mxd file pre-allocated for the given dimensions,
-        /// and returns a <see cref="WritableVirtualStrippedFrames{T}"/> mounted on it.
+        /// and returns a <see cref="WritableStrippedMmfFrames{T}"/> mounted on it.
         /// The file uses <c>ConfigOffset = 0</c> (temp marker) and contiguous uncompressed layout.
         /// </summary>
         /// <typeparam name="T">The unmanaged element type.</typeparam>
@@ -50,12 +50,12 @@ namespace MxPlot.Core.IO
         /// <param name="ycount">Height (rows per frame).</param>
         /// <param name="frameCount">Number of frames to allocate.</param>
         /// <returns>A writable, temporary WVSF backed by the new file.</returns>
-        public static WritableVirtualStrippedFrames<T> CreateTempVessel<T>(int xcount, int ycount, int frameCount) where T : unmanaged
+        public static WritableStrippedMmfFrames<T> CreateTempVessel<T>(int xcount, int ycount, int frameCount) where T : unmanaged
             => CreateVessel<T>(null, xcount, ycount, frameCount);
 
         /// <summary>
         /// Creates a .mxd file pre-allocated for the given dimensions,
-        /// and returns a <see cref="WritableVirtualStrippedFrames{T}"/> mounted on it.
+        /// and returns a <see cref="WritableStrippedMmfFrames{T}"/> mounted on it.
         /// The file uses <c>ConfigOffset = 0</c> (temp marker) and contiguous uncompressed layout.
         /// </summary>
         /// <typeparam name="T">The unmanaged element type.</typeparam>
@@ -67,7 +67,7 @@ namespace MxPlot.Core.IO
         /// <param name="ycount">Height (rows per frame).</param>
         /// <param name="frameCount">Number of frames to allocate.</param>
         /// <returns>A writable WVSF backed by the new file.</returns>
-        internal static WritableVirtualStrippedFrames<T> CreateVessel<T>(string? filePath, int xcount, int ycount, int frameCount) where T : unmanaged
+        internal static WritableStrippedMmfFrames<T> CreateVessel<T>(string? filePath, int xcount, int ycount, int frameCount) where T : unmanaged
         {
             bool isTemporary = string.IsNullOrWhiteSpace(filePath);
             string path = isTemporary
@@ -97,7 +97,7 @@ namespace MxPlot.Core.IO
             }
 
             // Step 3: Mount the WVSF
-            return new WritableVirtualStrippedFrames<T>(
+            return new WritableStrippedMmfFrames<T>(
                 path, xcount, ycount, offsets, byteCounts,
                 isYFlipped: false, isTemporary: isTemporary);
         }
@@ -140,18 +140,58 @@ namespace MxPlot.Core.IO
 
             long dataLength = fs.Position - HeaderSize;
 
-            // 3. Append JSON config (trailer)
-            long configOffset = fs.Position;
+            // 3-4. Append JSON config (trailer) and back-patch the header.
             var config = new MatrixDataConfig(data) with { IsCompressed = compress };
+            WriteTrailerAndPatchHeader(fs, writer, dataLength, config);
+
+            progress?.Report(data.FrameCount);
+        }
+
+        /// <summary>
+        /// Appends <paramref name="config"/>'s JSON trailer at the stream's current end and
+        /// back-patches the 20-byte fixed header's DataLength/ConfigOffset fields. The one place
+        /// both <see cref="Save{T}"/> and <see cref="VesselWriter{T}.Complete"/> turn a file with
+        /// pixel data already written into a fully finalized (<c>ConfigOffset &gt; 0</c>) .mxd.
+        /// </summary>
+        internal static void WriteTrailerAndPatchHeader(
+            FileStream fs, BinaryWriter writer, long dataLength, MatrixDataConfig config)
+        {
+            long configOffset = fs.Position;
             byte[] configBytes = Encoding.UTF8.GetBytes(config.ToHeaderString());
             writer.Write(configBytes);
 
-            // 4. Back-patch header
             fs.Seek(4, SeekOrigin.Begin);
             writer.Write(dataLength);
             writer.Write(configOffset);
+        }
 
-            progress?.Report(data.FrameCount);
+        /// <summary>
+        /// Creates a growing, size-unknown-until-<see cref="VesselWriter{T}.Complete"/> .mxd file
+        /// for streaming acquisition (e.g. a live camera recording), and returns a
+        /// <see cref="VesselWriter{T}"/> to write frames into it one at a time.
+        /// </summary>
+        /// <remarks>
+        /// Unlike <see cref="CreateVessel{T}"/>/<see cref="CreateTempVessel{T}"/>, no
+        /// <c>frameCount</c> is taken here — it does not need to be known in advance. The file
+        /// starts as an ordinary sequential <see cref="FileStream"/> (not memory-mapped, not
+        /// pre-sized), so there is no upper bound on how many frames
+        /// <see cref="VesselWriter{T}.WriteFrame"/> can accept before
+        /// <see cref="VesselWriter{T}.Complete"/> is called.
+        /// </remarks>
+        /// <param name="path">Destination file path. Created or overwritten, same as <see cref="Save{T}"/>.</param>
+        /// <param name="xcount">Width (pixels per row).</param>
+        /// <param name="ycount">Height (rows per frame).</param>
+        public static VesselWriter<T> CreateStreamingVessel<T>(string path, int xcount, int ycount) where T : unmanaged
+        {
+            var fs = new FileStream(path, FileMode.Create, FileAccess.ReadWrite);
+            var writer = new BinaryWriter(fs, Encoding.UTF8, leaveOpen: true);
+
+            writer.Write(Encoding.ASCII.GetBytes(MagicNumber)); // 4B
+            writer.Write(0L); // DataLength placeholder
+            writer.Write(0L); // ConfigOffset = 0 (temp marker)
+            // fs.Position == HeaderSize (20)
+
+            return new VesselWriter<T>(fs, writer, xcount, ycount);
         }
 
         private static void WriteDataToStream<T>(Stream stream, MatrixData<T> data, IProgress<int>? progress) where T : unmanaged
@@ -288,7 +328,7 @@ namespace MxPlot.Core.IO
 
             // .mxd has no byte-order marker concept -- MxPlot always writes it host-native (little-endian),
             // so a .mxd file is never big-endian.
-            var vsf = new VirtualStrippedFrames<T>(
+            var vsf = new StrippedMmfFrames<T>(
                 path, config.XCount, config.YCount, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 
             return config.CreateFromVirtualFrames(vsf);
@@ -494,8 +534,8 @@ namespace MxPlot.Core.IO
             // Fast-path: if the backing store is a WVSF whose file is already in .mxd layout
             // and compression is not requested, use OS-level file move + trailer finalization.
             if (!CompressionInWrite
-                && accessor.TryGet<WritableVirtualStrippedFrames<T>>(out var wvsf)
-                && wvsf!.FilePath.EndsWith(".mxd", StringComparison.OrdinalIgnoreCase))
+                && accessor.TryGet<WritableStrippedMmfFrames<T>>(out var wvsf)
+                && wvsf!.SourcePath.EndsWith(".mxd", StringComparison.OrdinalIgnoreCase))
             {
                 wvsf.SaveAs(filePath,
                     beforeRemount: path => MatrixDataSerializer.FinalizeTrailer(path, data),

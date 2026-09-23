@@ -4,7 +4,9 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
+using MxPlot.UI.Avalonia.Rendering;
 using System;
+using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Controls
 {
@@ -47,6 +49,51 @@ namespace MxPlot.UI.Avalonia.Controls
         private bool _suppressEvents;
         private bool _compositeActive;
 
+        // XY row items. Indices 0-2 are the plain projections every row has; from
+        // FirstColorCodedIndex on are the XY-only ColorCoded ones. Every index-based decision below
+        // goes through these constants, so adding an item only means touching this block.
+        private const int IdxMinimum = 1;
+        private const int IdxAverage = 2;
+        private const int FirstColorCodedIndex = 3;
+        private const int IdxColorRgbMax = 3;
+        private const int IdxColorRgbAdd = 4;
+        private const int IdxColorMax = 5;
+        private const int IdxColorMin = 6;
+
+        // (label, tooltip) per item, in index order. The tooltip is shown when hovering the item in
+        // the dropdown, so the modes explain themselves without a manual.
+        private static readonly (string Label, string Tip)[] PlainItems =
+        {
+            ("Maximum", "Maximum intensity projection: each pixel shows its brightest value along the axis."),
+            ("Minimum", "Minimum intensity projection: each pixel shows its darkest value along the axis."),
+            ("Average", "Average intensity projection: each pixel shows the mean value along the axis."),
+        };
+
+        private static readonly (string Label, string Tip)[] XyItems = PlainItems.Concat(new[]
+        {
+            ("Color (RGB-Max)",
+             "Every slice is tinted with its depth color, then R, G and B are max-combined separately. " +
+             "Structures at different depths overlap and mix; colors outside the depth palette can appear."),
+            ("Color (RGB-Add)",
+             "Every slice is tinted with its depth color and the slices are added (clamped at 255), " +
+             "as if each depth were an independent light source. Whites out on dense stacks - raise " +
+             "the range's max to compensate."),
+            ("Color (Max)",
+             "Each pixel takes the depth color of the slice where it is brightest, scaled by that " +
+             "brightness. The color reads directly as depth; overlaps are not shown."),
+            ("Color (Min)",
+             "Each pixel takes the depth color of the slice where it is darkest, scaled by that " +
+             "value. The color reads directly as depth; overlaps are not shown."),
+        }).ToArray();
+
+        private static ComboBoxItem[] CreateItems((string Label, string Tip)[] definitions)
+            => definitions.Select(d =>
+            {
+                var item = new ComboBoxItem { Content = d.Label };
+                ToolTip.SetTip(item, d.Tip);
+                return item;
+            }).ToArray();
+
         // ── Public API ────────────────────────────────────────────────────────
 
         /// <summary>
@@ -80,18 +127,18 @@ namespace MxPlot.UI.Avalonia.Controls
 
         /// <summary>
         /// The projection mode selected for the given <paramref name="plane"/> -- the "which
-        /// extremum/how do slices combine" half of the selection. For XY's Color(Max)/Color(Min)
-        /// items (indices 3/4), this still returns Maximum/Minimum respectively: colouring is an
-        /// orthogonal concern layered on top, reported separately by <see cref="IsColorCoded"/>,
-        /// not a new <see cref="ProjectionMode"/> value (see Tests.Documents/Working/ColorCoded/
-        /// ColorCoded_View_InitialDesign.md section 3.3.3 for why Core's enum stays untouched).
+        /// extremum/how do slices combine" half of the selection. For XY's ColorCoded items this
+        /// still returns Maximum (RGB-Max/RGB-Add/Color(Max)) or Minimum (Color(Min)): coloring is
+        /// an orthogonal concern layered on top, reported separately by <see cref="IsColorCoded"/>
+        /// (and <see cref="GetColorCodedBlend"/>), not a new <see cref="ProjectionMode"/> value --
+        /// Core's enum stays untouched.
         /// </summary>
         public ProjectionMode GetMode(ProjectionPlane plane) => GetRow(plane).ComboBox.SelectedIndex switch
         {
-            1 => ProjectionMode.Minimum,
-            2 => ProjectionMode.Average,
-            4 => ProjectionMode.Minimum,   // Color (Min), XY row only
-            _ => ProjectionMode.Maximum,   // 0 = Maximum, 3 = Color (Max), or any other row
+            IdxMinimum => ProjectionMode.Minimum,
+            IdxAverage => ProjectionMode.Average,
+            IdxColorMin => ProjectionMode.Minimum,   // Color (Min), XY row only
+            _ => ProjectionMode.Maximum,   // Maximum, Color (RGB-Max), Color (Max), or any other row
         };
 
         /// <summary>
@@ -100,15 +147,29 @@ namespace MxPlot.UI.Avalonia.Controls
         /// section 3.3.1's decision to keep ColorCoded to the XY/MainView case only.
         /// </summary>
         public bool IsColorCoded(ProjectionPlane plane) =>
-            plane == ProjectionPlane.XY && GetRow(plane).ComboBox.SelectedIndex >= 3;
+            plane == ProjectionPlane.XY && GetRow(plane).ComboBox.SelectedIndex >= FirstColorCodedIndex;
+
+        /// <summary>
+        /// For Color (RGB-Max) / (RGB-Add): the <see cref="ColorCodedBlend"/> the depth-colored
+        /// slices are blended with (every slice colored by depth, then R/G/B combined by max or by
+        /// sum, so overlaps mix). <c>null</c> for everything else, including
+        /// Color(Max)/(Min), which
+        /// pick a single winning slice instead.
+        /// </summary>
+        public ColorCodedBlend? GetColorCodedBlend(ProjectionPlane plane)
+            => plane != ProjectionPlane.XY ? null : GetRow(plane).ComboBox.SelectedIndex switch
+            {
+                IdxColorRgbMax => ColorCodedBlend.Maximum,
+                IdxColorRgbAdd => ColorCodedBlend.Additive,
+                _ => null,
+            };
 
         /// <summary>
         /// Toggles the checkbox (and the combo's enabled/opacity look) without touching
         /// <c>SelectedIndex</c>. Use this instead of <see cref="SetState"/> when the intent is just
         /// "turn the projection off/on, remembering whatever was selected" -- <see cref="SetState"/>
         /// always re-derives <c>SelectedIndex</c> from a <see cref="ProjectionMode"/>, which for XY
-        /// cannot represent Color(Max)/Color(Min) (indices 3/4) and would silently reset back to a
-        /// plain mode. Closing the ColorCoded projection window is exactly this case.
+        /// cannot represent the ColorCoded items and would silently reset back to a plain mode. Closing the ColorCoded projection window is exactly this case.
         /// </summary>
         public void SetEnabled(ProjectionPlane plane, bool enabled)
         {
@@ -126,12 +187,11 @@ namespace MxPlot.UI.Avalonia.Controls
 
         /// <summary>
         /// Restricts the XY row's combo to Maximum/Minimum/Average while Composite mode is active.
-        /// Composite and ColorCoded are mutually exclusive -- depth-colouring is defined in terms of
+        /// Composite and ColorCoded are mutually exclusive -- depth-coloring is defined in terms of
         /// a single winning axis index per pixel, which has no coherent meaning once the same pixel
-        /// is already a blend of several Composite channels (see
-        /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md). Rather than let the
-        /// user pick Color(Max)/(Min) and then reject or crash on it, the option is simply not
-        /// offered while Composite is on. If the row was already showing Color(Max)/(Min) when
+        /// is already a blend of several Composite channels. Rather than let the
+        /// user pick a ColorCoded item and then reject or crash on it, the option is simply not
+        /// offered while Composite is on. If the row was already showing a ColorCoded item when
         /// Composite activates, falls back to Maximum and fires <see cref="SelectionChanged"/> like
         /// any other user-driven mode change, so <c>OrthogonalViewController</c>'s normal handling
         /// picks it up and recomputes a plain projection -- no special-casing needed there beyond
@@ -144,16 +204,14 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var combo = _xyRow.ComboBox;
             int oldIndex = combo.SelectedIndex;
-            bool wasColorCoded = active && oldIndex >= 3;
+            bool wasColorCoded = active && oldIndex >= FirstColorCodedIndex;
 
             _suppressEvents = true;
             try
             {
-                combo.ItemsSource = active
-                    ? new[] { "Maximum", "Minimum", "Average" }
-                    : new[] { "Maximum", "Minimum", "Average", "Color (Max)", "Color (Min)" };
+                combo.ItemsSource = CreateItems(active ? PlainItems : XyItems);
                 // Composite -> restricted list: fall back to Maximum if the old selection no longer
-                // exists (it was Color(Max)/(Min)); indices 0-2 are otherwise unaffected either way.
+                // exists (it was a ColorCoded item); indices 0-2 are otherwise unaffected either way.
                 combo.SelectedIndex = wasColorCoded ? 0 : oldIndex;
             }
             finally { _suppressEvents = false; }
@@ -185,8 +243,8 @@ namespace MxPlot.UI.Avalonia.Controls
                 row.CheckBox.IsChecked = enabled;
                 row.ComboBox.SelectedIndex = mode switch
                 {
-                    ProjectionMode.Minimum => 1,
-                    ProjectionMode.Average => 2,
+                    ProjectionMode.Minimum => IdxMinimum,
+                    ProjectionMode.Average => IdxAverage,
                     _ => 0,
                 };
                 row.ComboBox.IsEnabled = enabled;
@@ -212,7 +270,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
         public ProjectionSelector()
         {
-            // Only XY offers Color(Max)/Color(Min) -- ColorCoded is scoped to the MainView/XY
+            // Only XY offers the ColorCoded items -- ColorCoded is scoped to the MainView/XY
             // case (section 3.3.1); XZ/YZ keep the plain 3-item Maximum/Minimum/Average list.
             _xyRow = CreateViewRow("X-Y (Z Projection)", ProjectionPlane.XY, includeColorCoded: true);
             _xzRow = CreateViewRow("X-Z (Y Projection)", ProjectionPlane.XZ);
@@ -296,9 +354,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
             var comboBox = new ComboBox
             {
-                ItemsSource = includeColorCoded
-                    ? new[] { "Maximum", "Minimum", "Average", "Color (Max)", "Color (Min)" }
-                    : new[] { "Maximum", "Minimum", "Average" },
+                ItemsSource = CreateItems(includeColorCoded ? XyItems : PlainItems),
                 SelectedIndex = 0,
                 FontSize = 11,
                 MinHeight = 0,

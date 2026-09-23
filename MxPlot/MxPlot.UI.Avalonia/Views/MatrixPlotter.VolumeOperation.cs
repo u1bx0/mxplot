@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using MxPlot.Core;
 using MxPlot.Core.IO;
 using MxPlot.Core.IO.CacheStrategies;
+using MxPlot.Core.IO.Formats;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Rendering;
@@ -47,7 +48,7 @@ namespace MxPlot.UI.Avalonia.Views
                         ApplyCacheStrategy(axis, ResolveCompositeAxisForCacheStrategy());
                         _orthoController.Activate(_currentData, axis.Name);
                         // Guard: clamp any active action's ROIs to the new axis dimensions.
-                        _activeAction?.NotifyContextChanged(CreateActionContext());
+                        _activeTool?.NotifyContextChanged(CreateToolContext());
                         if (!wasShowing && WindowState != WindowState.Maximized)
                         {
                             Width += _orthoPanel.SavedSideDeltaWidth;
@@ -62,7 +63,7 @@ namespace MxPlot.UI.Avalonia.Views
                     Debug.WriteLine($"[OrthoScale] Deactivate: axis={_orthoController.ActiveAxisName ?? "(none)"}");
                     _orthoController.Deactivate();
                     // Notify any active action that orthogonal views are no longer available.
-                    _activeAction?.NotifyContextChanged(CreateActionContext());
+                    _activeTool?.NotifyContextChanged(CreateToolContext());
 
                     // Reset to neighbour strategy only when no axis is frozen
                     bool anyFrozen = false;
@@ -88,8 +89,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Sets <see cref="MxView.OverlayInfoText"/> to the current axis position (and global frame
-        /// when there are multiple axes) while the user is dragging an <see cref="AxisTracker"/> slider.
-        /// Called on <see cref="AxisTracker.SliderDragStarted"/> and on every <see cref="AxisTracker.IndexChanged"/>
+        /// when there are multiple axes) while the pointer is over an <see cref="AxisTracker"/> slider,
+        /// or a drag on one is in progress. Called on <see cref="AxisTracker.SliderDragStarted"/>,
+        /// <see cref="AxisTracker.SliderPointerEntered"/>, and on every <see cref="AxisTracker.IndexChanged"/>
         /// while <c>_isDraggingAxisTracker</c> is <c>true</c>.
         /// </summary>
         private void UpdateAxisDragOverlay(AxisTracker tracker)
@@ -115,6 +117,18 @@ namespace MxPlot.UI.Avalonia.Views
             }
             _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.TopRight;
             _view.OverlayInfoText = text;
+        }
+
+        /// <summary>
+        /// Clears the axis-drag overlay set by <see cref="UpdateAxisDragOverlay"/>. Called once neither
+        /// a hover nor a drag remains on the slider that showed it (see the callers in
+        /// <see cref="CreateAndWireAxisTracker"/>).
+        /// </summary>
+        private void HideAxisDragOverlay()
+        {
+            _isDraggingAxisTracker = false;
+            _view.OverlayInfoText = null;
+            _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.BottomLeft;
         }
 
         /// <summary>
@@ -146,16 +160,26 @@ namespace MxPlot.UI.Avalonia.Views
                 // TrimCacheTo below once orthogonal viewing ends. Remember the pre-Volume-mode
                 // capacity exactly once (not on every axis switch while already in Volume mode) so
                 // deactivation can restore it.
-                if (data.GetDiagnosticVirtualList() is { } vfl)
+                // Not MMF-specific: any ICacheableFrameList-backed data (MMF, TIFF Lazy decode, a
+                // future remote backend) benefits equally from a grown Volume-mode working set.
+                if (data.GetDiagnosticCacheableList() is { } cacheable)
                 {
                     if (_preVolumeModeCacheCapacity < 0)
-                        _preVolumeModeCacheCapacity = vfl.CacheCapacity;
+                    {
+                        _preVolumeModeCacheCapacity = cacheable.CacheCapacity;
+                        // Captured together, in the same "first time entering Volume mode this
+                        // session" guard, so the two always travel as a pair -- restored below
+                        // alongside the capacity, instead of the fixed plain NeighborStrategy()
+                        // that used to unconditionally replace whatever was active (e.g. discarding
+                        // TiffDecodedFrames<T>'s own widened, whole-file NeighborStrategy).
+                        _preVolumeModeCacheStrategy = data.CacheStrategy;
+                    }
 
                     long frameSizeBytes = (long)data.XCount * data.YCount * data.ElementSize;
                     int idealVolumeFrames = targetAxis.Count * Math.Max(1, compositeAxis?.Count ?? 1);
                     int grown = VirtualCachePolicy.ComputeCapacity(frameSizeBytes, idealVolumeFrames, VirtualCachePolicy.VolumeModeMemoryBudgetFraction);
-                    if (grown > vfl.CacheCapacity)
-                        vfl.CacheCapacity = grown;
+                    if (grown > cacheable.CacheCapacity)
+                        cacheable.CacheCapacity = grown;
                 }
 
                 if (data.CacheStrategy is DimensionStrategy ds)
@@ -178,14 +202,20 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 // Switch away from DimensionStrategy's Volume mode FIRST: while it's still active,
                 // every frame along the (former) target axis is marked high-priority uniformly, which
-                // would block most of TrimCacheTo's eviction. Only after NeighborStrategy is in place
-                // does trimming actually free the memory instead of mostly no-op'ing.
-                data.CacheStrategy = new NeighborStrategy();
+                // would block most of TrimCacheTo's eviction. Only after a non-Volume strategy is in
+                // place does trimming actually free the memory instead of mostly no-op'ing. Restore
+                // whatever was active before Volume mode (e.g. TiffDecodedFrames<T>'s own widened
+                // NeighborStrategy) rather than always resetting to a fresh plain one -- captured
+                // strategies are never a DimensionStrategy themselves (only this method ever installs
+                // one, and only after the capture point on entry), so this can't reintroduce the
+                // high-priority-blocks-eviction problem above.
+                data.CacheStrategy = _preVolumeModeCacheStrategy ?? new NeighborStrategy();
+                _preVolumeModeCacheStrategy = null;
 
                 if (_preVolumeModeCacheCapacity >= 0)
                 {
-                    if (data.GetDiagnosticVirtualList() is { } vfl)
-                        vfl.TrimCacheTo(_preVolumeModeCacheCapacity);
+                    if (data.GetDiagnosticCacheableList() is { } cacheable)
+                        cacheable.TrimCacheTo(_preVolumeModeCacheCapacity);
                     _preVolumeModeCacheCapacity = -1;
                 }
             }
@@ -194,10 +224,22 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>
         /// The virtual dataset's <c>CacheCapacity</c> as it was just before the first time
         /// <see cref="ApplyCacheStrategy"/> grew it for Volume mode, so it can be restored (and the
-        /// extra memory released via <see cref="IVirtualFrameList.TrimCacheTo"/>) once orthogonal
+        /// extra memory released via <see cref="ICacheableFrameList.TrimCacheTo"/>) once orthogonal
         /// viewing ends. -1 means "not currently elevated / nothing to restore".
         /// </summary>
         private int _preVolumeModeCacheCapacity = -1;
+
+        /// <summary>
+        /// The virtual dataset's <see cref="ICacheableFrameList.CacheStrategy"/> as it was just
+        /// before the first time <see cref="ApplyCacheStrategy"/> switched it to Volume mode's
+        /// <see cref="DimensionStrategy"/>, so it can be restored verbatim once orthogonal viewing
+        /// ends -- rather than always resetting to a fresh plain <see cref="NeighborStrategy"/>,
+        /// which would discard a backend-specific customization (e.g.
+        /// <c>TiffDecodedFrames{T}</c>'s own widened, whole-file-background-fill strategy). Captured
+        /// and restored together with <see cref="_preVolumeModeCacheCapacity"/>. Null means "not
+        /// currently elevated / nothing to restore".
+        /// </summary>
+        private ICacheStrategy? _preVolumeModeCacheStrategy;
 
         /// <summary>
         /// Resolves which axis should be preloaded/protected alongside the orthogonal target axis:
@@ -232,6 +274,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// Activates the orthogonal side views for the specified axis, or deactivates them
         /// when <paramref name="axisName"/> is <c>null</c>.
         /// Equivalent to toggling the 🧊 freeze button on the corresponding <see cref="AxisTracker"/>.
+        /// Has no effect on a window that receives a new data instance on every update (see <see cref="UpdateFreezeButtonVisibility"/>).
         /// </summary>
         /// <param name="axisName">
         /// The <see cref="Axis.Name"/> of the axis to freeze, or <c>null</c> to deactivate.
@@ -244,6 +287,7 @@ namespace MxPlot.UI.Avalonia.Views
                     t.FreezeButton.IsChecked = false;
                 return;
             }
+            if (ReceivesNewDataInstances) return;
             if (_axisTrackers.TryGetValue(axisName, out var tracker))
                 tracker.FreezeButton.IsChecked = true;
         }
@@ -269,14 +313,8 @@ namespace MxPlot.UI.Avalonia.Views
 
             bool colorCoded = _orthoPanel.ProjectionSelector.IsColorCoded(ProjectionPlane.XY);
             var xyMode = _orthoPanel.ProjectionSelector.GetMode(ProjectionPlane.XY);
-            string modeName = (colorCoded, xyMode) switch
-            {
-                (true, ProjectionMode.Minimum) => "Color(Min)",
-                (true, _) => "Color(Max)",
-                (false, ProjectionMode.Minimum) => "Min",
-                (false, ProjectionMode.Average) => "Avg",
-                _ => "Max",
-            };
+            string modeName = ProjectionModeName(
+                colorCoded, xyMode, _orthoPanel.ProjectionSelector.GetColorCodedBlend(ProjectionPlane.XY));
             if (_xyProjectionWindow == null || !_xyProjectionWindow.IsVisible)
             {
                 _xyProjectionWindow = MatrixPlotter.Create(projectionData, _view.Lut,
@@ -356,6 +394,27 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
+        /// <summary>
+        /// The short mode name used in the projection window's title and the baked dataset's label:
+        /// the plain projection's, or, for ColorCoded, the depth-color variant's (RGB-Max/RGB-Add/RGB-Avg
+        /// when <paramref name="colorBlend"/> is set, otherwise the winner-take-all Color(Max)/(Min)).
+        /// </summary>
+        private static string ProjectionModeName(bool colorCoded, ProjectionMode mode, ColorCodedBlend? colorBlend)
+            => colorCoded
+                ? colorBlend switch
+                {
+                    ColorCodedBlend.Maximum => "Color(RGB-Max)",
+                    ColorCodedBlend.Additive => "Color(RGB-Add)",
+                    ColorCodedBlend.Average => "Color(RGB-Avg)",
+                    _ => mode == ProjectionMode.Minimum ? "Color(Min)" : "Color(Max)",
+                }
+                : mode switch
+                {
+                    ProjectionMode.Minimum => "Min",
+                    ProjectionMode.Average => "Avg",
+                    _ => "Max",
+                };
+
         private static ColorCodedProjectionParams ToChildColorCodedParams(
             (int Start, int End, LookupTable? DepthLut, bool RangeFixed, double FixedMin, double FixedMax, bool Invert) p)
             => new(p.Start, p.End, p.DepthLut, p.RangeFixed, p.FixedMin, p.FixedMax, p.Invert);
@@ -378,7 +437,7 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// When Composite mode is active on this (parent) plotter, <paramref name="projectionData"/>
+        /// When Composite mode is active on this (parent) plotter, the projection window's data
         /// (built by <see cref="OrthogonalViewController.ComputeXYProjectionAsync"/> via the same
         /// per-channel-extract-and-merge as the XZ/YZ side views, <c>BuildChannelComposite</c>) is
         /// an N-frame Composite payload carrying its own cloned "Channel" axis — not a stripped
@@ -516,6 +575,12 @@ namespace MxPlot.UI.Avalonia.Views
             bool isColorCoded = plane == ProjectionPlane.XY
                 && _orthoPanel.ProjectionSelector.IsColorCoded(ProjectionPlane.XY)
                 && _orthoPanel.ProjectionSelector.IsProjectionEnabled(ProjectionPlane.XY);
+            // Color(RGB-Max)/(RGB-Add)/(RGB-Avg) bake the same way as Color(Max)/(Min) -- read-only scan
+            // parameters, RGB-decomposed output -- but blend with ColorCodedRgbBlender instead of
+            // picking a winner. null = winner-take-all.
+            ColorCodedBlend? colorCodedBlend = isColorCoded
+                ? _orthoPanel.ProjectionSelector.GetColorCodedBlend(ProjectionPlane.XY)
+                : null;
             // Captured once here (not re-read inside the Task.Run below) so the value baked and the
             // value recorded in the "reproduce this" history detail below are guaranteed to be the
             // same snapshot -- the dialog only ever displays this read-only, so it cannot itself
@@ -543,14 +608,7 @@ namespace MxPlot.UI.Avalonia.Views
                 channelAxisName = null;   // the channel axis is the one being collapsed
 
             string coloredAxisName = $"{axisName} (Colored)";
-            string modeLabel = isColorCoded
-                ? (initialMode == ProjectionMode.Minimum ? "Color(Min)" : "Color(Max)")
-                : initialMode switch
-                {
-                    ProjectionMode.Minimum => "Min",
-                    ProjectionMode.Average => "Avg",
-                    _ => "Max",
-                };
+            string modeLabel = ProjectionModeName(isColorCoded, initialMode, colorCodedBlend);
 
             var source = _currentData;
             _projectionCts?.Dispose();
@@ -571,8 +629,8 @@ namespace MxPlot.UI.Avalonia.Views
                     if (isColorCoded)
                     {
                         var baked = p.ThisPositionOnly
-                            ? BakeColorCodedThisPosition(source, axisName, initialMode, ccp!.Value)
-                            : BakeColorCodedAllPositions(source, axisName, initialMode, ccp!.Value, progress, ct);
+                            ? BakeColorCodedThisPosition(source, axisName, initialMode, ccp!.Value, colorCodedBlend)
+                            : BakeColorCodedAllPositions(source, axisName, initialMode, ccp!.Value, colorCodedBlend, progress, ct);
                         colorCodedValueMin = baked.ValueMin;
                         colorCodedValueMax = baked.ValueMax;
                         return baked.Data;
@@ -639,7 +697,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (p.ReplaceData)
             {
                 var newTitle = $"{modeLabel} {alongLabel}-Projection of {Title}";
-                SetMatrixData(result, closeSyncFollowers: true);
+                SetMatrixData(result, closeDerivedWindows: true);
                 Title = newTitle;
                 SetDirty(DirtyFlags.Data, true);
             }
@@ -708,14 +766,8 @@ namespace MxPlot.UI.Avalonia.Views
             child._compositeBlendMode = BlendMode.Additive;
             child._compositeScope = CompositeRangeScope.Global;
             child._compositeGlobalMode = ValueRangeMode.Fixed;
+            // In Fixed mode ApplyCompositeRanges mirrors the recipes' shared 0..255 onto the header bar.
             child.EnterCompositeMode(axis);
-            // Fixed mode deliberately skips auto-populating displayed ranges in ApplyCompositeRanges
-            // (EvaluateCompositeRange returns NaN for Fixed -- "keep the value the user already set"),
-            // trusting each per-channel BlendRecipeBar to already show the right numbers from its own
-            // constructor (new BlendRecipeBar(name, recipe) reads recipe.ValueMin/Max directly). The
-            // header _compositeRangeBar has no such constructor path -- it starts with no range set
-            // at all (BuildCompositeModeHeader only calls SetMode on it) -- so it has to be told here.
-            child._compositeRangeBar?.SetRange(0, 255);
         }
 
         /// <summary>
@@ -737,14 +789,19 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private ColorCodedBakeResult BakeColorCodedThisPosition(
             IMatrixData source, string axisName, ProjectionMode mode,
-            (int Start, int End, LookupTable? DepthLut, bool RangeFixed, double FixedMin, double FixedMax, bool Invert) p)
+            (int Start, int End, LookupTable? DepthLut, bool RangeFixed, double FixedMin, double FixedMax, bool Invert) p,
+            ColorCodedBlend? blendMode)
         {
+            // The winner scan is needed for the Auto range even when RGB-blending (the range is the
+            // Maximum projection's), exactly as in the live view.
             var (winnerIndex, winnerValue) = source.Apply(new ExtremumIndexOperation(mode, p.Start, p.End, axisName));
             var (naturalMin, naturalMax) = winnerValue.GetValueRange();
             double valueMin = p.RangeFixed ? p.FixedMin : naturalMin;
             double valueMax = p.RangeFixed ? p.FixedMax : naturalMax;
             var depthColors = BuildColorCodedDepthColors(p.DepthLut, p.Start, p.End, p.Invert);
-            var packed = ColorCodedColorizer.Colorize(winnerIndex, winnerValue, p.Start, valueMin, valueMax, depthColors);
+            var packed = blendMode is { } blend
+                ? ColorCodedRgbBlender.Blend(source, axisName, p.Start, p.End, valueMin, valueMax, depthColors, blend)
+                : ColorCodedColorizer.Colorize(winnerIndex, winnerValue, p.Start, valueMin, valueMax, depthColors);
             return new ColorCodedBakeResult(DecomposeToColoredAxis(packed, axisName), valueMin, valueMax);
         }
 
@@ -759,7 +816,7 @@ namespace MxPlot.UI.Avalonia.Views
         private ColorCodedBakeResult BakeColorCodedAllPositions(
             IMatrixData source, string axisName, ProjectionMode mode,
             (int Start, int End, LookupTable? DepthLut, bool RangeFixed, double FixedMin, double FixedMax, bool Invert) p,
-            IProgress<int>? progress, CancellationToken ct)
+            ColorCodedBlend? blendMode, IProgress<int>? progress, CancellationToken ct)
         {
             double valueMin, valueMax;
             if (p.RangeFixed)
@@ -793,8 +850,17 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 ct.ThrowIfCancellationRequested();
                 var bi = source.Dimensions.GetAxisIndices(fi);
-                var (winnerIndex, winnerValue) = source.Apply(new ExtremumIndexOperation(mode, p.Start, p.End, axisName, bi));
-                var packed = ColorCodedColorizer.Colorize(winnerIndex, winnerValue, p.Start, valueMin, valueMax, depthColors);
+                MatrixData<int> packed;
+                if (blendMode is { } blend)
+                {
+                    // No winner scan needed: the range is already fixed above.
+                    packed = ColorCodedRgbBlender.Blend(source, axisName, p.Start, p.End, valueMin, valueMax, depthColors, blend, bi);
+                }
+                else
+                {
+                    var (winnerIndex, winnerValue) = source.Apply(new ExtremumIndexOperation(mode, p.Start, p.End, axisName, bi));
+                    packed = ColorCodedColorizer.Colorize(winnerIndex, winnerValue, p.Start, valueMin, valueMax, depthColors);
+                }
                 if (width == 0)
                 {
                     width = packed.XCount;

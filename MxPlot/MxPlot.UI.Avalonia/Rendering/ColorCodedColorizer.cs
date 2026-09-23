@@ -10,7 +10,7 @@ namespace MxPlot.UI.Avalonia.Rendering
     /// Turns an <see cref="ExtremumIndexOperation"/> result (winner index + winner value, no
     /// colour) into a packed-ARGB image. Deliberately separate from Core: it needs a depth-colour
     /// palette (<c>int[]</c>, ARGB) and intensity range, which are UI/rendering concerns, not data
-    /// ones. See Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.3.
+    /// ones.
     /// <para>
     /// The live ColorCoded projection window no longer calls this: its own MatrixData is the
     /// winner *value* matrix directly, and <see cref="ColorCodedBitmapWriter"/> colorizes at

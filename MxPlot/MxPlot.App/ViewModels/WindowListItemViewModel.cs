@@ -1,4 +1,4 @@
-using Avalonia.Controls;
+﻿using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -88,9 +88,6 @@ namespace MxPlot.App.ViewModels
         public Window Window { get; }
 
         // ── Virtual properties (overridden by MatrixPlotterListItemViewModel) ────────
-
-        /// <summary>True when data is fully in-memory (no backing file). Always <c>false</c> for generic windows.</summary>
-        public virtual bool IsInMemory => false;
 
         /// <summary>True when data is virtual and the backing file is read-only. Always <c>false</c> for generic windows.</summary>
         public virtual bool IsVirtualReadOnly => false;

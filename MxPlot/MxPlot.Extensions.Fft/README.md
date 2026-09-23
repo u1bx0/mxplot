@@ -139,6 +139,19 @@ var spectra = timeSeries.Fft2DAllFrames(ShiftOption.Centered);
 var restored = spectra.InverseFft2DAllFrames(ShiftOption.Centered);
 ```
 
+A long stack can report progress and be cancelled. Cancellation is checked between frames: a frame that has
+started is transformed to the end, and the call then throws `OperationCanceledException`.
+
+```csharp
+using var cts = new CancellationTokenSource();
+IProgress<int> progress = new Progress<int>(i => { /* first a negative total, then 0 .. total-1 */ });
+
+var spectra = timeSeries.Fft2DAllFrames(ShiftOption.Centered, progress: progress, cancellationToken: cts.Token);
+
+// The same through the non-generic operation:
+var result = timeSeries.Apply(new Fft2DAllFramesOperation(ShiftOption.Centered, Inverse: false, progress, cts.Token));
+```
+
 👉 **[GitHub Repository: u1bx0/MxPlot](https://github.com/u1bx0/mxplot)**
 
 ## 📊 Version History

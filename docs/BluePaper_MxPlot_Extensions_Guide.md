@@ -58,7 +58,7 @@ and if the DLL name is `MxPlot.Extensions.{Name}.dll` it is registered automatic
 
 ```csharp
 using MxPlot.Core;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.Collections.Generic;
 
 namespace MxPlot.Extensions.Zarr
@@ -165,8 +165,14 @@ public sealed class ZarrFormat : IMatrixDataReader, IVirtualLoadable
 
 ### 3.4 Virtual Loading — Detailed Implementation
 
-"Virtual Mode" means frames are **read on-demand via MMF** instead of loading the entire file into RAM.
-This is effective for uncompressed files larger than a few GB.
+"Virtual Mode" means frames are **read on demand** instead of loading the entire file into RAM.
+For uncompressed files this is done through a memory-mapped file (MMF), which is what this section
+walks through. It is effective for files larger than a few GB.
+
+If each frame is compressed independently (as in compressed multi-IFD TIFF), MMF cannot be used,
+but you can still load lazily by deriving from `VirtualFrames<T>` and implementing
+`ReadFrame(index, ct)` to decode one frame. `MxPlot.Extensions.Tiff`'s `TiffDecodedFrames<T>` is
+the reference implementation.
 
 See also: **[VirtualFrames Guide](./VirtualFrames_Guide.md)** for the full storage architecture.
 
@@ -202,7 +208,7 @@ private static (long[][] offsets, long[][] byteCounts) ScanOffsets(
 }
 ```
 
-**Step 2: Construct `VirtualStrippedFrames<T>` and pass it to `MatrixData<T>`**
+**Step 2: Construct `StrippedMmfFrames<T>` and pass it to `MatrixData<T>`**
 
 ```csharp
 public IMatrixData ReadVirtual(string path)
@@ -210,9 +216,10 @@ public IMatrixData ReadVirtual(string path)
     var (width, height, frameCount, bytesPerPixel) = ReadHeaderInfo(path);
     var (offsets, byteCounts) = ScanOffsets(path, frameCount, width, height, bytesPerPixel);
 
-    // isYFlipped: true if the file stores rows bottom-up (BMP-style)
-    var vf = new VirtualStrippedFrames<float>(
-        path, width, height, offsets, byteCounts, isYFlipped: false);
+    // isYFlipped: true if the file stores rows top-down (see "Y-axis Orientation" below)
+    // isBigEndian: the file's byte order; the class swaps only if it differs from the host
+    var vf = new StrippedMmfFrames<float>(
+        path, width, height, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 
     // Ownership transfers to MatrixData; Dispose is automatic
     var md = MatrixData<float>.CreateAsVirtualFrames(width, height, vf);
@@ -251,43 +258,48 @@ Both thresholds can be changed at runtime.
 
 | Layout | Class | Typical formats |
 |---|---|---|
-| **Strip** (1 frame = 1–N row groups) | `VirtualStrippedFrames<T>` | FITS, Raw Binary, strip TIFF |
-| **Tile** (1 frame = M×N tile groups) | `VirtualTiledFrames<T>` | Tiled TIFF, large microscopy formats |
+| **Strip** (1 frame = 1–N row groups) | `StrippedMmfFrames<T>` | FITS, Raw Binary, strip TIFF |
+| **Tile** (1 frame = M×N tile groups) | `TiledMmfFrames<T>` | Tiled TIFF, large microscopy formats |
 
 **Strip:**
 
 ```csharp
-var vf = new VirtualStrippedFrames<float>(
-    path, width, height, offsets, byteCounts, isYFlipped: false);
+var vf = new StrippedMmfFrames<float>(
+    path, width, height, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 ```
 
 **Tile:**
 
 ```csharp
 // offsets[frameIndex][tileIndex] — tiles in left→right, top→bottom order
-var vf = new VirtualTiledFrames<ushort>(
+var vf = new TiledMmfFrames<ushort>(
     path, imageWidth, imageHeight,
     tileWidth, tileHeight,
-    offsets, byteCounts, isYFlipped: false);
+    offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 // Right/bottom edge tile clipping is handled automatically
 ```
 
 #### Cache Settings
 
-Default: LRU cache (16 frames) + NeighborStrategy (prefetch ±N).
+By default the cache size is derived from available memory and frame size
+(`VirtualCachePolicy`, 16–8192 frames), with `NeighborStrategy` prefetching nearby frames.
+Both can be overridden:
 
 ```csharp
 vf.CacheCapacity = 32;
-vf.CacheStrategy = new NeighborStrategy(ahead: 4, behind: 2);
+vf.CacheStrategy = new NeighborStrategy(lookAhead: 4, lookBehind: 2);
 ```
 
 #### Y-axis Orientation
 
-| Format | `isYFlipped` |
-|---|---|
-| TIFF (top-down) | `false` |
-| FITS (top-down) | `false` |
-| BMP / many astronomy formats (bottom-up) | `true` |
+MatrixData uses a bottom-left origin (row 0 is the bottom row). Set `isYFlipped: true` when the
+file stores the top row first, so rows are reversed on read.
+
+| Format | Row order in file | `isYFlipped` |
+|---|---|---|
+| TIFF | Top row first | `true` |
+| FITS | Bottom row first | `false` |
+| BMP (positive height) | Bottom row first | `false` |
 
 ---
 
@@ -399,7 +411,7 @@ Has access to all currently open datasets; suited for cross-window processing or
 
 ```csharp
 using MxPlot.App.Plugins;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.IO;
 
 namespace MyCompany.MxPlotAppPlugin.BatchExport
@@ -511,7 +523,7 @@ working across Avalonia and WinForms hosts.
 - [ ] (Optional) `CancellationToken` property — cancellation support
 - [ ] (Optional) `IVirtualLoadable` — virtual loading (§3.4)
   - [ ] Build offset table by header scan
-  - [ ] `VirtualStrippedFrames<T>` (strips) or `VirtualTiledFrames<T>` (tiles)
+  - [ ] `StrippedMmfFrames<T>` (strips) or `TiledMmfFrames<T>` (tiles) — or a `VirtualFrames<T>` subclass for per-frame compressed data
   - [ ] `MatrixData<T>.CreateAsVirtualFrames()`
   - [ ] `VirtualPolicy.Resolve()` for Auto mode
 

@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.4.0-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.5.0-orange)](https://github.com/u1bx0/mxplot/releases)
 [![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -123,7 +123,7 @@ The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from 
 - ✂️ **Substack / 3D Crop**: Extract a Z-range substack or crop a full 3D volume region — with sync-group support across linked windows
 - 💾 **File Session Management**: Unsaved-change tracking (`DirtyFlags`), close confirmation dialog, and `SaveAsAsync` / `DuplicateAsync` APIs for programmatic control
 - 🎨 **Composite Rendering**: Multi-channel display with per-channel color, contrast, gain and gamma — as commonly used in fluorescence microscopy. RGB color images open composited automatically, and can be converted back to grayscale. See the [Composite Rendering Guide](./docs/MatrixPlotter_Composite_Guide.md)
-- 🌈 **ColorCoded Rendering**: Live depth/time colour-coded projection — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection tinted by winning depth, in a linked child window with a drag-to-narrow depth histogram, adjustable palette, and Fixed/Auto intensity range. The projected data itself stays real values, so filtering, converting, and saving it all work normally — only the display is colour-coded.
+- 🌈 **ColorCoded Rendering**: Live depth/time colour-coded projection — pick `Color (Max)`/`Color (Min)` in the orthogonal-view projection selector for a Z (or any frozen-axis) projection tinted by winning depth (or `Color (RGB-Max)`/`Color (RGB-Add)`, which tint every slice by its depth and blend them so structures at different depths show through), in a linked child window with a drag-to-narrow depth histogram, adjustable palette, and Fixed/Auto intensity range. The projected data itself stays real values, so filtering, converting, and saving it all work normally — only the display is colour-coded.
 - 🎛️ **External Control**: Drive the displayed LUT and value range from host code through Facade properties (`plotter.Lut`, `plotter.RangeMode`, `plotter.FixedRange`) — see the [MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)
 - 📜 **Scripting (`MxPlotScriptHost`)**: Open MatrixPlotter windows from .NET 10 file-based apps (`dotnet run app.cs`), console tools, or notebook cells — no host application required. `Run(script)` starts the message loop, runs your script off the UI thread, and returns when every window it opened has closed. See [MatrixPlotter Usage Guide § Scripting with MxPlotScriptHost](./docs/MatrixPlotter_Usage_Guide.md)
 
@@ -199,7 +199,7 @@ Console.WriteLine($"Value range: [{min:F2}, {max:F2}]");
 
 ```csharp
 using MxPlot.Core;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 
 // Create 512×512 images with 10 Z-slices and 20 time points (200 frames total)
 var data = new MatrixData<ushort>(
@@ -419,7 +419,7 @@ MxPlot handles multi-dimensional data with a flexible, format-agnostic API. By a
 
 ```csharp
 using MxPlot.Core;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using MxPlot.Extensions.Tiff;  // For OME-TIFF
 
 // --- Saving: Choose your format ---
@@ -529,6 +529,14 @@ For detailed guides and technical references, see the **[Documentation Index](./
 
 
 ## 📊 Version History
+
+**v0.5.0** (Lazy-decode Virtual backends, Processing command unification, FFT, Resample)
+- 🗂️ **Lazy-Decode Virtual Backends**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand — TIFFs beyond 32,767 frames now load, and a 4,000-frame LZW stack drops from 31.1 s to 0.23 s.
+- 🧩 **Processing Commands**: Every one-shot Processing/Conversion menu operation shares one implementation, offering "This frame only" / "Sync source data" / "Replace data" consistently. Menu regrouped into Data / Scale / Processing / Info tabs.
+- 🌀 **FFT 2D (New)** and 📐 **Resample (New)**: Forward/inverse FFT and pixel-count resampling, both as ordinary menu commands with the same This-frame/Sync/Replace options.
+- 📊 **All-Mode Range Scan** and 🔬 **Cache Monitor**: Large-dataset value-range scans now run in the background with Cancel; a new flat-grid cache view.
+- 🐛 **Bug Fixes**: Composite/LUT-mode sync and header glitches; Sync-follower windows not redrawing or going stale on update; linked windows left pointing at dropped data.
+- ⚠️ **Breaking Changes**: File-format layer moved to `MxPlot.Core.IO.Formats`; several Virtual-frame type renames; `IPlotterAction` → `IPlotterTool`; `Normalize`/`LogTransform` dropped their single-frame-index parameter. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
 **v0.4.0** (ROI View, Transpose, Composite/side-view consistency, and rendering performance)
 - 🔍 **ROI View (New)**: "Open ROI View" opens a Rectangle/Oval overlay's enclosed region in its own synced window.

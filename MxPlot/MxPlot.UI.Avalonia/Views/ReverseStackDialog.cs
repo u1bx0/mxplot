@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Helpers;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -10,18 +11,17 @@ namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
     /// Modal dialog for reversing the frame order along one axis or all frames.
-    /// Returns a <see cref="ReverseStackParameters"/> on OK, or <c>null</c> on cancel.
+    /// Returns the <see cref="ReverseStackParameters"/> and the dialog's checkboxes on OK, or <c>null</c> on cancel.
     /// </summary>
     internal sealed class ReverseStackDialog : ProcessingDialogBase
     {
-        internal sealed record ReverseStackParameters(
-            string? AxisName,
-            bool ReplaceData);
+        /// <param name="AxisName">The axis to reverse along, or <see langword="null"/> for all frames.</param>
+        internal sealed record ReverseStackParameters(string? AxisName);
 
-        internal static Task<ReverseStackParameters?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false, IMatrixData? src = null)
+        internal static Task<DialogAnswer<ReverseStackParameters>?> ShowAsync(Window owner, IReadOnlyList<Axis> axes, bool isLinkWindow = false, IMatrixData? src = null)
         {
             var dlg = new ReverseStackDialog(axes, isLinkWindow, src);
-            return dlg.ShowDialog<ReverseStackParameters?>(owner);
+            return dlg.ShowDialog<DialogAnswer<ReverseStackParameters>?>(owner);
         }
 
         private ReverseStackDialog(IReadOnlyList<Axis> axes, bool isLinkWindow, IMatrixData? src)
@@ -55,7 +55,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             // ── Reverse all frames ────────────────────────────────────────────
             // With a single axis, reversing "all frames" (raw frame order) and reversing along
-            // that one axis are the same operation (see ReverseStackOperation.Execute) -- the
+            // that one axis are the same operation (see DimensionalOperator.ReverseStack) -- the
             // checkbox would just be a confusing second way to say the same thing, so it is
             // hidden entirely rather than merely disabled, mirroring how CreateProjectionDialog
             // hides "This position only" when there are no surviving axes to distinguish.
@@ -77,8 +77,7 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 bool allAxes = allAxesChk.IsChecked == true;
                 string? axisName = allAxes ? null : axisCombo.SelectedItem as string;
-                bool replace = ReplaceDataCheckBox.IsChecked == true;
-                Close(new ReverseStackParameters(axisName, replace));
+                Close(Answer(new ReverseStackParameters(axisName)));
             });
         }
     }

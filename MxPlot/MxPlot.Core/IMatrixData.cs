@@ -1,4 +1,5 @@
 ﻿using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -120,7 +121,13 @@ namespace MxPlot.Core
         # region Properties related to virtual data and caching
 
         /// <summary>
-        /// Gets whether the data is virtual (e.g., memory-mapped file) or in-memory. Virtual data may require explicit disposal and may have different performance characteristics.
+        /// Gets whether the data currently does not hold every frame resident in memory (e.g., a
+        /// memory-mapped file, a compressed format still background-filling its cache, a Remote
+        /// fetch still retrieving chunks) as opposed to a plain in-memory array. Virtual data may
+        /// require explicit disposal (see <see cref="RequiresDisposal"/>, a separate, independent
+        /// concern) and may have different performance characteristics. MMF-backed data is always
+        /// <see langword="true"/>; a compressed-decode or Remote backend may become
+        /// <see langword="false"/> once every frame has actually been loaded.
         /// </summary>
         bool IsVirtual { get; }
 
@@ -151,8 +158,10 @@ namespace MxPlot.Core
         bool IsWritable { get; }
 
         /// <summary>
-        /// Gets or sets the caching strategy used to manage cached data for <see cref="VirtualFrames{T}"/> instances.
-        /// This is valid only if IsVirtual is true.
+        /// Gets or sets the caching strategy used to manage cached data for any on-demand
+        /// (<see cref="ICacheableFrameList"/>-implementing) backend -- MMF, compressed-decode, or
+        /// Remote. Null if the backend does not implement <see cref="ICacheableFrameList"/> (e.g.
+        /// plain in-memory data).
         /// </summary>
         /// <remarks>Selecting an appropriate caching strategy can impact performance and resource usage.
         /// Different implementations of <see cref="ICacheStrategy"/> may be suitable depending on the application's
@@ -166,9 +175,16 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// Returns the underlying virtual frame list for diagnostic purposes, or null if the data is not virtual.
+        /// Returns the underlying cache-control surface (<see cref="ICacheableFrameList.CacheCapacity"/>,
+        /// <see cref="ICacheableFrameList.TrimCacheTo"/>, etc.) for diagnostic/tuning purposes, or
+        /// null if the data is not backed by one. One accessor for every on-demand backend (MMF,
+        /// compressed-decode, a future remote/chunk-based backend) -- a caller that specifically
+        /// needs to know "is this MMF" (e.g. to gate MMF-only UI) pattern-matches the result against
+        /// <see cref="IMmfFrameList"/> itself rather than calling a separate, narrower accessor.
+        /// <see cref="CacheStrategy"/> is already exposed generically at this level and does not
+        /// need this accessor.
         /// </summary>
-        IVirtualFrameList? GetDiagnosticVirtualList();
+        ICacheableFrameList? GetDiagnosticCacheableList();
 
         #endregion 
 

@@ -7,8 +7,9 @@ using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using MxPlot.Core;
+using MxPlot.Core.IO;
 using MxPlot.Core.Utils;
-using MxPlot.UI.Avalonia.Actions;
+using MxPlot.UI.Avalonia.Tools;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
@@ -65,7 +66,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// windows whose <see cref="IMatrixData"/> instance changes on every parent frame
         /// navigation but whose overlay state (line profiles, ROI, statistics) must survive.
         /// Updates <see cref="_view"/> and <see cref="_currentData"/>, then refreshes all
-        /// derived state (overlay analysis, histograms).
+        /// derived state (overlay analysis, histograms, the Scale tab).
         /// </summary>
         internal void UpdateProjectionData(IMatrixData data)
         {
@@ -141,13 +142,23 @@ namespace MxPlot.UI.Avalonia.Views
             // histogram pinned to whatever frame was on screen when the window was first opened,
             // since that window's only other _currentData sync (SyncCurrentDataFromView, in
             // ApplyCompositeStateToProjectionWindow) is gated to the Composite-mode branch.
+            if (!ReferenceEquals(_currentData, data)) CancelValueRangeScan();
             _currentData = data;
+            SubscribeLazySource(data);
 
             // Derived state that the suppressed re-init used to refresh as a side effect. Same set
             // and same visibility gating as DoRefresh, since this is the other way a window's
             // content changes without its own Refresh running.
             RefreshAllOverlayAnalysis();
             RefreshHistograms();
+
+            // The Scale tab (X/Y pixel counts, min/max, step) is rebuilt from _currentData, which was
+            // just updated above - without this, a window whose pixel count changes on every update
+            // (a Resample/FFT Sync follower of a resized ROI View, for instance) keeps showing
+            // whatever size the tab last had when the hamburger menu was opened, even though the data
+            // and the rendered image are already correct. Cheap (a handful of controls) even when the
+            // panel is not currently shown, so unlike RefreshHistograms this needs no visibility gate.
+            RefreshScaleTab();
 
             // This window's content just changed, which is all Refreshed claims to mean - and
             // windows live-derived from this one have nothing else to listen to. Without it a
@@ -206,8 +217,10 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// <c>true</c> while the user is dragging an <see cref="AxisTracker"/> slider.
-        /// Used to update the drag overlay on index changes during the drag gesture.
+        /// <c>true</c> while the pointer is over an <see cref="AxisTracker"/> slider, or a drag on one is
+        /// in progress (the two can outlive each other: a drag continues past the slider's bounds if the
+        /// pointer strays outside them, and a hover continues past a released drag if the pointer never
+        /// left). Used to update the drag overlay on index changes while either is true.
         /// </summary>
         private bool _isDraggingAxisTracker;
             
@@ -215,7 +228,7 @@ namespace MxPlot.UI.Avalonia.Views
         // Status bar segments
         private TextBlock _dirtyBadge;   // "●" shown when view settings are modified
         private TextBlock _infoText;     // "[float]  11.9 GB"
-        private TextBlock _virtualBadge; // "(Virtual)" → clickable, visible only when virtual
+        private TextBlock _virtualBadge; // "(Mapped)" / "(Cached NN%)" → visible only when virtual
         private TextBlock _zoomText;     // "|  200% [Fit]"
         private TextBlock _noticeText;   // transient info (overlay dimensions, etc.)
         private TextBlock _progressSep;  // "|" separator before progress area
@@ -223,6 +236,24 @@ namespace MxPlot.UI.Avalonia.Views
         private ProgressBar _progressBar;
         private Button _progressCancelBtn;       // "✕", visible only while the running operation is cancellable
         private CancellationTokenSource? _progressCts;  // owned by the caller of BeginProgress, not by us
+
+        // ── Deferred progress reveal ──────────────────────────────────────
+        // A progress session can open and close faster than anyone can read it, and showing the
+        // bar for those is worse than showing nothing: the status bar flickers between the bar and
+        // whatever it normally displays. Live capture is the extreme case - every frame dirties
+        // the per-frame range cache, so All mode restarts a background value-range scan tens of
+        // times a second (see DeferFullValueRangeScan), and each scan finishes in a few tens of
+        // milliseconds.
+        // So BeginProgress now only *opens a session*; the bar appears once that session has
+        // lasted long enough to be worth reading. Anything that must take effect immediately -
+        // input blocking, Cancel wiring - still happens in BeginProgress.
+        private static readonly TimeSpan ProgressRevealDelay = TimeSpan.FromMilliseconds(300);
+        private DispatcherTimer? _progressRevealTimer;
+        private bool _progressActive;    // a session is open, revealed or not - "the status bar is taken"
+        private bool _progressRevealed;  // the indicator is actually on screen
+        private string _progressLabel = string.Empty;
+        private int _progressPendingTotal;  // last reported total; 0 = still indeterminate
+        private int _progressPendingValue;  // last reported step, replayed if the session is revealed
         private Border _statusBarBorder;         // the input blocker stops above this so Cancel stays clickable
         private Border? _inputBlocker;           // transparent hit-test blocker during blocking operations
         private Action? _inputBlockerCleanup;    // removes the OverlayLayer.PropertyChanged handler
@@ -234,8 +265,20 @@ namespace MxPlot.UI.Avalonia.Views
         // One CacheMonitorWindow per MatrixPlotter
         private CacheMonitorWindow? _cacheMonitorWindow;
 
+        // Drives the "(Cached NN%)" badge while a non-MMF on-demand backend (e.g. TIFF Lazy
+        // decode) is still filling its cache in the background -- MMF's "(Mapped)" badge never
+        // needs this, since its cache occupancy is not a meaningful progress signal (see
+        // ILazyDataSource.IsVirtual's remarks). Started/stopped from UpdateStatusBar as the badge
+        // state requires; not running at all is the common case.
+        private DispatcherTimer? _cachedBadgeTimer;
+
+        // Backend of _currentData whose IsVirtualChanged this window is subscribed to (null for
+        // InMemory data). See SubscribeLazySource.
+        private ILazyDataSource? _lazySource;
+
         // Value range bar + inline settings panel
         private ValueRangeBar _rangeBar;
+        internal ValueRangeBar RangeBar => _rangeBar;
         private Button _settingsBtn;
         private Border _lutModeDetails;
 
@@ -422,7 +465,7 @@ namespace MxPlot.UI.Avalonia.Views
         private ScaleSnapshot? _cropUndoScaleSnapshot;
 
         // Active interactive action (Crop, etc.)
-        private IPlotterAction? _activeAction;
+        private IPlotterTool? _activeTool;
 
         // ── Resume settings state ────────────────────────────────────────────
         /// <summary>
@@ -930,7 +973,8 @@ namespace MxPlot.UI.Avalonia.Views
                 var a = axes[i];
                 var s = snap.Axes[i];
                 if (a.Min != s.Min || a.Max != s.Max
-                    || (a.Unit ?? "") != s.Unit || (a.Name ?? "") != s.Name) return false;
+                    || (a.Unit ?? "") != s.Unit || (a.Name ?? "") != s.Name
+                    || a.IsIndexBased != s.IsIndexBased) return false;
 
                 var liveTags = a is TaggedAxis tagged ? tagged.Tags : null;
                 if ((liveTags == null) != (s.Tags == null)) return false;
@@ -1057,10 +1101,16 @@ namespace MxPlot.UI.Avalonia.Views
             var axes = _currentData.Axes;
             for (int i = 0; i < snap.Axes.Length && i < axes.Count; i++)
             {
-                axes[i].Min = snap.Axes[i].Min;
-                axes[i].Max = snap.Axes[i].Max;
-                axes[i].Unit = snap.Axes[i].Unit;
-                axes[i].Name = snap.Axes[i].Name;
+                var s = snap.Axes[i];
+                // Min/Max setters are ignored while an axis is index-based, so the flag has to be
+                // released before they are written and only re-asserted afterwards (turning it on
+                // resets Min/Max to 0..Count-1 by itself).
+                if (!s.IsIndexBased && axes[i].IsIndexBased) axes[i].IsIndexBased = false;
+                axes[i].Min = s.Min;
+                axes[i].Max = s.Max;
+                axes[i].Unit = s.Unit;
+                axes[i].Name = s.Name;
+                if (s.IsIndexBased && !axes[i].IsIndexBased) axes[i].IsIndexBased = true;
             }
             RestoreChannelTags();
 
@@ -1302,8 +1352,10 @@ namespace MxPlot.UI.Avalonia.Views
             child.Position = new PixelPoint(x, parent.Position.Y);
         }
 
-        private void OnLinkedChildRefreshed(object? sender, EventArgs e) => Refresh();
-        private void OnLinkedParentRefreshed(object? sender, EventArgs e) => Refresh();
+        // The two windows share one set of frame buffers, so a content change seen by one is a
+        // content change for the other's orthogonal slices and projection as well.
+        private void OnLinkedChildRefreshed(object? sender, EventArgs e) => Refresh(rebuildOrthogonalData: true);
+        private void OnLinkedParentRefreshed(object? sender, EventArgs e) => Refresh(rebuildOrthogonalData: true);
 
         private void OnLinkedChildClosed(object? sender, EventArgs e)
         {
@@ -1370,6 +1422,8 @@ namespace MxPlot.UI.Avalonia.Views
             CloseLinkedChildren();
             CloseAllLineProfiles();
             CloseCacheMonitor();
+            SubscribeLazySource(null);
+            CancelValueRangeScan();
             (DataContext as IDisposable)?.Dispose();
         }
 
@@ -1503,18 +1557,25 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <param name="data">The data to display.</param>
-        /// <param name="closeSyncFollowers">
+        /// <param name="closeDerivedWindows">
         /// Pass <see langword="true"/> when this call is a deliberate "Replace data" user action
         /// (Log Transform / Normalize / Convert / Crop / Grayscale / Extract / Reverse Stack, etc.)
-        /// rather than a routine internal refresh. Closes every window currently syncing its
-        /// content from this one first — see <see cref="CloseSyncFollowers"/> for why a follower's
-        /// subscriptions would otherwise silently go stale. Leave <see langword="false"/> (default)
+        /// rather than a routine internal refresh. Closes first every window derived from the data
+        /// being replaced: the windows syncing their content from this one (see
+        /// <see cref="CloseSyncFollowers"/> for why a follower's subscriptions would otherwise
+        /// silently go stale) and the linked windows that share its frame buffers (see
+        /// <see cref="CloseLinkedChildren"/>, which would otherwise go on showing, and for virtual data
+        /// reading, frames of data this window has let go of). Leave <see langword="false"/> (default)
         /// for internal recompute ticks (sync followers refreshing themselves, orthogonal live-extract
         /// refresh) where the "same logical view, new data" relationship should be preserved.
         /// </param>
-        private void SetMatrixData(IMatrixData? data, bool closeSyncFollowers = false)
+        private void SetMatrixData(IMatrixData? data, bool closeDerivedWindows = false)
         {
-            if (closeSyncFollowers) CloseSyncFollowers();
+            if (closeDerivedWindows)
+            {
+                CloseSyncFollowers();
+                CloseLinkedChildren();
+            }
             using var _ = _reentrancy.Begin(GuardContext.Initializing);
 
             // Capture current state before replacing so we can decide whether to preserve view settings.
@@ -1548,15 +1609,17 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             // Dispose any active action — its ROIs were created for the old data context.
-            if (_activeAction != null)
+            if (_activeTool != null)
             {
-                _activeAction.Completed -= OnActionCompleted;
-                _activeAction.Cancelled -= OnActionCancelled;
-                _activeAction.Dispose();
-                _activeAction = null;
+                _activeTool.Completed -= OnToolCompleted;
+                _activeTool.Cancelled -= OnToolCancelled;
+                _activeTool.Dispose();
+                _activeTool = null;
             }
 
+            if (!ReferenceEquals(_currentData, data)) CancelValueRangeScan();
             _currentData = data;
+            SubscribeLazySource(data);
             if (data != null)
             {
                 _dataScaleChangedHandler = (_, _) =>
@@ -1805,7 +1868,18 @@ namespace MxPlot.UI.Avalonia.Views
         private void WireAxisConfigButtons(AxisTracker tracker, IMatrixData data, Axis axis)
         {
             tracker.RenameAxisRequested   += async (_, _) => await RenameAxisAsync(data, axis);
-            tracker.ScaleSettingRequested  += (_, _) => ShowMenuPanelOnScaleTab();
+            tracker.ScaleSettingRequested += (_, _) => 
+            {
+                if (_menuPanel == null)
+                    _menuPanel = BuildMenuPanel();
+                ShowMenuPanel();
+                if (_scaleTabBody?.Parent is ScrollViewer sv &&
+                    sv.Parent is TabItem ti &&
+                    ti.Parent is TabControl tc)
+                {
+                    tc.SelectedItem = ti;
+                }
+            };
             tracker.CompositeModeRequested += async (_, _) =>
             {
                 if (!axis.IsIndexBased && !await ScaleLossConfirmDialog.ShowAsync(this, axis.Name))
@@ -1877,6 +1951,11 @@ namespace MxPlot.UI.Avalonia.Views
         private void RebuildTrackerPanel(IMatrixData data)
         {
             _orthoController.Deactivate();
+            // ResetCompositeUiState below drops this window to LUT mode, but only ExitCompositeMode
+            // used to tell the orthogonal controller. Left alone it kept the old Composite shape,
+            // so once the view was frozen again the side views rendered Composite under a LUT-mode
+            // MainView. Done right after Deactivate() so the controller has no data to recompute.
+            _orthoController.SetCompositeState(false, -1, 0, null, BlendMode.Additive);
             UnwireAllAxisSync();
             _trackerPanel.Children.Clear();
             _axisTrackers.Clear();
@@ -1891,9 +1970,10 @@ namespace MxPlot.UI.Avalonia.Views
         /// <see cref="_trackerPanel"/>/<see cref="_axisTrackers"/>, and wires every event it fires --
         /// the Config-menu events (<see cref="WireAxisConfigButtons"/>), the Freeze button
         /// (<see cref="WireFreezeButton"/>), Sync-broadcast (<see cref="WireAxisSync"/>), the Time
-        /// axis's animation interval, and the drag-overlay text
-        /// (<see cref="SliderDragStarted"/>/<c>IndexChanged</c>/<c>SliderDragEnded</c> ->
-        /// <see cref="UpdateAxisDragOverlay"/>).
+        /// axis's animation interval, and the drag-overlay text (<c>SliderDragStarted</c>/
+        /// <c>SliderPointerEntered</c>/<c>IndexChanged</c> -> <see cref="UpdateAxisDragOverlay"/>;
+        /// <c>SliderDragEnded</c>/<c>SliderPointerExited</c> -> <see cref="HideAxisDragOverlay"/>,
+        /// once neither a drag nor a hover remains).
         /// <para>
         /// Both places that build trackers from scratch -- the initial loop in
         /// <see cref="SetMatrixData"/> and this method's own caller, <see cref="RebuildTrackerPanel"/>
@@ -1901,8 +1981,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// of sync is exactly what left <see cref="RebuildTrackerPanel"/>'s trackers without the
         /// drag-overlay handlers before this method existed. That gap went unnoticed for a long time
         /// because <see cref="RebuildTrackerPanel"/> used to run only on the narrow "axis downgraded
-        /// on rename" path; generalizing Composite to any axis (see Tests.Documents/Working/
-        /// ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.7) means it now also runs on every
+        /// on rename" path; generalizing Composite to any axis means it now also runs on every
         /// first-time promotion of a not-yet-tagged axis, which made the gap easy to hit.
         /// </para>
         /// </summary>
@@ -1926,18 +2005,37 @@ namespace MxPlot.UI.Avalonia.Views
             _trackerPanel.Children.Add(tracker);
             _axisTrackers[axis.Name] = tracker;
             WireFreezeButton(tracker, axis);
+            tracker.FreezeButton.IsVisible = !ReceivesNewDataInstances;
             WireAxisSync(axis);
             WireAxisConfigButtons(tracker, data, axis);
-            tracker.SliderDragStarted += (_, _) => UpdateAxisDragOverlay(tracker);
+            bool isDragging = false;
+            bool isHovering = false;
+            tracker.SliderDragStarted += (_, _) =>
+            {
+                isDragging = true;
+                UpdateAxisDragOverlay(tracker);
+            };
             tracker.IndexChanged += (_, _) =>
             {
                 if (_isDraggingAxisTracker) UpdateAxisDragOverlay(tracker);
             };
             tracker.SliderDragEnded += (_, _) =>
             {
-                _isDraggingAxisTracker = false;
-                _view.OverlayInfoText = null;
-                _view.OverlayInfoTextAnchor = OverlayInfoTextAnchor.BottomLeft;
+                isDragging = false;
+                if (!isHovering) HideAxisDragOverlay();
+            };
+            tracker.SliderPointerEntered += (_, _) =>
+            {
+                isHovering = true;
+                UpdateAxisDragOverlay(tracker);
+            };
+            tracker.SliderPointerExited += (_, _) =>
+            {
+                isHovering = false;
+                // A drag captures the pointer, so it keeps changing the index (and firing IndexChanged)
+                // even once the pointer strays outside the slider's bounds -- don't hide the overlay on
+                // this exit while that's still happening, or it would flicker off and straight back on.
+                if (!isDragging) HideAxisDragOverlay();
             };
         }
 
@@ -2048,7 +2146,18 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private void RefreshAllModeImperfectBadge(IMatrixData data)
         {
-            if (!data.IsVirtual) return; // "unscanned" only applies to Virtual data; InMemory is never imperfect
+            if (!data.IsVirtual && _valueRangeScanCts == null && !ReferenceEquals(_valueRangeScanDeclinedFor, data))
+            {
+                // Selecting All on non-Virtual data runs a full scan (see ApplyAllModeRange), so it is
+                // never imperfect. Clear explicitly rather than just returning: IsVirtual is dynamic
+                // for non-MMF backends (e.g. TIFF Lazy decode turns non-Virtual once fully cached),
+                // and a count set while it was still filling would otherwise stay on the menu.
+                // While a background scan runs, or after the user cancelled one, fall through and
+                // report what is actually cached instead.
+                _rangeBar.SetImperfect(false, 0);
+                _rangeBar.SetFullScanAvailable(false);
+                return;
+            }
 
             int valueMode = data.ValueType == typeof(System.Numerics.Complex)
                 ? (int)_view.ComplexValueMode : 0;
@@ -2067,11 +2176,20 @@ namespace MxPlot.UI.Avalonia.Views
             }
 
             _rangeBar.SetImperfect(invalidCount > 0, invalidCount);
+            // Manual full-scan button: only meaningful for a backend that ApplyAllModeRange never
+            // scans automatically on its own (IsVirtual == true covers both MMF, which never
+            // auto-scans, and a still-filling Lazy-decode backend). Once IsVirtual flips false --
+            // e.g. a Lazy-decode backend finishing its background fill -- this quietly goes false
+            // too, hiding the button; the automatic background scan (DeferFullValueRangeScan)
+            // takes over from there.
+            _rangeBar.SetFullScanAvailable(data.IsVirtual);
         }
 
         /// <summary>
         /// Applies the global value range to the view and updates the imperfect state.
-        /// For InMemory data: synchronous full scan (forceRefresh=true).
+        /// For non-Virtual data: full scan (forceRefresh=true) -- synchronous when small, otherwise
+        /// started in the background (see <see cref="DeferFullValueRangeScan"/>) with the cached-only
+        /// result shown meanwhile.
         /// For Virtual data: cached-only lookup (forceRefresh=false); shows imperfect warning when some frames are not yet scanned.
         /// </summary>
         private void ApplyAllModeRange()
@@ -2087,7 +2205,9 @@ namespace MxPlot.UI.Avalonia.Views
                 ? (int)_view.ComplexValueMode : 0;
 
             int invalidCount = 0;
-            if (data.IsVirtual)
+            // Non-Virtual data with many unscanned frames (e.g. a fully cached Lazy decode) scans in
+            // the background instead of here; until it finishes, show what is cached, like Virtual.
+            if (data.IsVirtual || DeferFullValueRangeScan(data))
             {
                 if (valueMode == 0)
                 {
@@ -2126,6 +2246,122 @@ namespace MxPlot.UI.Avalonia.Views
                 _rangeBar.SetRange(min, max);
             }
             _rangeBar.SetImperfect(imperfect, invalidCount);
+            _rangeBar.SetFullScanAvailable(data.IsVirtual); // see the matching note in RefreshAllModeImperfectBadge
+        }
+
+        // Background scan for All on non-Virtual data with many unscanned frames -- typically a Lazy
+        // decode that has just become fully cached, whose ranges are computed on request only. Below
+        // these thresholds the scan stays synchronous, so small datasets never flash a progress bar.
+        //
+        // The pixel threshold is deliberately generous, because non-Virtual means the data is
+        // already in RAM and a min/max pass over it is memory-bandwidth bound -- tens of
+        // milliseconds for hundreds of megabytes. It only exists to keep a genuinely huge in-memory
+        // dataset from freezing the window when the user switches to All; it is not meant to
+        // second-guess ordinary image sizes.
+        //
+        // The old value of 16M put 4K RGB24 (3 channels x 8.29M = 24.9M) on the background path,
+        // which broke live capture badly: every frame dirties the per-frame range cache, so All
+        // mode restarted a scan ~30x a second, the status bar flickered between the progress bar and
+        // the fps readout, and -- because the background path falls back to the cached-only lookup --
+        // LUT mode permanently showed the "imperfect" asterisk for whichever channels were not the
+        // active frame. All of that was an artefact of declining the scan, not a real shortfall.
+        // Scanning 24.9M bytes synchronously is a few milliseconds and is exactly what All asks for.
+        //
+        // Note the unit is elements, not bytes, so the effective byte cost scales with the value
+        // type (250M doubles is 2 GB). The frame-count threshold above covers most of that in
+        // practice, since large high-precision datasets tend to be multi-frame.
+        private const int BackgroundScanFrameThreshold = 1_000;
+        private const long BackgroundScanPixelThreshold = 250_000_000;
+        private CancellationTokenSource? _valueRangeScanCts;  // non-null while a scan runs
+        private IMatrixData? _valueRangeScanDeclinedFor;     // cancelled by the user; cached-only until a mode is chosen again
+
+        /// <summary>
+        /// Returns <see langword="true"/> when a caller about to force a full range scan on
+        /// non-Virtual data must use the cached-only lookup instead: a background scan is running
+        /// (it re-applies the ranges when done), has just been started, or was cancelled for this data.
+        /// </summary>
+        private bool DeferFullValueRangeScan(IMatrixData data)
+        {
+            if (data.IsVirtual) return false; // Virtual callers already use the cached-only lookup
+            if (_valueRangeScanCts != null || ReferenceEquals(_valueRangeScanDeclinedFor, data)) return true;
+            // _progressActive, not _progressBar.IsVisible: a session that has not been revealed yet
+            // still owns the status bar (see the ProgressRevealDelay field group).
+            if (_progressActive) return false; // another operation owns the status bar
+
+            data.GetGlobalValueRange(out var invalids, forceRefresh: false);
+            if (invalids.Count < BackgroundScanFrameThreshold
+                && (long)invalids.Count * data.XCount * data.YCount < BackgroundScanPixelThreshold)
+                return false;
+
+            data.GetValueRange(data.ActiveIndex); // so the renderer never reads a range the worker is writing
+            _ = RunValueRangeScanAsync(data, invalids);
+            return true;
+        }
+
+        /// <summary>
+        /// Handles the 🔄 button on any range bar (LUT toolbar or Composite header): confirms with
+        /// the user, then scans every frame whose range is not cached yet. The work is dataset-wide,
+        /// so which bar asked for it makes no difference.
+        /// </summary>
+        private async Task RequestFullValueRangeScanAsync()
+        {
+            // Meaningless for the packed-ARGB projection view, same guard as SearchMin/Max.
+            if (IsColorCodedProjectionChild) return;
+            var data = _currentData;
+            if (data == null || _valueRangeScanCts != null) return;
+
+            if (!await FullValueRangeScanConfirmDialog.ShowAsync(this)) return;
+            // The window may have loaded different data, or closed, while the dialog was open.
+            if (!ReferenceEquals(_currentData, data) || _valueRangeScanCts != null) return;
+
+            data.GetGlobalValueRange(out var invalids, false); // cached-only: what's left to scan
+            if (invalids.Count == 0) return; // finished (e.g. background fill) while the dialog was open
+            data.GetValueRange(data.ActiveIndex); // keep the renderer's frame off the worker's write path, same as DeferFullValueRangeScan
+            _ = RunValueRangeScanAsync(data, invalids);
+        }
+
+        private async Task RunValueRangeScanAsync(IMatrixData data, List<int> invalids)
+        {
+            var cts = new CancellationTokenSource();
+            _valueRangeScanCts = cts;
+            var progress = BeginProgress("Scanning value range…", blockInput: true, cts);
+            bool cancelled;
+            try
+            {
+                progress.Report(-invalids.Count);
+                cancelled = await Task.Run(() =>
+                {
+                    int step = Math.Max(1, invalids.Count / 200);
+                    for (int k = 0; k < invalids.Count; k++)
+                    {
+                        if (cts.IsCancellationRequested) return true;
+                        data.GetValueRange(invalids[k]);
+                        if (k % step == 0) progress.Report(k);
+                    }
+                    return false;
+                });
+            }
+            catch (Exception ex) // e.g. the data was disposed as the window closed
+            {
+                Debug.WriteLine($"[MatrixPlotter] Value-range scan failed: {ex.Message}");
+                cancelled = true;
+            }
+            finally
+            {
+                _valueRangeScanCts = null;
+                EndProgress();
+                cts.Dispose();
+            }
+
+            if (!ReferenceEquals(_currentData, data)) return;
+            if (cancelled) _valueRangeScanDeclinedFor = data; // keep All with the partial range and "*"
+            RefreshVirtualDependentState();
+        }
+
+        private void CancelValueRangeScan()
+        {
+            _valueRangeScanCts?.Cancel();
+            _valueRangeScanDeclinedFor = null;
         }
 
         /// <summary>
@@ -2311,18 +2547,26 @@ namespace MxPlot.UI.Avalonia.Views
                 Dispatcher.UIThread.Post(() => SetNotice(text));
                 return;
             }
-            _toastCts?.Cancel();
+            // No longer cancels _toastCts: that coupling dates back to when ShowToast repurposed
+            // this same _noticeText (see the dead overload below) and the two had to take turns.
+            // ShowToast now owns its own separate _toastPanel, so the two are independent and a
+            // status update here must not cut off an in-progress toast.
             _noticeText.Classes.Remove("toast");
             _noticeText.Opacity = 1.0;
             _noticeText.Text = text ?? string.Empty;
-            _noticeText.IsVisible = !string.IsNullOrEmpty(text) && !_progressBar.IsVisible;
+            // _progressRevealed, not _progressActive: this competes with the indicator for the
+            // same strip of status bar, so it only has to yield once the indicator is really there.
+            _noticeText.IsVisible = !string.IsNullOrEmpty(text) && !_progressRevealed;
         }
 
         /// <summary>
-        /// Displays a transient toast message in the status bar notice area.
+        /// Displays a transient toast message in the status bar notice area. Unlike
+        /// <see cref="SetNotice"/>, which persists until explicitly cleared, this fades out on its
+        /// own after a few seconds - suited to one-off confirmations (e.g. "file saved") that
+        /// shouldn't linger over other status text.
         /// </summary>
         /// <param name="message"></param>
-        private async void ShowToast(string message)
+        public async void ShowToast(string message)
         {
             if (!Dispatcher.UIThread.CheckAccess())
             {
@@ -2334,7 +2578,21 @@ namespace MxPlot.UI.Avalonia.Views
             _toastCts = new CancellationTokenSource();
             var token = _toastCts.Token;
 
-            if (_progressBar.IsVisible) return;
+            // Cancellation here means either SetNotice cancelled us to show its own status text
+            // (nothing further to do - it doesn't touch _toastPanel), or a newer ShowToast call
+            // superseded us (which owns _toastPanel's state now and must not be clobbered). Only
+            // hide the panel ourselves in the former case, i.e. while _toastCts still IS this call's
+            // own CTS - if a newer call already replaced it, this reference will no longer match.
+            void HideIfStillCurrent()
+            {
+                if (!ReferenceEquals(_toastCts, null) && _toastCts.Token.Equals(token))
+                {
+                    _toastPanel.IsVisible = false;
+                    _toastPanel.Opacity = 0;
+                }
+            }
+
+            if (_progressRevealed) return; // only yield once the indicator is really on screen
 
             _toastText.Text = message;
             _toastPanel.IsVisible = true;
@@ -2347,7 +2605,7 @@ namespace MxPlot.UI.Avalonia.Views
             // slide-in + fade-in (180ms)
             for (int i = 1; i <= 12; i++)
             {
-                if (token.IsCancellationRequested) return;
+                if (token.IsCancellationRequested) { HideIfStillCurrent(); return; }
                 double t = i / 12.0;
                 _toastPanel.Opacity = t;
                 tt.Y = (1.0 - t) * 12.0;
@@ -2356,12 +2614,12 @@ namespace MxPlot.UI.Avalonia.Views
 
             // hold
             try { await Task.Delay(2800, token); }
-            catch (OperationCanceledException) { return; }
+            catch (OperationCanceledException) { HideIfStillCurrent(); return; }
 
             // slide-out + fade-out (240ms)
             for (int i = 8; i >= 0; i--)
             {
-                if (token.IsCancellationRequested) return;
+                if (token.IsCancellationRequested) { HideIfStillCurrent(); return; }
                 double t = i / 8.0;
                 _toastPanel.Opacity = t;
                 tt.Y = (1.0 - t) * 8.0;
@@ -2382,7 +2640,7 @@ namespace MxPlot.UI.Avalonia.Views
             _noticeText.Classes.Add("toast");
             _noticeText.Text = message;
             _noticeText.Opacity = 1.0;
-            _noticeText.IsVisible = !_progressBar.IsVisible;
+            _noticeText.IsVisible = !_progressRevealed;
             try
             {
                 await Task.Delay(1500, cts.Token);
@@ -2451,23 +2709,168 @@ namespace MxPlot.UI.Avalonia.Views
             if (data.ValueType == typeof(System.Numerics.Complex))
                 tooltip += $"  |  Mode: {_view.ComplexValueMode}";
             ToolTip.SetTip(_infoText, tooltip);
-            _virtualBadge.IsVisible = data.IsVirtual;
-            if (data.IsVirtual)
-            {
-                bool writable = data.IsWritable;
-                _virtualBadge.Text = "(Virtual)";
-                _virtualBadge.Foreground = writable
-                    ? new SolidColorBrush(Color.FromRgb(220, 80, 80))   // red-ish for writable
-                    : Brushes.DodgerBlue;                                // blue for read-only
-                ToolTip.SetTip(_virtualBadge,
-                    (writable ? "Virtual frames (Writable)" : "Virtual frames (Read-Only)")
-                    + "\nClick to open back-end Cache Monitor");
-            }
+            UpdateVirtualBadge(data);
             _zoomText.Text = $"  {zoomStr}";
             string zoomTip = _view.IsFitToView
                 ? "Fit to view (double-click image to toggle)"
                 : $"{_view.Zoom * 100:0.##}% (double-click image to fit)";
             ToolTip.SetTip(_zoomText, zoomTip + "\nClick here to set zoom / view size");
+        }
+
+        // Matches ValueRangeBar's "imperfect" amber (Color.FromRgb(255, 190, 0)) -- an established,
+        // deliberately mid-tone warning color already proven readable on both light and dark themes
+        // in this codebase, rather than a pure yellow that washes out on a light background.
+        private static readonly IBrush CachedBadgeBrush = new SolidColorBrush(Color.FromRgb(255, 190, 0));
+
+        /// <summary>
+        /// Refreshes the "(Mapped)" / "(Cached NN%)" status-bar badge for the current backend.
+        /// </summary>
+        /// <remarks>
+        /// <list type="bullet">
+        ///   <item>MMF-backed (<see cref="IMatrixData.GetDiagnosticCacheableList"/> resolves to an
+        ///   <see cref="IMmfFrameList"/>): "(Mapped)", colored by writability, clickable to open the
+        ///   Cache Monitor. Its cache occupancy is not a "progress" signal (see
+        ///   <see cref="ILazyDataSource.IsVirtual"/>'s remarks on <see cref="MmfFrames{T}"/>'s
+        ///   override), so no percentage.</item>
+        ///   <item>Any other on-demand backend (resolves, but not to an <see cref="IMmfFrameList"/>,
+        ///   e.g. TIFF Lazy decode): "(Cached NN%)", amber, not clickable -- there is no generic
+        ///   Cache Monitor for an arbitrary <see cref="ICacheableFrameList"/>. A
+        ///   <see cref="_cachedBadgeTimer"/> keeps this live while background prefetch fills the
+        ///   cache with the user not otherwise touching the view. Named "Cached", not "Loading" --
+        ///   a bounded cache does not guarantee eventually reaching 100% for a very large dataset,
+        ///   so the label must not promise completion it may never reach.</item>
+        ///   <item>Plain in-memory data: badge hidden (<see cref="IMatrixData.IsVirtual"/> is false).</item>
+        /// </list>
+        /// </remarks>
+        private void UpdateVirtualBadge(IMatrixData data)
+        {
+            _virtualBadge.IsVisible = data.IsVirtual;
+            if (!data.IsVirtual)
+            {
+                StopCachedBadgeTimer();
+                return;
+            }
+
+            bool writable = data.IsWritable;
+            IBrush writabilityBrush = writable
+                ? new SolidColorBrush(Color.FromRgb(220, 80, 80))   // red-ish for writable
+                : Brushes.DodgerBlue;                                // blue for read-only
+
+            var cacheable = data.GetDiagnosticCacheableList();
+
+            if (cacheable is IMmfFrameList)
+            {
+                StopCachedBadgeTimer();
+                _virtualBadge.Text = "(Mapped)";
+                _virtualBadge.Foreground = writabilityBrush;
+                _virtualBadge.Cursor = new Cursor(StandardCursorType.Hand);
+                ToolTip.SetTip(_virtualBadge,
+                    (writable ? "Memory-mapped frames (Writable)" : "Memory-mapped frames (Read-Only)")
+                    + "\nClick to open back-end Cache Monitor");
+                return;
+            }
+
+            if (cacheable != null)
+            {
+                int stored = cacheable.GetCacheStatus().CachedIndices.Count;
+                int pct = data.FrameCount > 0 ? (int)(100.0 * stored / data.FrameCount) : 0;
+                _virtualBadge.Text = $"(Cached {pct}%)";
+                _virtualBadge.Foreground = CachedBadgeBrush;
+                _virtualBadge.Cursor = Cursor.Default;
+                ToolTip.SetTip(_virtualBadge,
+                    $"On-demand decode backend -- {stored}/{data.FrameCount} frames cached in RAM\n"
+                    + "(decoded from disk on first access; no Cache Monitor for this backend)");
+                StartCachedBadgeTimer();
+                return;
+            }
+
+            // IsVirtual but neither diagnostic accessor resolved -- shouldn't normally happen, but
+            // fall back to a generic label rather than showing nothing.
+            StopCachedBadgeTimer();
+            _virtualBadge.Text = "(Virtual)";
+            _virtualBadge.Foreground = writabilityBrush;
+            _virtualBadge.Cursor = Cursor.Default;
+            ToolTip.SetTip(_virtualBadge, writable ? "Virtual frames (Writable)" : "Virtual frames (Read-Only)");
+        }
+
+        private void StartCachedBadgeTimer()
+        {
+            if (_cachedBadgeTimer != null) return;
+            _cachedBadgeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _cachedBadgeTimer.Tick += (_, _) => UpdateStatusBar();
+            _cachedBadgeTimer.Start();
+        }
+
+        private void StopCachedBadgeTimer()
+        {
+            if (_cachedBadgeTimer == null) return;
+            _cachedBadgeTimer.Stop();
+            _cachedBadgeTimer = null;
+        }
+
+        // ── ILazyDataSource.IsVirtualChanged subscription ─────────────────
+
+        /// <summary>
+        /// Points the <see cref="ILazyDataSource.IsVirtualChanged"/> subscription at
+        /// <paramref name="data"/>'s backend (or at nothing), and catches up on a flip that may have
+        /// happened before the subscription existed. Call wherever <see cref="_currentData"/> is
+        /// replaced.
+        /// </summary>
+        private void SubscribeLazySource(IMatrixData? data)
+        {
+            var source = data?.GetDiagnosticCacheableList() as ILazyDataSource;
+            if (ReferenceEquals(source, _lazySource)) return;
+
+            if (_lazySource != null)
+                _lazySource.IsVirtualChanged -= OnLazySourceIsVirtualChanged;
+            _lazySource = source;
+            if (source == null) return;
+
+            // Subscribe first, then compare: a small file can finish filling between this window's
+            // load-time decisions (default range mode, imperfect badge) and the subscription. A flip
+            // after this line is reported by the event; one before it shows up as a mismatch below.
+            // Either way the refresh is idempotent, so seeing both is harmless.
+            bool observed = source.IsVirtual;
+            source.IsVirtualChanged += OnLazySourceIsVirtualChanged;
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (ReferenceEquals(source, _lazySource) && source.IsVirtual != observed)
+                    RefreshVirtualDependentState();
+            }, DispatcherPriority.Background);
+        }
+
+        private void OnLazySourceIsVirtualChanged(object? sender, EventArgs e)
+        {
+            // Raised on a prefetch thread.
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (ReferenceEquals(sender, _lazySource))
+                    RefreshVirtualDependentState();
+            }, DispatcherPriority.Background);
+        }
+
+        /// <summary>
+        /// Re-derives every piece of window state that branches on <see cref="IMatrixData.IsVirtual"/>
+        /// after it flips without any content change (so no <see cref="Refresh"/> runs).
+        /// </summary>
+        /// <remarks>
+        /// The main case is a Lazy-decode backend finishing its background fill. While Virtual, All
+        /// used the cached-only lookup and flagged unscanned frames; once non-Virtual it takes the
+        /// InMemory full-scan path, which also clears the "*" badge. The reverse flip (eviction after
+        /// leaving Volume mode) goes back to the cached-only path, where frames scanned in the
+        /// meantime keep their ranges.
+        /// </remarks>
+        private void RefreshVirtualDependentState()
+        {
+            if (_currentData == null) return;
+
+            RefreshAllModeRange(); // All: re-derives range + imperfect; other modes: menu badge only
+            if (_isCompositeMode) ApplyCompositeRanges();
+
+            if (_rangeBar.Mode == ValueRangeMode.All && _lutModeDetails?.IsVisible == true && _histogramPlot != null)
+                UpdateHistogram();
+
+            UpdateStatusBar(); // shows/hides the "(Cached NN%)" badge and starts/stops its timer
         }
 
         // ── Status-bar progress reporter ──────────────────────────────────
@@ -2504,21 +2907,14 @@ namespace MxPlot.UI.Avalonia.Views
                 return result!;
             }
 
-            _progressText.Text = label;
-            _progressBar.IsIndeterminate = true;
-            _progressBar.Value = 0;
-            _infoText.IsVisible = false;
-            _virtualBadge.IsVisible = false;
-            _zoomText.IsVisible = false;
-            _noticeText.IsVisible = false;
-            _progressSep.IsVisible = false;
-            _progressText.Margin = new Thickness(8, 0, 4, 0);
-            _progressText.IsVisible = true;
-            _progressBar.IsVisible = true;
-
+            // Open the session and record its state, but show nothing yet - see the
+            // ProgressRevealDelay field group. The reveal happens in RevealProgress().
+            _progressLabel = label;
+            _progressPendingTotal = 0;
+            _progressPendingValue = 0;
+            _progressActive = true;
+            _progressRevealed = false;
             _progressCts = cts;
-            _progressCancelBtn.IsEnabled = true;
-            _progressCancelBtn.IsVisible = cts != null;
 
             if (blockInput)
             {
@@ -2551,7 +2947,59 @@ namespace MxPlot.UI.Avalonia.Views
                 }
             }
 
+            _progressRevealTimer ??= new DispatcherTimer();
+            _progressRevealTimer.Interval = ProgressRevealDelay;
+            _progressRevealTimer.Tick -= OnProgressRevealTick; // reused across sessions - never subscribe twice
+            _progressRevealTimer.Tick += OnProgressRevealTick;
+            _progressRevealTimer.Stop();  // restart the delay cleanly even if a previous session left it running
+            _progressRevealTimer.Start();
+
             return new StatusBarProgress(this, label);
+        }
+
+        private void OnProgressRevealTick(object? sender, EventArgs e)
+        {
+            _progressRevealTimer?.Stop();
+            if (_progressActive && !_progressRevealed) RevealProgress();
+        }
+
+        /// <summary>
+        /// Puts the progress indicator on screen for the session <see cref="BeginProgress"/> opened,
+        /// replaying whatever the operation has reported so far - a determinate operation that is
+        /// already at 80/100 when it becomes slow enough to show must not restart from
+        /// indeterminate.
+        /// </summary>
+        /// <remarks>
+        /// Note this is only ever reached from a timer tick, so a caller that does its work
+        /// synchronously on the UI thread never reveals the bar. That is not a regression: such an
+        /// operation blocks the dispatcher, so no layout or render pass could have drawn the bar
+        /// anyway. Showing progress for blocking work needs the work moved off the UI thread, which
+        /// is what every caller that reports real progress already does.
+        /// </remarks>
+        private void RevealProgress()
+        {
+            _progressRevealed = true;
+
+            _progressText.Text = _progressLabel;
+            _progressBar.IsIndeterminate = true;
+            _progressBar.Value = 0;
+            _infoText.IsVisible = false;
+            _virtualBadge.IsVisible = false;
+            _zoomText.IsVisible = false;
+            _noticeText.IsVisible = false;
+            _progressSep.IsVisible = false;
+            _progressText.Margin = new Thickness(8, 0, 4, 0);
+            _progressText.IsVisible = true;
+            _progressBar.IsVisible = true;
+
+            _progressCancelBtn.IsEnabled = true;
+            _progressCancelBtn.IsVisible = _progressCts != null;
+
+            if (_progressPendingTotal > 0)
+            {
+                ApplyProgressTotal(_progressPendingTotal);
+                ApplyProgressValue(_progressPendingValue);
+            }
         }
 
         /// <summary>
@@ -2578,6 +3026,9 @@ namespace MxPlot.UI.Avalonia.Views
                 return;
             }
 
+            _progressRevealTimer?.Stop();
+            _progressActive = false;
+
             if (_inputBlocker != null)
             {
                 _inputBlockerCleanup?.Invoke();
@@ -2585,6 +3036,18 @@ namespace MxPlot.UI.Avalonia.Views
                 (_inputBlocker.Parent as Panel)?.Children.Remove(_inputBlocker);
                 _inputBlocker = null;
             }
+
+            if (!_progressRevealed)
+            {
+                // The session finished inside the reveal delay. Nothing was hidden, so there is
+                // nothing to restore - and skipping the status-bar rebuild is the whole point:
+                // during live capture this path runs on every frame.
+                _progressCts = null;
+                _progressPendingTotal = 0;
+                _progressPendingValue = 0;
+                return;
+            }
+            _progressRevealed = false;
 
             _progressSep.IsVisible = false;
             _progressText.IsVisible = false;
@@ -2600,29 +3063,48 @@ namespace MxPlot.UI.Avalonia.Views
             UpdateStatusBar(); // restores text content and _virtualBadge
         }
 
+        /// <summary>
+        /// Records a report from the running operation, and applies it to the controls only if the
+        /// session has been revealed. Recording unconditionally is what lets a late reveal show the
+        /// real state instead of starting over - see <see cref="RevealProgress"/>.
+        /// </summary>
         private void OnProgressReport(string label, int value)
         {
+            _progressLabel = label;
+
             if (value < 0)
             {
-                int total = -value;
-                _progressBar.IsIndeterminate = false;
-                _progressBar.Maximum = total;
-                _progressBar.Value = 0;
-                _progressText.Text = $"{label} 0/{total}";
+                _progressPendingTotal = -value;
+                _progressPendingValue = 0;
+                if (_progressRevealed) ApplyProgressTotal(_progressPendingTotal);
             }
             else
             {
-                int total = (int)_progressBar.Maximum;
-                if (total > 0 && value + 1 < total)
-                {
-                    _progressBar.Value = value + 1;
-                    _progressText.Text = $"{label} {value + 1}/{total}";
-                }
-                else if (total > 0)
-                {
-                    _progressBar.Value = total;
-                    _progressText.Text = $"{label} done";
-                }
+                _progressPendingValue = value;
+                if (_progressRevealed) ApplyProgressValue(value);
+            }
+        }
+
+        private void ApplyProgressTotal(int total)
+        {
+            _progressBar.IsIndeterminate = false;
+            _progressBar.Maximum = total;
+            _progressBar.Value = 0;
+            _progressText.Text = $"{_progressLabel} 0/{total}";
+        }
+
+        private void ApplyProgressValue(int value)
+        {
+            int total = (int)_progressBar.Maximum;
+            if (total > 0 && value + 1 < total)
+            {
+                _progressBar.Value = value + 1;
+                _progressText.Text = $"{_progressLabel} {value + 1}/{total}";
+            }
+            else if (total > 0)
+            {
+                _progressBar.Value = total;
+                _progressText.Text = $"{_progressLabel} done";
             }
         }
 
@@ -2639,7 +3121,11 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void OpenOrActivateCacheMonitor()
         {
-            if (_currentData == null || !_currentData.IsVirtual) return;
+            // MMF-only: CacheMonitorWindow requires an IMmfFrameList (see its constructor). A
+            // non-MMF on-demand backend (e.g. TIFF Lazy decode) shows "(Cached NN%)" instead of
+            // "(Mapped)" and is not clickable, but guard here too since PointerPressed fires
+            // regardless of cursor styling.
+            if (_currentData == null || _currentData.GetDiagnosticCacheableList() is not IMmfFrameList) return;
 
             if (_cacheMonitorWindow == null)
             {
@@ -2662,11 +3148,16 @@ namespace MxPlot.UI.Avalonia.Views
         {
             _cacheMonitorWindow?.Close();
             _cacheMonitorWindow = null;
+            // Also stop the "(Cached NN%)" polling timer here -- every call site of this method is
+            // already a "virtual-backend diagnostic UI teardown" moment (window closing, data
+            // changing); UpdateStatusBar restarts it if the new state still needs it.
+            StopCachedBadgeTimer();
         }
 
         /// <summary>
         /// Closes all linked child plotters and removes event subscriptions.
-        /// Called from <see cref="OnClosed"/> so that children do not outlive the parent.
+        /// Called from <see cref="OnClosed"/> so that children do not outlive the parent, and when
+        /// the parent's data is replaced, since the children share frame buffers of the data it drops.
         /// </summary>
         private void CloseLinkedChildren()
         {

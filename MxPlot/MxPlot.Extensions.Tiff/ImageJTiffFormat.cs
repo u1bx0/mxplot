@@ -1,5 +1,6 @@
 ﻿using MxPlot.Core;
 using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.Design;

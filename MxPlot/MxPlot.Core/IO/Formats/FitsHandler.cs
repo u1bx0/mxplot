@@ -4,7 +4,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Core FITS (Flexible Image Transport System) I/O.

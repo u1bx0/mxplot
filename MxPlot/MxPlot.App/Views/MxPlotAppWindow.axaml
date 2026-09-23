@@ -19,9 +19,17 @@
 			<Setter Property="FontSize" Value="12"/>
 			<Setter Property="Padding" Value="10,6"/>
 		</Style>
-		<!-- Details view: reduce default ListBoxItem vertical padding -->
+		<!-- Details view: reduce default ListBoxItem vertical padding.
+		     The Margin transition animates the gap that drag-to-reorder opens at the drop position
+		     (see MxPlotAppWindow.ListDrag.cs); durations mirror the Motion tiers in Motion.cs. -->
 		<Style Selector="ListBox#WindowList > ListBoxItem">
 			<Setter Property="Padding" Value="8,3"/>
+			<Setter Property="Transitions">
+				<Transitions>
+					<!-- Motion.Base -->
+					<ThicknessTransition Property="Margin" Duration="0:0:0.14" Easing="CubicEaseOut"/>
+				</Transitions>
+			</Setter>
 		</Style>
 		<!-- Icon view: ListBoxItem should not stretch horizontally -->
 		<Style Selector="ListBox#WindowList.IconView > ListBoxItem">
@@ -137,10 +145,6 @@
 							<TextBlock Text="{Binding MetaData}" FontSize="11" Opacity="0.55"
 									   TextTrimming="CharacterEllipsis"/>
 							<StackPanel Orientation="Horizontal" Spacing="4">
-								<Border CornerRadius="3" Padding="4,1" Background="#D0D0D0"
-										IsVisible="{Binding IsInMemory}">
-									<TextBlock Text="InMemory" FontSize="9" Foreground="#303030"/>
-								</Border>
 								<Border CornerRadius="3" Padding="4,1" Background="#1E4D7A"
 										IsVisible="{Binding IsVirtualReadOnly}">
 									<TextBlock Text="Virtual" FontSize="9" Foreground="#7EC8FF"/>
@@ -305,9 +309,9 @@
 							<MenuItem Header="Sample 2D data…" Click="ToolsGenerate2DTestData_Click"
 									  ToolTip.Tip="Creates a sample 2D dataset and opens it."/>
 							<MenuItem Header="Sample Julia Set…" Click="ToolsGenerateJulia_Click"
-									  ToolTip.Tip="Creates 8 Julia set frames (800×800, float) sweeping through classic c values."/>
+									  ToolTip.Tip="Creates 8 Julia set frames (1024×124, float) sweeping through classic c values."/>
 							<MenuItem Header="Sample Hyperstack…" Click="ToolsGenerateHyperstack_Click"
-									  ToolTip.Tip="Creates a sample C=3 / Z=10 / T=5 float hyperstack (256×256) and opens it."/>
+									  ToolTip.Tip="Creates a sample C=3 / Z=10 / T=5 float hyperstack (192×192) and opens it."/>
 						</MenuItem>
 						<Separator/>
 						<MenuItem Header="Tools"/>
@@ -435,6 +439,13 @@
 							   TextWrapping="Wrap"
 							   TextAlignment="Center"/>
 				</StackPanel>
+
+				<!-- Drag-reorder layer: holds the dragged card's ghost and the drop indicator
+				     while a list item is being dragged. Never hit-testable, so it cannot steal
+				     the pointer events the drag itself relies on. See MxPlotAppWindow.ListDrag.cs. -->
+				<Canvas Name="ListDragOverlay"
+						IsHitTestVisible="False"
+						ClipToBounds="True"/>
 			</Panel>
 		</Border>
 

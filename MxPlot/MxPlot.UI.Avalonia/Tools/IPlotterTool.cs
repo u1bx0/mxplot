@@ -3,14 +3,14 @@ using MxPlot.Core;
 using MxPlot.UI.Avalonia.Controls;
 using System;
 
-namespace MxPlot.UI.Avalonia.Actions
+namespace MxPlot.UI.Avalonia.Tools
 {
     /// <summary>
-    /// Provides context passed to an <see cref="IPlotterAction"/> on invocation.
+    /// Provides context passed to an <see cref="IPlotterTool"/> on invocation.
     /// </summary>
-    public sealed class PlotterActionContext
+    public sealed class PlotterToolContext
     {
-        /// <summary>The main view that the action operates on.</summary>
+        /// <summary>The main view that the tool operates on.</summary>
         public required MxView MainView { get; init; }
 
         /// <summary>The host visual (the plotter window) used to locate the <c>OverlayLayer</c>.</summary>
@@ -27,39 +27,39 @@ namespace MxPlot.UI.Avalonia.Actions
     }
 
     /// <summary>
-    /// Represents an interactive plotter action with a defined lifecycle:<br/>
+    /// Represents an interactive plotter tool, which stays active on its window until it completes or is cancelled:<br/>
     /// <see cref="Invoke"/> → [user interaction] → <see cref="Completed"/> | <see cref="Cancelled"/> → <see cref="IDisposable.Dispose"/>.
     /// </summary>
     /// <remarks>
-    /// The host (<c>MatrixPlotter</c>) calls <see cref="Invoke"/> once to start the action.
-    /// The action manages its own UI elements (ROIs, panels) and fires either
+    /// The host (<c>MatrixPlotter</c>) calls <see cref="Invoke"/> once to start the tool.
+    /// The tool manages its own UI elements (ROIs, panels) and fires either
     /// <see cref="Completed"/> or <see cref="Cancelled"/> when the user finishes.
     /// <see cref="IDisposable.Dispose"/> may be called by the host at any time to force-cancel
-    /// a running action without firing events.
+    /// a running tool without firing events.
     /// </remarks>
-    public interface IPlotterAction : IDisposable
+    public interface IPlotterTool : IDisposable
     {
         /// <summary>
-        /// Fired when the action completes successfully.
+        /// Fired when the tool completes successfully.
         /// The argument carries the result <see cref="IMatrixData"/>, or <c>null</c> if no data change occurred.
         /// </summary>
         event EventHandler<IMatrixData?>? Completed;
 
-        /// <summary>Fired when the user explicitly cancels the action.</summary>
+        /// <summary>Fired when the user explicitly cancels the tool.</summary>
         event EventHandler? Cancelled;
 
         /// <summary>
-        /// Starts the action: creates required overlay objects and enters the interaction phase.
+        /// Starts the tool: creates required overlay objects and enters the interaction phase.
         /// Must be called exactly once.
         /// </summary>
-        void Invoke(PlotterActionContext context);
+        void Invoke(PlotterToolContext context);
 
         /// <summary>
-        /// Called by the host when the action context changes while the action is running
+        /// Called by the host when the tool context changes while the tool is running
         /// (e.g., the depth axis is switched or the data is replaced).
-        /// The action should re-validate and clamp any out-of-bounds ROIs, then refresh overlays.
-        /// Default implementation is a no-op; override when the action holds side-view state.
+        /// The tool should re-validate and clamp any out-of-bounds ROIs, then refresh overlays.
+        /// Default implementation is a no-op; override when the tool holds side-view state.
         /// </summary>
-        void NotifyContextChanged(PlotterActionContext newContext) { }
+        void NotifyContextChanged(PlotterToolContext newContext) { }
     }
 }

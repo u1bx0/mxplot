@@ -350,9 +350,10 @@ namespace MxPlot.Core
         /// Returns <c>(NaN, NaN)</c> if no frames are calculated and <paramref name="forceRefresh"/> is <c>false</c>.
         /// </returns>
         /// <remarks>
-        /// This method iterates through the internal <c>_valueRangeMap</c> rather than the frame list. 
-        /// This is significantly more efficient when many frames share the same physical data (e.g., Virtual Data or shallow copies), 
-        /// as it processes each unique data source only once.
+        /// Walks every frame once and resolves its cache entry through the frame's key, so the cost
+        /// is linear in the frame count for every backend. Frames that share the same physical data
+        /// (e.g. Virtual data or shallow copies) share one cache entry, which is scanned and counted
+        /// only once.
         /// </remarks>
         public (double Min, double Max) GetGlobalValueRange(int valueMode, out List<int> invalids, bool forceRefresh = false)
         {
@@ -362,22 +363,33 @@ namespace MxPlot.Core
             double max = double.NegativeInfinity;
 
             invalids = [];
-            // Iterating the map (not the frame list) is efficient when many frames share
-            // the same T[] reference (Virtual / shallow-copy Reorder), since each unique
-            // data source is processed only once.
-            foreach (var key in _valueRangeMap.Keys)
+
+            // Walk frames, not cache keys: frame -> key (GetFrameKey) is O(1) for every backend,
+            // whereas the former key -> frame reverse lookup (_arrayList.IndexOf) was a linear
+            // search per key -- quadratic overall (4.7 s of 6.8 s for 60,000 frames) -- and, for a
+            // shallow Reorder of Virtual data, compared a dummy key against real frame data read
+            // through RoutedFrames, never matched, and silently dropped every frame.
+            //
+            // Frames sharing one T[] (Virtual dedup / shallow Reorder) share one cache entry and are
+            // processed once, the first such frame being the representative index. When the cache
+            // holds exactly one entry per frame nothing can be shared, so skip that bookkeeping --
+            // this also runs on every frame step to refresh the "not yet scanned" count.
+            HashSet<T[]>? seen = _valueRangeMap.Count != FrameCount
+                ? new HashSet<T[]>(ReferenceEqualityComparer.Instance)
+                : null;
+
+            for (int index = 0; index < FrameCount; index++)
             {
-                var range = _valueRangeMap[key];
+                T[] key = GetFrameKey(index);
+                if (seen != null && !seen.Add(key)) continue;
+                if (!_valueRangeMap.TryGetValue(key, out var range)) continue;
+
                 if (!range.IsValid)
                 {
-                    int index = _arrayList.IndexOf(key);
-                    if (index >= 0)
-                    {
-                        if (forceRefresh)
-                            RefreshValueRange(index); // after this the shared List<double> is populated → range.IsValid becomes true
-                        else
-                            invalids.Add(index);      // still invalid; caller may schedule a background scan
-                    }
+                    if (forceRefresh)
+                        RefreshValueRange(index); // after this the shared List<double> is populated → range.IsValid becomes true
+                    else
+                        invalids.Add(index);      // still invalid; caller may schedule a background scan
                 }
 
                 // Catches both originally-valid frames AND frames that were just refreshed above.

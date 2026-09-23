@@ -40,6 +40,17 @@ namespace MxPlot.UI.Avalonia.Rendering
     /// buffer with FlipY handling here) the way no two <see cref="IBitmapWriter"/>s in this namespace
     /// share their inner pixel loop with a non-writer utility either.
     /// </para>
+    /// <para>
+    /// Color (RGB-Max) / (RGB-Add) take a second path. They combine <i>all</i> slices of the swept
+    /// range per pixel, which this writer has no access to (it only sees the winner-value matrix)
+    /// and which would be far too heavy to redo on every redraw. So the parent's
+    /// <c>OrthogonalViewController</c> blends them on a background thread
+    /// (<see cref="ColorCodedRgbBlender"/>) whenever the projection or its parameters change, and
+    /// hands the packed-ARGB result over as <see cref="ColorCodedRenderInfo.BlendedArgb"/>. When that
+    /// is set, <see cref="Render"/> only copies it to the bitmap (<see cref="CopyBlendedRows"/>) and
+    /// skips the winner-index/depth-palette loop above; the window's own data is still the winner-value
+    /// matrix either way.
+    /// </para>
     /// </summary>
     public sealed class ColorCodedBitmapWriter : IBitmapWriter
     {
@@ -159,11 +170,36 @@ namespace MxPlot.UI.Avalonia.Rendering
                 int* targetPtr = FlipY ? pScratch + (height - 1) * width : pScratch;
                 int strideInts = FlipY ? -width : width;
 
-                _renderLoop(source, ctx.FrameIndex, ctx.Info, targetPtr, strideInts, width, height);
+                if (ctx.Info.BlendedArgb is { } blended)
+                    CopyBlendedRows(blended, scratch.AsSpan(0, needed),
+                        FlipY ? (height - 1) * width : 0, strideInts, width, height);
+                else
+                    _renderLoop(source, ctx.FrameIndex, ctx.Info, targetPtr, strideInts, width, height);
 
                 using var fb = target.Lock();
                 BitmapBlit.Rows(pScratch, width, height, fb);
             }
+        }
+
+        /// <summary>
+        /// Color (RGB-Max) / (RGB-Add): the image was blended ahead of time (<see cref="ColorCodedRgbBlender"/>),
+        /// so rendering is only a row copy. Row <c>iy</c> of <paramref name="blended"/> goes to
+        /// <c>scratch[firstRowOffset + iy * strideInts ..]</c>; FlipY is expressed by the caller as
+        /// a last-row <paramref name="firstRowOffset"/> and a negative <paramref name="strideInts"/>,
+        /// exactly like the per-pixel loop's <c>targetPtr</c>/<c>strideInts</c>.
+        /// </summary>
+        /// <remarks>
+        /// Span-based (not pointer-based) so it can be tested directly: under Avalonia's headless
+        /// drawing the bitmap's pixels cannot be read back.
+        /// </remarks>
+        internal static void CopyBlendedRows(
+            int[] blended, Span<int> scratch, int firstRowOffset, int strideInts, int width, int height)
+        {
+            if (blended.Length < width * height)
+                throw new ArgumentException(
+                    "ColorCodedRenderInfo.BlendedArgb is smaller than the source data.");
+            for (int iy = 0; iy < height; iy++)
+                blended.AsSpan(iy * width, width).CopyTo(scratch.Slice(firstRowOffset + iy * strideInts, width));
         }
 
         private unsafe void RenderTyped<T>(

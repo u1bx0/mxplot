@@ -579,6 +579,12 @@ namespace MxPlot.UI.Avalonia.Controls
                 if (Bounds.Width > 0 && Bounds.Height > 0)
                     FitToView();
             }
+
+            // The bitmap now holds the new content, and nothing has asked for it to be presented
+            // unless a branch above re-fitted the view. When the user has zoomed or panned and the
+            // new data has the same size, none did, and the screen would keep showing the old pixels
+            // until some unrelated redraw (a pointer move, for instance).
+            InvalidateVisual();
         }
 
         /// <summary>

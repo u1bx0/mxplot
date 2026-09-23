@@ -5,7 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Configuration for MatrixData, encompassing dimensionality, physical scales, 
@@ -254,10 +254,10 @@ namespace MxPlot.Core.IO
 
             /// <summary>
             /// Creates a <see cref="MatrixData{T}"/> from a <see cref="MatrixDataConfig"/> and a read-only
-            /// <see cref="VirtualStrippedFrames{T}"/>. Metadata (scale, axes, etc.) is applied from the config;
+            /// <see cref="StrippedMmfFrames{T}"/>. Metadata (scale, axes, etc.) is applied from the config;
             /// value-range caches are left empty for lazy recomputation on access.
             /// </summary>
-            public static MatrixData<T> CreateFromVirtualFrames<T>(this MatrixDataConfig config, VirtualStrippedFrames<T> vsf)
+            public static MatrixData<T> CreateFromVirtualFrames<T>(this MatrixDataConfig config, StrippedMmfFrames<T> vsf)
                 where T : unmanaged
             {
                 var md = MatrixData<T>.CreateAsVirtualFrames(config.XCount, config.YCount, vsf);

@@ -1,5 +1,4 @@
-﻿using MxPlot.Core.Utils;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -96,74 +95,14 @@ namespace MxPlot.Core.Processing
     public record ReverseStackOperation(string? AxisName) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-        {
-            // Virtual data must always use deep copy: shallow copy produces a RoutedFrames<T>
-            // that wraps the original VirtualFrames. If the source MatrixData is disposed after
-            // a Replace operation the underlying MMF file handles are released and the result
-            // holds dangling references.
-            bool deepCopy = src.IsVirtual;
-
-            int n = src.FrameCount;
-            var dims = src.Dimensions;
-
-            List<int> order;
-            if (AxisName == null || dims == null || dims.AxisCount == 0)
-            {
-                // Reverse all frames
-                order = new List<int>(n);
-                for (int i = n - 1; i >= 0; i--) order.Add(i);
-                var result = src.Reorder(order, deepCopy);
-                if (dims != null && dims.AxisCount > 0)
-                    result.DefineDimensions(Axis.CreateFrom([.. dims.Axes]));
-                return result;
-            }
-            else
-            {
-                // Reverse only along the specified axis
-                var axis = dims[AxisName]
-                    ?? throw new ArgumentException($"Axis '{AxisName}' not found.");
-                int axisIdx = -1;
-                for (int i = 0; i < dims.Axes.Count; i++)
-                    if (dims.Axes[i] == axis) { axisIdx = i; break; }
-
-                // Build a reversed frame mapping by flipping the target axis index
-                order = new List<int>(n);
-                for (int f = 0; f < n; f++)
-                {
-                    // Decompose frame index into per-axis indices
-                    int rem = f;
-                    int[] coords = new int[dims.AxisCount];
-                    for (int i = dims.AxisCount - 1; i >= 0; i--)
-                    {
-                        int s = 1;
-                        for (int j = 0; j < i; j++) s *= dims.Axes[j].Count;
-                        coords[i] = rem / s;
-                        rem -= coords[i] * s;
-                    }
-                    // Flip the target axis
-                    coords[axisIdx] = axis.Count - 1 - coords[axisIdx];
-                    // Recompose
-                    int mapped = 0;
-                    int st = 1;
-                    for (int i = 0; i < dims.AxisCount; i++)
-                    {
-                        mapped += coords[i] * st;
-                        st *= dims.Axes[i].Count;
-                    }
-                    order.Add(mapped);
-                }
-                var result = src.Reorder(order, deepCopy);
-                result.DefineDimensions(Axis.CreateFrom([.. dims.Axes]));
-                return result;
-            }
-        }
+            => src.ReverseStack(AxisName);
     }
 
     // =========================================================================================
     // Channel Collapse (Grayscale) Operation
     // =========================================================================================
 
-    /// <summary>How <see cref="GrayscaleOperation"/> combines the channels into one value.</summary>
+    /// <summary>How <see cref="DimensionalOperator.Grayscale{T}"/> combines the channels into one value.</summary>
     public enum GrayscaleMethod
     {
         /// <summary>
@@ -197,44 +136,7 @@ namespace MxPlot.Core.Processing
         CancellationToken CancellationToken = default) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-        {
-            var axis = src[AxisName]
-                ?? throw new ArgumentException($"Axis '{AxisName}' not found.");
-
-            bool luma = Method switch
-            {
-                GrayscaleMethod.LumaRec709 => true,
-                GrayscaleMethod.Mean => false,
-                _ => ColorAxis.IsRgbTriplet(axis),
-            };
-
-            if (luma && axis.Count != 3)
-                throw new ArgumentException(
-                    $"Rec.709 luma requires exactly 3 channels, but '{AxisName}' has {axis.Count}.");
-
-            var result = luma
-                ? src.Reduce(AxisName, Luma, useParallel: true, Progress, CancellationToken)
-                : src.Reduce(AxisName, Mean, useParallel: true, Progress, CancellationToken);
-
-            // Reduce only carries over the XY scale and units; bring the rest of the metadata with it.
-            // The dimensions are deliberately not copied — the channel axis is gone by design.
-            result.CopyPropertiesFrom(src, copyScale: false, copyDimensions: false);
-            return result;
-
-            static T Luma(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
-                => NumericConverter.FromDouble<T>(
-                       0.2126 * NumericConverter.ToDouble(values[0])
-                     + 0.7152 * NumericConverter.ToDouble(values[1])
-                     + 0.0722 * NumericConverter.ToDouble(values[2]));
-
-            static T Mean(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
-            {
-                double sum = 0;
-                for (int i = 0; i < values.Length; i++)
-                    sum += NumericConverter.ToDouble(values[i]);
-                return NumericConverter.FromDouble<T>(sum / values.Length);
-            }
-        }
+            => src.Grayscale(AxisName, Method, Progress, CancellationToken);
     }
 
     // =========================================================================================

@@ -1,6 +1,27 @@
 ﻿## 📊 Version History
 
 
+**v0.5.0** (Lazy-decode Virtual backends, unified Processing commands, FFT, and Resample)
+- 🗂️ **Lazy-Decode Virtual Backends (New)**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand (`TiffDecodedFrames<T>`), where memory mapping cannot work. TIFFs beyond 32,767 frames now load. A priority-queue preload scheduler with per-worker readers follows the cursor: 4,000 LZW frames (256×256) load fully in 0.23 s instead of 31.1 s.
+- 🧱 **Virtual Frames Hierarchy**: `VirtualFrames<T>` is now a backend-neutral cache/eviction/prefetch skeleton, with the memory-mapped parts in `MmfFrames<T>`. `IsVirtual` is no longer MMF-only, so the status-bar "(Cached NN%)" badge and the dashboard's Virtual badge follow a Lazy backend as it fills. Repeat reads of the same frame no longer cause preload churn, and eviction now drops the true LRU frame.
+- 📊 **All-Mode Range Scan**: Choosing All now scans large datasets on a worker thread with progress and Cancel instead of blocking the window; a 🔄 button forces a full scan for MMF / still-filling Lazy data.
+- 🔬 **Cache Monitor**: New flat-grid view (one cell per frame, square-ish) alongside the axis-grouped view, plus a Wrap toggle.
+- ⏺️ **Streaming `.mxd` Write**: `MatrixDataSerializer.CreateStreamingVessel<T>` returns a `VesselWriter<T>` that appends frames one at a time — the frame count is only fixed by `Complete(params Axis[])`, which writes the trailer. For recording a live feed of unknown length.
+- 🎛️ **Scale / Axis Consistency**: The Rename dialog's *Index-based* box now reflects `IsIndexBased` and states what a Color/Tagged axis carries. Composite is kept when a different axis is replaced, and *Revert Scale Settings* covers `IsIndexBased`.
+- 🔌 **Host API**: `MatrixPlotter.ShowToast` is public; `RenderToBitmap` gained an overload that renders into a caller-owned bitmap, avoiding one allocation per frame when feeding an encoder. The progress bar no longer flashes for short operations.
+- 🌈 **Color (RGB-Max) / Color (RGB-Add)**: Two new picks in the orthogonal-view projection selector tint every slice of the swept axis by its depth color and blend them (per-channel max, or a sum clamped at 255), so structures at different depths overlap instead of only the winning slice showing as in `Color (Max)`. Every projection mode now explains itself in a tooltip.
+- 🧩 **Processing Commands**: Every one-shot Processing/Conversion menu operation (Median/Gaussian, Normalize, Log Transform, Transpose, Reverse Stack, Extract Dimension, Grayscale, Convert Value Type, and the two new commands below) now shares one implementation, offering "This frame only", "Sync source data" and "Replace data" consistently. The hamburger menu is regrouped into Data / Scale / Processing / Info tabs.
+- 🌀 **FFT 2D (New)**: Processing > Frequency > FFT 2D — forward/inverse, with a Center DC option; works on a Composite channel cube and as a live Sync follower. The underlying all-frames FFT reports progress and can be cancelled.
+- 📐 **Resample (New)**: Changes a dataset's pixel count (Nearest neighbor or Bilinear) while keeping its physical extent, with a "Keep ratio" option in the dialog.
+- 🔄 **Transpose**: Gained "Replace data", and now carries the window's overlays over to the transposed result.
+- 🐛 **Bug Fixes**: Composite Shared/Per-Channel radios could show neither checked; the Composite header of a seeded window did not show its Fixed shared range; LUT-mode Search Min/Max did not update the histogram lines; side views could stay Composite under a LUT-mode MainView after an axis change; a Sync-follower window not zoomed to Fit stopped redrawing on updates; a linked window's (e.g. an Extract Frame's) orthogonal slices/projection did not follow a content-only update to its source; a Sync/ROI-View/orthogonal window's Scale tab went stale while left open; replacing a window's data could leave its linked windows pointing at data that was just dropped; toast/status-bar and AxisTracker fps-tooltip glitches.
+- ⚠️ **Breaking Changes**:
+  - The file-format layer (`CsvHandler`, `FitsHandler`, `FormatRegistry`, `IMatrixDataIO`, `MatrixDataConfig`, `MatrixDataSerializer`, …) moved from `MxPlot.Core.IO` to `MxPlot.Core.IO.Formats`; update `using` directives.
+  - `ILazyFrameList` → `ILazyDataSource`; `WritableVirtualStrippedFrames<T>` → `WritableStrippedMmfFrames<T>`; `IFrameContentNotifier` removed (superseded by `ILazyDataSource.FrameStored`).
+  - `IPlotterAction` → `IPlotterTool` (the `Actions/` folder is now `Tools/`); `CropAction` → `CropTool`.
+  - `NormalizeOperation`/`LogTransformOperation` (and the `Normalize`/`LogTransform` extension methods) dropped `SingleFrameIndex`: they now always process every frame of the data given, matching every other Core operator. To process one frame, slice it out first (`SliceAt`).
+
+
 **v0.4.0** (ROI View, Transpose, and Composite / side-view consistency)
 - 🔍 **ROI View (New)**: "Open ROI View" on a Rectangle/Oval overlay opens the enclosed region in its own window, kept in sync through `LinkedView`. A Composite source stays Composite.
 - 🔄 **Transpose**: Now exposed as a `MatrixPlotter` operation. Carries axis names/calibration over to the result, streams Virtual sources in RAM-bounded bands, and hands the result the source's range mode and LUT.

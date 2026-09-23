@@ -17,6 +17,11 @@ namespace MxPlot.Core.Processing
         /// <c>step = min(|XStep / ux|, |YStep / uy|)</c> where (ux, uy) is the unit direction vector.
         /// If the segment extends outside the data bounds, it is clipped to the valid region.
         /// </summary>
+        /// <param name="src">The data to sample.</param>
+        /// <param name="start">Start of the segment, in physical coordinates (those of <c>XMin</c>…<c>YMax</c>).</param>
+        /// <param name="end">End of the segment, in physical coordinates.</param>
+        /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
+        /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
         /// <returns>
         /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
         /// <c>Values</c>: sampled data values at each position.
@@ -46,7 +51,17 @@ namespace MxPlot.Core.Processing
         /// Extracts a line profile resampled to exactly <paramref name="numPoints"/> equally spaced points.
         /// If the segment extends outside the data bounds, it is clipped to the valid region.
         /// </summary>
+        /// <param name="src">The data to sample.</param>
+        /// <param name="start">Start of the segment, in physical coordinates (those of <c>XMin</c>…<c>YMax</c>).</param>
+        /// <param name="end">End of the segment, in physical coordinates.</param>
         /// <param name="numPoints">The number of sample points along the clipped segment. Must be ≥ 1.</param>
+        /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
+        /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
+        /// <returns>
+        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Values</c>: sampled data values at each position.
+        /// Both arrays are empty if the segment is entirely outside the data bounds.
+        /// </returns>
         public static (double[] Pos, double[] Values) GetLineProfile(
             this IMatrixData src,
             (double X, double Y) start,
@@ -77,6 +92,11 @@ namespace MxPlot.Core.Processing
         /// outside the data bounds, it is clipped to the valid region.
         /// </summary>
         /// <typeparam name="T">The element type of <paramref name="src"/>.</typeparam>
+        /// <param name="src">The data to sample.</param>
+        /// <param name="start">Start of the segment, in physical coordinates (those of <c>XMin</c>…<c>YMax</c>).</param>
+        /// <param name="end">End of the segment, in physical coordinates.</param>
+        /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
+        /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
         /// <param name="valueConverter">
         /// Reduces a sampled <typeparamref name="T"/> value to <c>double</c>.
         /// Unnecessary (and ignored) when <typeparamref name="T"/> is one of
@@ -120,8 +140,18 @@ namespace MxPlot.Core.Processing
         /// If the segment extends outside the data bounds, it is clipped to the valid region.
         /// </summary>
         /// <typeparam name="T">The element type of <paramref name="src"/>.</typeparam>
+        /// <param name="src">The data to sample.</param>
+        /// <param name="start">Start of the segment, in physical coordinates (those of <c>XMin</c>…<c>YMax</c>).</param>
+        /// <param name="end">End of the segment, in physical coordinates.</param>
         /// <param name="numPoints">The number of sample points along the clipped segment. Must be ≥ 1.</param>
+        /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
+        /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
         /// <param name="valueConverter">See the adaptive-step overload for the exact contract.</param>
+        /// <returns>
+        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Values</c>: sampled data values at each position.
+        /// Both arrays are empty if the segment is entirely outside the data bounds.
+        /// </returns>
         public static (double[] Pos, double[] Values) GetLineProfile<T>(
             this MatrixData<T> src,
             (double X, double Y) start,

@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
@@ -82,7 +83,7 @@ namespace MxPlot.Core.Processing
         private static MatrixData<T> TransposeVirtual<T>(MatrixData<T> src, int srcW, int srcH, int newW, int newH,
             int frameCount, IProgress<int>? progress, CancellationToken cancellationToken) where T : unmanaged
         {
-            var vessel = IO.MatrixDataSerializer.CreateTempVessel<T>(newW, newH, frameCount);
+            var vessel = IO.Formats.MatrixDataSerializer.CreateTempVessel<T>(newW, newH, frameCount);
             try
             {
                 int bandSize = VolumeAccessor<T>.ComputeBandSize(newW, newH, frameCount);
@@ -163,6 +164,7 @@ namespace MxPlot.Core.Processing
         /// with the original. Use <paramref name="deepCopy"/> to ensure the result is independent.
         /// </para>
         /// </remarks>
+        /// <param name="src">The source matrix.</param>
         /// <param name="axisName">The name of the axis to use as the selection criterion.</param>
         /// <param name="indexInAxis">The zero-based index along the specified axis to select.</param>
         /// <param name="deepCopy">true to create a deep copy of the underlying data; otherwise, false to create a shallow view.</param>
@@ -497,8 +499,87 @@ namespace MxPlot.Core.Processing
             
             // Apply new axis structure
             reordered.DefineDimensions(Axis.CreateFrom(newAxes));
-            
+
             return reordered;
+        }
+
+        /// <summary>
+        /// Reverses the frame order along the specified axis.
+        /// When <paramref name="axisName"/> is <c>null</c>, all frames are reversed regardless of axis structure.
+        /// For in-memory data a shallow copy is used (fast, zero-allocation);
+        /// for virtual (MMF-backed) data a deep copy is always performed to avoid dangling references
+        /// if the source is disposed afterwards.
+        /// The axis scale (Min/Max) is left unchanged so that the physical coordinate range is preserved.
+        /// </summary>
+        /// <typeparam name="T">The data type of matrix elements.</typeparam>
+        /// <param name="src">The source matrix.</param>
+        /// <param name="axisName">
+        /// The axis to reverse along, or <see langword="null"/> to reverse the whole frame sequence.
+        /// </param>
+        /// <returns>A new matrix with the same axes and the frames in reversed order.</returns>
+        /// <exception cref="ArgumentException">Thrown when <paramref name="axisName"/> does not name an axis of <paramref name="src"/>.</exception>
+        public static MatrixData<T> ReverseStack<T>(this MatrixData<T> src, string? axisName = null)
+            where T : unmanaged
+        {
+            // Virtual data must always use deep copy: shallow copy produces a RoutedFrames<T>
+            // that wraps the original VirtualFrames. If the source MatrixData is disposed after
+            // a Replace operation the underlying MMF file handles are released and the result
+            // holds dangling references.
+            bool deepCopy = src.IsVirtual;
+
+            int n = src.FrameCount;
+            var dims = src.Dimensions;
+
+            List<int> order;
+            if (axisName == null || dims == null || dims.AxisCount == 0)
+            {
+                // Reverse all frames
+                order = new List<int>(n);
+                for (int i = n - 1; i >= 0; i--) order.Add(i);
+                var result = src.Reorder(order, deepCopy);
+                if (dims != null && dims.AxisCount > 0)
+                    result.DefineDimensions(Axis.CreateFrom([.. dims.Axes]));
+                return result;
+            }
+            else
+            {
+                // Reverse only along the specified axis
+                var axis = dims[axisName]
+                    ?? throw new ArgumentException($"Axis '{axisName}' not found.");
+                int axisIdx = -1;
+                for (int i = 0; i < dims.Axes.Count; i++)
+                    if (dims.Axes[i] == axis) { axisIdx = i; break; }
+
+                // Build a reversed frame mapping by flipping the target axis index
+                order = new List<int>(n);
+                for (int f = 0; f < n; f++)
+                {
+                    // Decompose frame index into per-axis indices
+                    int rem = f;
+                    int[] coords = new int[dims.AxisCount];
+                    for (int i = dims.AxisCount - 1; i >= 0; i--)
+                    {
+                        int s = 1;
+                        for (int j = 0; j < i; j++) s *= dims.Axes[j].Count;
+                        coords[i] = rem / s;
+                        rem -= coords[i] * s;
+                    }
+                    // Flip the target axis
+                    coords[axisIdx] = axis.Count - 1 - coords[axisIdx];
+                    // Recompose
+                    int mapped = 0;
+                    int st = 1;
+                    for (int i = 0; i < dims.AxisCount; i++)
+                    {
+                        mapped += coords[i] * st;
+                        st *= dims.Axes[i].Count;
+                    }
+                    order.Add(mapped);
+                }
+                var result = src.Reorder(order, deepCopy);
+                result.DefineDimensions(Axis.CreateFrom([.. dims.Axes]));
+                return result;
+            }
         }
 
         /// <summary>
@@ -538,7 +619,7 @@ namespace MxPlot.Core.Processing
         /// <summary>
         /// Creates a new matrix by applying a specified conversion function to each element of the source matrix.
         /// </summary>
-        /// <remarks>If the destination type implements IComparable<TDst>, the resulting matrix will
+        /// <remarks>If the destination type implements IComparable&lt;TDst&gt;, the resulting matrix will
         /// include per-frame minimum and maximum values, converted to double if possible. The X and Y scale, units, and
         /// metadata from the source matrix are copied to the result.</remarks>
         /// <typeparam name="TSrc">The type of the elements in the source matrix. Must be an unmanaged type.</typeparam>
@@ -547,7 +628,7 @@ namespace MxPlot.Core.Processing
         /// <param name="converter">A delegate that defines how to convert each element from the source type to the destination type. The
         /// delegate receives the source value, its X and Y coordinates, and the frame index.</param>
         /// <param name="strategy">The parallelization strategy to use. Default is Adaptive, which automatically selects the best strategy.</param>
-        /// <returns>A new MatrixData<TDst> containing the converted elements. Metadata, axis information, and units from the
+        /// <returns>A new MatrixData&lt;TDst&gt; containing the converted elements. Metadata, axis information, and units from the
         /// source matrix are preserved in the result.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="src"/> or <paramref name="converter"/> is null.</exception>
         public static MatrixData<TDst> Map<TSrc, TDst>(
@@ -800,7 +881,7 @@ namespace MxPlot.Core.Processing
         /// <code>
         /// // Extract the current active frame and apply a mask.
         /// // Keep values within 10mm radius from the center (0,0), set others to NaN.
-        /// var maskedData = rawMatrix.MapAt<double, double>((val, ix, iy, x, y) => 
+        /// var maskedData = rawMatrix.MapAt&lt;double, double&gt;((val, ix, iy, x, y) =>
         /// {
         ///     double dist = Math.Sqrt(x * x + y * y);
         ///     return (dist &lt;= 10.0) ? val : double.NaN;
@@ -810,7 +891,7 @@ namespace MxPlot.Core.Processing
         /// <b>Example 2: Converting to Byte for visualization (Heatmap generation)</b>
         /// <code>
         /// // Convert the 5th frame to grayscale (0-255) based on signal intensity.
-        /// var visualData = rawMatrix.MapAt<double, byte>((val, ix, iy, x, y) => 
+        /// var visualData = rawMatrix.MapAt&lt;double, byte&gt;((val, ix, iy, x, y) =>
         /// {
         ///     return (byte)Math.Clamp(val * 255.0, 0, 255);
         /// }, frame: 5);
@@ -845,7 +926,7 @@ namespace MxPlot.Core.Processing
         /// Represents a method that performs a reduction operation using the specified coordinates and values.
         /// </summary>
         /// <remarks>This delegate enables high-performance reduction operations over spans, allowing for
-        /// efficient processing of large or non-contiguous data sets. The use of Span<T> and ReadOnlySpan<T> avoids
+        /// efficient processing of large or non-contiguous data sets. The use of Span&lt;T&gt; and ReadOnlySpan&lt;T&gt; avoids
         /// unnecessary allocations and enables stack-only or memory-safe operations.</remarks>
         /// <typeparam name="T">The type of the value to be produced by the reduction operation.</typeparam>
         /// <param name="ix">The x index in 2D matrix, where the reduction operation is performed.</param>
@@ -967,6 +1048,7 @@ namespace MxPlot.Core.Processing
         /// Reduces the dimensionality of the matrix data by aggregating values along a specified target axis.
         /// </summary>
         /// <typeparam name="T">The type of the data elements (must be unmanaged).</typeparam>
+        /// <param name="src">The source matrix.</param>
         /// <param name="targetAxisName">The name of the axis to reduce (e.g., "Time", "Z").</param>
         /// <param name="reducer">
         /// A function that calculates the aggregated value for a single pixel.
@@ -1154,6 +1236,74 @@ namespace MxPlot.Core.Processing
             return groups;
         }
 
+        /// <summary>
+        /// Collapses a channel axis into a single grayscale channel, leaving every other axis
+        /// (Z, Time, …) intact. The axis itself disappears from the result; collapsing the only
+        /// axis yields a plain single-frame matrix.
+        /// </summary>
+        /// <remarks>
+        /// A colour image decomposed into R/G/B needs luma weighting to look natural, whereas a
+        /// fluorescence stack has no such convention and is simply averaged. <see cref="GrayscaleMethod.Auto"/>
+        /// tells the two apart by the channel tags rather than by the channel count, so a three-colour
+        /// fluorescence stack is not silently treated as RGB.
+        /// </remarks>
+        /// <typeparam name="T">The data type of matrix elements.</typeparam>
+        /// <param name="src">The source matrix.</param>
+        /// <param name="axisName">The name of the channel axis to collapse.</param>
+        /// <param name="method">How the channels are combined; see <see cref="GrayscaleMethod"/>.</param>
+        /// <param name="progress">
+        /// Optional progress reporter, with the protocol of <see cref="Reduce{T}(MatrixData{T}, string, ReducerFunc{T}, bool, IProgress{int}?, CancellationToken)"/>.
+        /// </param>
+        /// <param name="cancellationToken">Cancels the operation.</param>
+        /// <returns>A new matrix without <paramref name="axisName"/>, carrying the source's metadata.</returns>
+        /// <exception cref="ArgumentException">
+        /// Thrown when <paramref name="axisName"/> does not name an axis of <paramref name="src"/>, or when
+        /// Rec.709 luma is requested for an axis that does not have exactly 3 channels.
+        /// </exception>
+        public static MatrixData<T> Grayscale<T>(this MatrixData<T> src,
+            string axisName = "Channel",
+            GrayscaleMethod method = GrayscaleMethod.Auto,
+            IProgress<int>? progress = null,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+        {
+            var axis = src[axisName]
+                ?? throw new ArgumentException($"Axis '{axisName}' not found.");
+
+            bool luma = method switch
+            {
+                GrayscaleMethod.LumaRec709 => true,
+                GrayscaleMethod.Mean => false,
+                _ => ColorAxis.IsRgbTriplet(axis),
+            };
+
+            if (luma && axis.Count != 3)
+                throw new ArgumentException(
+                    $"Rec.709 luma requires exactly 3 channels, but '{axisName}' has {axis.Count}.");
+
+            var result = luma
+                ? src.Reduce(axisName, Luma, useParallel: true, progress, cancellationToken)
+                : src.Reduce(axisName, Mean, useParallel: true, progress, cancellationToken);
+
+            // Reduce only carries over the XY scale and units; bring the rest of the metadata with it.
+            // The dimensions are deliberately not copied — the channel axis is gone by design.
+            result.CopyPropertiesFrom(src, copyScale: false, copyDimensions: false);
+            return result;
+
+            static T Luma(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
+                => NumericConverter.FromDouble<T>(
+                       0.2126 * NumericConverter.ToDouble(values[0])
+                     + 0.7152 * NumericConverter.ToDouble(values[1])
+                     + 0.0722 * NumericConverter.ToDouble(values[2]));
+
+            static T Mean(int ix, int iy, ReadOnlySpan<int> coords, Span<T> values)
+            {
+                double sum = 0;
+                for (int i = 0; i < values.Length; i++)
+                    sum += NumericConverter.ToDouble(values[i]);
+                return NumericConverter.FromDouble<T>(sum / values.Length);
+            }
+        }
 
         /// <summary>
         /// Crops a rectangular region of interest (ROI) from the matrix data.
@@ -1166,8 +1316,15 @@ namespace MxPlot.Core.Processing
         /// <param name="y">The starting Y index (inclusive) of the crop region.</param>
         /// <param name="width">The width (in pixels) of the crop region.</param>
         /// <param name="height">The height (in pixels) of the crop region.</param>
+        /// <param name="progress">
+        /// Optional progress reporter. Reports <c>-N</c> once to declare the number of frames to crop,
+        /// then <c>0 … N-1</c> as each frame completes (the protocol MatrixPlotter's status-bar
+        /// reporter expects).
+        /// </param>
+        /// <param name="cancellationToken">Cancels the operation. Checked once per frame.</param>
         /// <returns>A new MatrixData instance containing only the cropped region.</returns>
         /// <exception cref="ArgumentNullException">Thrown if source is null.</exception>
+        /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is signalled.</exception>
         /// <exception cref="ArgumentOutOfRangeException">
         /// Thrown if the crop region exceeds the source matrix bounds.
         /// </exception>
@@ -1279,7 +1436,10 @@ namespace MxPlot.Core.Processing
         /// <param name="xMax">The maximum X coordinate (in physical units).</param>
         /// <param name="yMin">The minimum Y coordinate (in physical units).</param>
         /// <param name="yMax">The maximum Y coordinate (in physical units).</param>
+        /// <param name="progress">Optional progress reporter; see <see cref="Crop{T}"/> for the protocol.</param>
+        /// <param name="cancellationToken">Cancels the operation. Checked once per frame.</param>
         /// <returns>A new MatrixData instance containing the cropped region.</returns>
+        /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is signalled.</exception>
         /// <example>
         /// <code>
         /// var matrix = new MatrixData&lt;double&gt;(100, 100);
@@ -1333,10 +1493,13 @@ namespace MxPlot.Core.Processing
         /// <param name="source">The source MatrixData to crop from.</param>
         /// <param name="width">The width of the centered crop.</param>
         /// <param name="height">The height of the centered crop.</param>
+        /// <param name="progress">Optional progress reporter; see <see cref="Crop{T}"/> for the protocol.</param>
+        /// <param name="cancellationToken">Cancels the operation. Checked once per frame.</param>
         /// <returns>A new MatrixData instance containing the centered crop.</returns>
         /// <exception cref="ArgumentException">
         /// Thrown if requested dimensions exceed source dimensions.
         /// </exception>
+        /// <exception cref="OperationCanceledException">Thrown when <paramref name="cancellationToken"/> is signalled.</exception>
         public static MatrixData<T> CropCenter<T>(this MatrixData<T> source, int width, int height,
             IProgress<int>? progress = null, CancellationToken cancellationToken = default)
             where T : unmanaged

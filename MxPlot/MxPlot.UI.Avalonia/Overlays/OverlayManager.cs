@@ -237,8 +237,15 @@ namespace MxPlot.UI.Avalonia.Overlays
         /// <summary>
         /// Overrides overlay visibility for a single <see cref="Draw"/> call (for clipboard capture).
         /// Null = use <see cref="OverlaysVisible"/>. Call <see cref="EndCapture"/> after rendering.
-        /// Does NOT call <see cref="InvalidateVisual"/>; caller is responsible for redraw.
         /// </summary>
+        /// <remarks>
+        /// Does NOT call <see cref="InvalidateVisual"/>. That only matters to a caller that renders
+        /// the live visual itself while the override is in effect (<c>RenderTargetBitmap.Render(view)</c>),
+        /// which bakes the overridden appearance into the on-screen visual until it is invalidated --
+        /// such a caller owns the redraw. A caller that draws into its own bitmap instead, the way
+        /// <see cref="MxPlot.UI.Avalonia.Controls.RenderSurface.RenderClean"/> does, leaves the live
+        /// visual untouched and needs no redraw.
+        /// </remarks>
         internal void BeginCapture(bool withOverlays) => _captureOverride = withOverlays;
         internal void EndCapture() => _captureOverride = null;
 

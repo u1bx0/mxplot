@@ -26,7 +26,7 @@ namespace MxPlot.App.Views
             Opened -= OnWelcomeAnimationOpened;
             var hint = this.FindControl<StackPanel>("EmptyStateHint");
             if (hint != null)
-                await FadeInAsync(hint, 350);
+                await FadeInAsync(hint, 750);
         }
 
         private async Task FadeInAsync(Control target, int durationMs)

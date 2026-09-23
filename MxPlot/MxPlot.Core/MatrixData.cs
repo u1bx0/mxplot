@@ -1,4 +1,5 @@
 ﻿using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using MxPlot.Core.Processing;
 using MxPlot.Core.Utils;
 using MxPlot.Utilities;
@@ -63,6 +64,9 @@ namespace MxPlot.Core
         /// The default interpolator used only for custom struct types. May be null for custom structs until registered.
         /// </summary>
         private IBilinearInterpolator<T>? _interpolator = _registeredDefaultInterpolator;
+
+        /// <summary>The interpolator this instance uses for element types that are not supported numeric types, or <see langword="null"/>.</summary>
+        internal IBilinearInterpolator<T>? Interpolator => _interpolator;
 
         /// <summary>
         /// Currently active frame index
@@ -136,15 +140,19 @@ namespace MxPlot.Core
         // Properties
 
         /// <summary>
-        ///  Gets whether the underlying frame list is virtual (i.e., it implements IVirtualFrameList) either directly or through a RoutedFrames wrapper.
+        /// Gets whether the underlying frame list currently does not hold every frame resident in
+        /// memory -- forwards to <see cref="ILazyDataSource.IsVirtual"/> on the backend (directly, or
+        /// through a <see cref="RoutedFrames{T}"/> wrapper), or <see langword="false"/> for a plain
+        /// in-memory <c>List&lt;T[]&gt;</c>. See <see cref="VirtualFrames{T}.IsVirtual"/> for what
+        /// drives this per backend (MMF is unconditionally <see langword="true"/>; a
+        /// compressed-decode or Remote backend converges to <see langword="false"/> once fully loaded).
         /// </summary>
-        //public bool IsVirtual => _arrayList is IVirtualFrameList;
         public bool IsVirtual
         {
             get
             {
-                if (_arrayList is IVirtualFrameList)
-                    return true;
+                if (_arrayList is ILazyDataSource lazy)
+                    return lazy.IsVirtual;
                 else if (_arrayList is RoutedFrames<T> routed)
                     return routed.IsVirtual;
                 else
@@ -214,9 +222,10 @@ namespace MxPlot.Core
         public int ElementSize => _elementSize;
 
         /// <summary>
-        /// Gets whether this MatrixData instance requires explicit disposal to release resources. 
-        /// Default: false (does not require disposal) when using in-memory arrays. 
-        /// This is true if the underlying data storage is a VirtualFrameList with its ownership.
+        /// Gets whether this MatrixData instance requires explicit disposal to release resources.
+        /// Default: false (does not require disposal) when using in-memory arrays.
+        /// This is true if the underlying data storage is an <see cref="ILazyDataSource"/> this
+        /// instance owns (see <see cref="ILazyDataSource.IsOwned"/>).
         /// </summary>
         public bool RequiresDisposal { get; private set; } = false;
 
@@ -224,27 +233,32 @@ namespace MxPlot.Core
         {
             get
             {
-                if(_arrayList is IVirtualFrameList virtualList)
+                if(_arrayList is ICacheableFrameList cacheable)
                 {
-                    return virtualList.CacheStrategy;
+                    return cacheable.CacheStrategy;
                 }
                 return null;
             }
             set
             {
-                if(value != null &&_arrayList is IVirtualFrameList virtualList)
+                if(value != null && _arrayList is ICacheableFrameList cacheable)
                 {
-                    virtualList.CacheStrategy = value;
+                    cacheable.CacheStrategy = value;
                 }
             }
         }
 
-        public IVirtualFrameList? GetDiagnosticVirtualList()
+        /// <summary>
+        /// Returns the underlying cache-control surface for diagnostic/tuning purposes, or
+        /// <see langword="null"/> if the data is not backed by one. See
+        /// <see cref="IMatrixData.GetDiagnosticCacheableList"/>'s own remarks.
+        /// </summary>
+        public ICacheableFrameList? GetDiagnosticCacheableList()
         {
-            if (_arrayList is IVirtualFrameList vfl)
-                return vfl;
+            if (_arrayList is ICacheableFrameList cacheable)
+                return cacheable;
             if (_arrayList is RoutedFrames<T> routed)
-                return routed.GetUnderlyingVirtualList();
+                return routed.GetUnderlyingCacheableList();
             return null;
         }
 
@@ -649,7 +663,7 @@ namespace MxPlot.Core
 
         private MatrixData<T> CloneAsVirtual(IProgress<int>? progress = null, CancellationToken ct = default)
         {
-            var wvsf = IO.MatrixDataSerializer.CreateTempVessel<T>(_xcount, _ycount, FrameCount);
+            var wvsf = IO.Formats.MatrixDataSerializer.CreateTempVessel<T>(_xcount, _ycount, FrameCount);
 
             // Frames whose value range is already cached on the source, collected so it can be
             // propagated to the clone below instead of being silently discarded (which would force
@@ -758,10 +772,10 @@ namespace MxPlot.Core
             // Guard: prevent overwriting the active backing file of read-only virtual data.
             // Writers typically open the destination in truncate mode, which would destroy
             // the MMF-backed source mid-read and corrupt the data irreversibly.
-            if (_arrayList is IVirtualFrameList vfl && !IsWritable)
+            if (_arrayList is IMmfFrameList vfl && !IsWritable)
             {
                 string dest = Path.GetFullPath(filePath);
-                string src = Path.GetFullPath(vfl.FilePath);
+                string src = Path.GetFullPath(vfl.SourcePath);
                 if (string.Equals(dest, src, StringComparison.OrdinalIgnoreCase))
                     throw new IOException(
                         $"Cannot save to '{Path.GetFileName(filePath)}' because it is the active backing file " +

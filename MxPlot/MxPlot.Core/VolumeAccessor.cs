@@ -10,6 +10,7 @@
 // consistent with an SSD/OS write-cache characteristic outside this code's control).
 //#define RESTACK_DIAG
 using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using MxPlot.Core.Processing;
 using System;
 using System.Buffers;
@@ -248,6 +249,15 @@ namespace MxPlot.Core
             var height = _height;
             var frames = _frames;
 
+            // Loop-unrolled to match SliceOrthogonal's YZ extraction below: each element sits a
+            // full stride (width) apart, so unlike SliceY's contiguous Span.CopyTo this can never
+            // be as cache-friendly, but unrolling still cuts per-element loop overhead noticeably.
+            // This path used to be the plain single-element loop while SliceOrthogonal (used only
+            // when both X and Y move together) already had this optimization -- ordinary
+            // single-axis dragging on the YZ/RightView (the common case) was missing it.
+            int remainder = height % 4;
+            int mainLoopCount = height - remainder;
+
             fixed (T* resBase = result)
             {
                 nint resPtrAddr = (nint)resBase;
@@ -258,7 +268,15 @@ namespace MxPlot.Core
                         T* resPtr = (T*)resPtrAddr + z * outW;
                         T* srcPtr = srcBase + x;
                         int stride = width;
-                        for (int y = 0; y < height; y++)
+                        for (int y = 0; y < mainLoopCount; y += 4)
+                        {
+                            resPtr[y] = *srcPtr;
+                            resPtr[y + 1] = *(srcPtr + stride);
+                            resPtr[y + 2] = *(srcPtr + 2 * stride);
+                            resPtr[y + 3] = *(srcPtr + 3 * stride);
+                            srcPtr += 4 * stride;
+                        }
+                        for (int y = mainLoopCount; y < height; y++)
                         {
                             resPtr[y] = *srcPtr;
                             srcPtr += stride;

@@ -4,7 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Provides simple CSV export and import for single-frame MatrixData.

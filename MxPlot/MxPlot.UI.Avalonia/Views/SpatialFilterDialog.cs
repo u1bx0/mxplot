@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using System.Threading.Tasks;
@@ -11,28 +12,17 @@ namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
     /// Modal dialog for configuring a spatial filter (Median or Gaussian).
-    /// Returns a <see cref="SpatialFilterParameters"/> record on OK, or <c>null</c> on cancel.
+    /// Returns the <see cref="SpatialFilterParameters"/> and the dialog's checkboxes on OK, or <c>null</c>
+    /// on cancel. It offers Sync source data instead of Replace data.
     /// </summary>
     internal sealed class SpatialFilterDialog : ProcessingDialogBase
     {
-        /// <summary>
-        /// Parameters collected from the dialog.
-        /// <see cref="ThisFrameOnly"/> and <see cref="SyncSource"/> are only meaningful
-        /// when the source data has more than one frame, or when running in single-frame mode
-        /// respectively — callers should guard accordingly.
-        /// </summary>
-        internal sealed record SpatialFilterParameters(
-            IFilterKernel Kernel,
-            bool ThisFrameOnly,
-            bool SyncSource);
+        /// <summary>Parameters collected from the dialog.</summary>
+        internal sealed record SpatialFilterParameters(IFilterKernel Kernel);
 
         // ── Kernel type ───────────────────────────────────────────────────────
 
         internal enum KernelType { Median, Gaussian }
-
-        // ── Result ────────────────────────────────────────────────────────────
-
-        private SpatialFilterParameters? _result;
 
         // ── Factory ───────────────────────────────────────────────────────────
 
@@ -46,18 +36,19 @@ namespace MxPlot.UI.Avalonia.Views
         /// </param>
         /// <param name="defaultKernel">Pre-selected kernel type when the dialog opens.</param>
         /// <param name="src">Source data, used only to decide whether to show the materialization warning.</param>
-        internal static Task<SpatialFilterParameters?> ShowAsync(
+        internal static Task<DialogAnswer<SpatialFilterParameters>?> ShowAsync(
             Window owner, bool isMultiFrame, KernelType defaultKernel = KernelType.Median, IMatrixData? src = null)
         {
             var dlg = new SpatialFilterDialog(isMultiFrame, defaultKernel, src);
-            return dlg.ShowDialog<SpatialFilterParameters?>(owner);
+            return dlg.ShowDialog<DialogAnswer<SpatialFilterParameters>?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
         private SpatialFilterDialog(bool isMultiFrame, KernelType defaultKernel, IMatrixData? src)
             : base("Spatial Filter", width: 280, canResize: false, src: src,
-                   thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null, showReplaceData: false)
+                   thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null, showReplaceData: false,
+                   showSyncSource: true)
         {
             BuildContent(isMultiFrame, defaultKernel);
         }
@@ -87,20 +78,6 @@ namespace MxPlot.UI.Avalonia.Views
             kernelCombo.SelectionChanged += (_, _) =>
                 sigmaRow.IsVisible = kernelCombo.SelectedIndex == (int)KernelType.Gaussian;
 
-            // ── Sync source data ──────────────────────────────────────────────
-            // For single-frame: always visible and enabled.
-            // For multi-frame: only enabled when "This frame only" is checked.
-            var syncCheck = ControlFactory.MakeCheckBox(
-                "Sync source data",
-                hint: "Keep the result live: re-apply the filter whenever the source frame changes");
-            syncCheck.Margin = new Thickness(26, 0, 0, -10);
-            if (isMultiFrame && ThisFrameOnlyCheckBox != null)
-            {
-                syncCheck.IsEnabled = false;
-                ThisFrameOnlyCheckBox.IsCheckedChanged += (_, _) =>
-                    syncCheck.IsEnabled = ThisFrameOnlyCheckBox.IsChecked == true;
-            }
-
             // ── Layout ────────────────────────────────────────────────────────
             var kernelRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
             kernelRow.Children.Add(new TextBlock { Text = "Kernel:", FontSize = 11, Width = LW, VerticalAlignment = VerticalAlignment.Center });
@@ -111,12 +88,9 @@ namespace MxPlot.UI.Avalonia.Views
             content.Children.Add(ControlFactory.MakeNudRow("Radius:", radiusNud, "px", labelWidth: LW));
             content.Children.Add(sigmaRow);
             content.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
-            if (ThisFrameOnlyCheckBox != null)
-            {
-                ThisFrameOnlyCheckBox.Margin = new Thickness(26, 2, 0, -10);
-                content.Children.Add(ThisFrameOnlyCheckBox);
-            }
-            content.Children.Add(syncCheck);
+            var frameOptions = BuildFrameOptions(indent: 26);
+            if (frameOptions != null)
+                content.Children.Add(frameOptions);
 
             FinalizeContent(content, onOk: () =>
             {
@@ -124,10 +98,7 @@ namespace MxPlot.UI.Avalonia.Views
                 IFilterKernel kernel = kernelCombo.SelectedIndex == (int)KernelType.Gaussian
                     ? new GaussianKernel(radius, (double)(sigmaNud.Value ?? 0m))
                     : new MedianKernel(radius);
-                bool thisFrameOnly = ThisFrameOnlyCheckBox?.IsChecked == true;
-                bool syncSource = syncCheck.IsChecked == true;
-                _result = new SpatialFilterParameters(kernel, thisFrameOnly, syncSource);
-                Close(_result);
+                Close(Answer(new SpatialFilterParameters(kernel)));
             }, okLabel: "Apply");
         }
     }

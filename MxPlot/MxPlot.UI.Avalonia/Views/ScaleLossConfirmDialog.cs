@@ -9,8 +9,7 @@ namespace MxPlot.UI.Avalonia.Views
     /// <summary>
     /// Modal dialog warning that switching an axis to Composite mode will discard its physical
     /// scale (Min/Max/Unit/Step) -- Composite promotes the axis to a <see cref="ColorAxis"/>,
-    /// which is always index-based (see Tests.Documents/Working/ColorCoded/
-    /// ColorCoded_View_InitialDesign.md section 3.3.7). Shown only for an axis that is not already
+    /// which is always index-based. Shown only for an axis that is not already
     /// index-based; a plain Channel axis (already index-based) has nothing to lose and never
     /// triggers this.
     /// </summary>

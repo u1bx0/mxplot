@@ -1,5 +1,5 @@
 ﻿using Microsoft.CSharp.RuntimeBinder;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -88,12 +88,12 @@ namespace MxPlot.Core.Processing
     /// </remarks>
     /// <param name="X">The X coordinate used to generate the YZ plane.</param>
     /// <param name="Y">The Y coordinate used to generate the XZ plane.</param>
-    /// <param name="NumThreads">Degree of parallelism. Set to 1 for sequential execution (recommended when 
+    /// <param name="numThreads">Degree of parallelism. Set to 1 for sequential execution (recommended when
     /// the caller is already parallelized), or -1 to use the system default.</param>
-    /// <param name="DstXZ">Optional pre-allocated MatrixData for the XZ plane to avoid GC pressure.</param>
-    /// <param name="DstXZIndex">The starting offset index within DstXZ.</param>
-    /// <param name="DstYZ">Optional pre-allocated MatrixData for the YZ plane to avoid GC pressure.</param>
-    /// <param name="DstYZIndex">The starting offset index within DstYZ.</param>
+    /// <param name="dstXZ">Optional pre-allocated MatrixData for the XZ plane to avoid GC pressure.</param>
+    /// <param name="dstXZIndex">The starting offset index within <paramref name="dstXZ"/>.</param>
+    /// <param name="dstYZ">Optional pre-allocated MatrixData for the YZ plane to avoid GC pressure.</param>
+    /// <param name="dstYZIndex">The starting offset index within <paramref name="dstYZ"/>.</param>
     /// <param name="AxisName">Optional: Name for the axis mapping metadata.</param>
     /// <param name="BaseIndices">Optional: Indices to define sub-regions or coordinate offsets.</param>
     public record SliceOrthogonalOperation(int X, int Y, string AxisName = "", int[]? BaseIndices = null, 
@@ -187,10 +187,9 @@ namespace MxPlot.Core.Processing
     /// Deliberately separate from <see cref="ProjectionOperation"/> rather than an extension of it:
     /// unlike a plain projection, which reduces to a single value, this needs to report *which*
     /// slice won so a caller can look up a depth colour for it. Restricted to Maximum/Minimum --
-    /// <see cref="ProjectionMode.Average"/> has no single winning index to report. See
-    /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.3, which
-    /// also documents the deliberate Core/UI split: this operation only extracts index and value
-    /// (no colour, no LUT) -- turning them into a coloured image is the UI/Rendering layer's job.
+    /// <see cref="ProjectionMode.Average"/> has no single winning index to report. Deliberately
+    /// Core/UI split: this operation only extracts index and value (no colour, no LUT) -- turning
+    /// them into a coloured image is the UI/Rendering layer's job.
     /// </remarks>
     /// <param name="Mode">Must be <see cref="ProjectionMode.Maximum"/> or <see cref="ProjectionMode.Minimum"/>.</param>
     /// <param name="Start">First axis index (inclusive) to consider.</param>

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 
-namespace MxPlot.Core.IO
+namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Describes a file format that can read or write matrix data.
@@ -137,8 +137,8 @@ namespace MxPlot.Core.IO
     }
 
     /// <summary>
-    /// Indicates that a file format reader supports virtual (MMF-backed) loading
-    /// in addition to standard in-memory loading.
+    /// Indicates that a file format reader supports virtual (on-demand) loading, such as
+    /// memory-mapped or per-frame decode, in addition to standard in-memory loading.
     /// </summary>
     /// <remarks>
     /// Readers that implement this interface allow the caller to choose between
@@ -268,7 +268,9 @@ namespace MxPlot.Core.IO
     /// <remarks>
     /// Use <see cref="Auto"/> to let the system select the most appropriate strategy based on file size.
     /// <see cref="InMemory"/> loads all data at once (fast access, high memory).
-    /// <see cref="Virtual"/> uses memory-mapped files for on-demand access (low memory, may be slower on repeated access).
+    /// <see cref="Virtual"/> loads frame data on demand instead of up front (low memory, may be
+    /// slower on repeated access) -- the backing mechanism is backend-specific, such as a
+    /// memory-mapped file or a per-frame decode.
     /// </remarks>
     public enum LoadingMode
     {
@@ -283,18 +285,29 @@ namespace MxPlot.Core.IO
         InMemory,
 
         /// <summary>
-        /// Loads frame data on demand via memory-mapped virtual frames.
+        /// Loads frame data on demand, via a backend-specific mechanism such as a memory-mapped
+        /// file or a per-frame decode.
         /// </summary>
         Virtual
     }
 
     /// <summary>
-    /// Provides global policy settings for virtual (MMF-backed) data loading.
+    /// Provides global policy settings for virtual (on-demand) data loading.
     /// </summary>
     /// <remarks>
     /// Format handlers use <see cref="ThresholdBytes"/> when <see cref="LoadingMode.Auto"/> is requested
     /// to decide whether to load data in-memory or as virtual frames.
     /// The threshold can be changed at runtime to suit the application's memory constraints.
+    /// <para>
+    /// These are process-wide values, read at the moment each load resolves its mode, and intended
+    /// to be set once at startup. Changing them while another thread is loading with
+    /// <see cref="LoadingMode.Auto"/> is not an error -- that load simply resolves against whichever
+    /// value it reads, and both outcomes are valid data -- but its mode is then unpredictable. A
+    /// caller that depends on a specific mode should pass <see cref="LoadingMode.InMemory"/> or
+    /// <see cref="LoadingMode.Virtual"/> explicitly instead of relying on the thresholds, and should
+    /// dispose the result whenever <see cref="IMatrixData.RequiresDisposal"/> is true rather than
+    /// assuming <c>Auto</c> produced in-memory data.
+    /// </para>
     /// </remarks>
     public static class VirtualPolicy
     {

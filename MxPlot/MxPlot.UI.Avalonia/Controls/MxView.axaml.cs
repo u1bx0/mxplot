@@ -800,19 +800,37 @@ namespace MxPlot.UI.Avalonia.Controls
         public RenderTargetBitmap? RenderToBitmap(int width, int height, bool withOverlays = false)
         {
             if (_surface.Bitmap == null) return null;
-            OverlayManager.BeginCapture(withOverlays);
-            try
-            {
-                var rtb = new RenderTargetBitmap(new PixelSize(width, height), new Vector(96, 96));
-                using (var ctx = rtb.CreateDrawingContext())
-                    _surface.RenderClean(ctx, width, height, withOverlays);
-                return rtb;
-            }
-            finally
-            {
-                OverlayManager.EndCapture();
-                _surface.InvalidateVisual();
-            }
+            var rtb = new RenderTargetBitmap(new PixelSize(width, height), new Vector(96, 96));
+            RenderToBitmap(rtb, withOverlays);
+            return rtb;
+        }
+
+        /// <summary>
+        /// Renders the current frame into a caller-owned <paramref name="target"/>, at that bitmap's
+        /// own <c>PixelSize</c> -- the same output as the allocating
+        /// overload above, which is implemented in terms of this one. For callers that render
+        /// repeatedly (e.g. feeding every frame of a live capture to a video encoder) and want one
+        /// bitmap reused instead of one allocated per frame.
+        /// </summary>
+        /// <remarks>
+        /// Touches nothing outside <paramref name="target"/>: the live view is neither re-rendered
+        /// nor changed. This used to end with an InvalidateVisual, from when the capture path
+        /// rendered the live control itself (<c>RenderTargetBitmap.Render(_surface)</c>) with
+        /// <see cref="Overlays.OverlayManager.BeginCapture"/>'s visibility override in effect --
+        /// that left the override baked into the on-screen visual until it was invalidated. Drawing
+        /// through <see cref="RenderSurface.RenderClean"/> into an independent bitmap replaced that
+        /// long ago, so there is no longer anything to restore.
+        /// <see cref="RenderSurface.RenderClean"/> also applies the overlay override itself, hence
+        /// no BeginCapture/EndCapture wrapper here either - it would only set the same value twice.
+        /// The drawing context clears <paramref name="target"/> to transparent, so a reused bitmap
+        /// never shows the previous frame through wherever this one does not reach.
+        /// </remarks>
+        public void RenderToBitmap(RenderTargetBitmap target, bool withOverlays = false)
+        {
+            if (_surface.Bitmap == null) return;
+            var px = target.PixelSize;
+            using var ctx = target.CreateDrawingContext();
+            _surface.RenderClean(ctx, px.Width, px.Height, withOverlays);
         }
 
         /// <summary>

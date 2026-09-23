@@ -12,6 +12,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- TiffDecodedFrames<T> (Lazy decode backend) is internal; exercised directly by tests. -->
+    <InternalsVisibleTo Include="Tests.MxPlot" />
+  </ItemGroup>
+
+  <ItemGroup>
 	  <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
 	  <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
     <ProjectReference Include="..\MxPlot.Core\MxPlot.Core.csproj" />

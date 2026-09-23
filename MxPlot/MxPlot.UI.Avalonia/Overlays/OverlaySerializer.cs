@@ -19,6 +19,9 @@ namespace MxPlot.UI.Avalonia.Overlays
     /// </summary>
     internal static class OverlaySerializer
     {
+        /// <summary>The metadata key the overlays of a window are stored under.</summary>
+        internal const string MetadataKey = "mxplot.overlays";
+
         private static readonly JsonSerializerOptions _writeOptions = new() { WriteIndented = true };
 
         /// <summary>Serializes a collection of overlay objects to a JSON string.</summary>

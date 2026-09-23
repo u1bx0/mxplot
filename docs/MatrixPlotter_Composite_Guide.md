@@ -126,11 +126,11 @@ Channel composites are **always `Additive`**, and there is deliberately no UI to
 pure primaries is exactly what reconstructs a normal colour image. `Maximum` exists in the
 renderer and in the persistence format for backward compatibility with files written by older
 builds, and because "brightest wins" is conceptually close to depth/time colour coding. The
-ColorCoded feature 0.3.0 actually shipped (see [Limitations](#limitations)) does **not** use it,
+ColorCoded feature 0.3.0 actually shipped (see [Limitations](#limitations)) does **not** render through it,
 though: it has its own independent `ColorCodedBitmapWriter` — Composite's `Maximum` blend still
 picks a *value* per pixel, one full frame at a time, where ColorCoded needs a per-pixel *winning
 axis index* out of a whole scanned range, which is a different computation entirely
-(`ExtremumIndexOperation` in Core).
+(`ExtremumIndexOperation` in Core). (Its `Color (RGB-Max)`/`Color (RGB-Add)` picks do reuse Composite's per-pixel `Maximum`/`Additive` blend, but apply it to the depth-tinted slices of the swept range rather than to channels.)
 
 ---
 
@@ -291,7 +291,7 @@ var rgbAxis = ColorAxis.CreateRgb();   // tags R/G/B + pure primary colours
   the axis permanently index-based even if Revert was never used.
 - **`RenderingMode.ColorCoded` is a separate, independent feature, not a Composite mode.** It
   ships in 0.3.0 alongside this generalization (a live depth/time colour-coded projection,
-  entered via the orthogonal-view projection selector's `Color (Max)`/`Color (Min)` options, not
+  entered via the orthogonal-view projection selector's `Color (Max)`/`Color (Min)`/`Color (RGB-Max)`/`Color (RGB-Add)` options, not
   through the Composite axis-context-menu path this guide describes) and is deliberately mutually
   exclusive with Composite — see [Blend Modes](#blend-modes) for why it does not actually share
   `CompositeBitmapWriter` despite the conceptual similarity to `Maximum` blending.

@@ -14,10 +14,15 @@ License: MIT License
 Copyright: Copyright (c) AvaloniaUI OÜ. All rights reserved.
 
 -------------------------------------------------------------------------
-2. CommunityToolkit.Mvvm
+2. CommunityToolkit.Mvvm and MathNet.Numerics
 -------------------------------------------------------------------------
 License: MIT License
 Copyright: Copyright (c) .NET Foundation and Contributors.
+
+MathNet.Numerics (used through MxPlot.Extensions.Fft for the FFT command)
+License: MIT License
+Copyright: Copyright (c) 2002-2022 Math.NET
+The full license text is in the THIRD-PARTY-NOTICES.txt of MxPlot.Extensions.Fft.
 
 -------------------------------------------------------------------------
 3. Built-in colormaps (Rendering/ColorThemes.cs)

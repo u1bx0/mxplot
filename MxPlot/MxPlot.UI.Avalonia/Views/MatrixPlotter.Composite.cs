@@ -1,9 +1,7 @@
 ﻿// MatrixPlotter.Composite.cs
 //
 // Composite rendering mode (RenderingMode.Composite). Originally built for the "Channel" axis
-// only; generalized to any axis (Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md
-// section 3.3.7). See Tests.Documents/Working/Composite/CompositeMode_Step4-5_ImplementationPlan.md
-// for the original design decisions this file implements.
+// only; generalized to any axis.
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
@@ -357,8 +355,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         /// <summary>
         /// Enters Composite mode for <paramref name="channelAxis"/> (any axis of
-        /// <see cref="_currentData"/> -- no longer restricted to one literally named "Channel", see
-        /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.7). Safe
+        /// <see cref="_currentData"/> -- no longer restricted to one literally named "Channel"). Safe
         /// to call again while already active (e.g. from <see cref="SyncCompositeUiAfterRestore"/>)
         /// -- recomputes frame indices and re-applies the current recipe list without discarding it.
         /// </summary>
@@ -1045,6 +1042,9 @@ namespace MxPlot.UI.Avalonia.Views
             _compositeRangeBar = new ValueRangeBar();
             _compositeRangeBar.SetRoiAvailable(false);   // ROI ranges are out of scope for Composite
             _compositeRangeBar.SetMode(_compositeGlobalMode);
+            // The scan is dataset-wide, so the header owns the only button; the per-channel rows
+            // keep their "*" as an indicator of which channels are still incomplete.
+            _compositeRangeBar.FullScanRequested += async (_, _) => await RequestFullValueRangeScanAsync();
             _compositeRangeBar.ModeChanged += (_, mode) =>
             {
                 if (_reentrancy.IsActive(GuardContext.UiSync)) return;
@@ -1161,6 +1161,7 @@ namespace MxPlot.UI.Avalonia.Views
             // showing checked next time the flyout opened.
             globalRadio.IsCheckedChanged += (_, _) =>
             {
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
                 if (globalRadio.IsChecked == true)
                 {
                     SetCompositeScope(CompositeRangeScope.Global);
@@ -1169,12 +1170,21 @@ namespace MxPlot.UI.Avalonia.Views
             };
             channelWiseRadio.IsCheckedChanged += (_, _) =>
             {
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
                 if (channelWiseRadio.IsChecked == true)
                 {
                     SetCompositeScope(CompositeRangeScope.ChannelWise);
                     Dispatcher.UIThread.Post(() => flyout.Hide());
                 }
             };
+
+            // The radios are only in the visual tree while the flyout is open, and RadioButton's own
+            // group bookkeeping (attach/detach, sibling-uncheck) can leave neither - or both -
+            // checked by the time it opens (seen intermittently). _compositeScope is the single
+            // source of truth, so re-derive both radios from it on every open: once before the
+            // popup shows, and again after the content is attached and the group has settled.
+            flyout.Opening += (_, _) => SyncCompositeScopeRadios();
+            flyout.Opened += (_, _) => SyncCompositeScopeRadios();
 
             var switchToLutItem = ControlFactory.MakeMenuItem("Switch to LUT mode", () =>
             {
@@ -1341,20 +1351,43 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
+        /// <summary>
+        /// Makes the Scope flyout's radios reflect <c>_compositeScope</c> exactly one-checked,
+        /// whatever state the radio group bookkeeping left them in. Writes run under
+        /// <see cref="GuardContext.UiSync"/> so the radios' own IsCheckedChanged handlers treat
+        /// them as a display sync (no scope change, no flyout close), and the radio that should
+        /// end up checked is written last so no group sibling-uncheck can clear it.
+        /// </summary>
+        private void SyncCompositeScopeRadios()
+        {
+            var global = _compositeScopeGlobalRadio;
+            var channelWise = _compositeScopeChannelWiseRadio;
+            if (global == null || channelWise == null) return;
+
+            bool wantGlobal = _compositeScope == CompositeRangeScope.Global;
+            using (_reentrancy.Begin(GuardContext.UiSync))
+            {
+                if (wantGlobal)
+                {
+                    channelWise.IsChecked = false;
+                    global.IsChecked = true;
+                }
+                else
+                {
+                    global.IsChecked = false;
+                    channelWise.IsChecked = true;
+                }
+            }
+        }
+
         private void SetCompositeScope(CompositeRangeScope scope)
         {
             if (_compositeScope == scope) return;
             _compositeScope = scope;
             // Keeps the flyout's own radio buttons correct when scope changes from somewhere
             // other than the user clicking one of them (e.g. MatrixPlotter.CompositeRecipes
-            // assigned externally) - their own IsChecked was previously only ever set once, at
-            // BuildCompositeModeHeader construction time. Setting IsChecked here does re-raise
-            // IsCheckedChanged on the corresponding radio, which calls back into this method, but
-            // the guard above makes that a no-op (scope already matches).
-            if (_compositeScopeGlobalRadio != null)
-                _compositeScopeGlobalRadio.IsChecked = scope == CompositeRangeScope.Global;
-            if (_compositeScopeChannelWiseRadio != null)
-                _compositeScopeChannelWiseRadio.IsChecked = scope == CompositeRangeScope.ChannelWise;
+            // assigned externally). They are also re-synced every time the flyout opens.
+            SyncCompositeScopeRadios();
             ConfigureCompositeRangeBars();
             ApplyCompositeRanges();
             MarkCompositeDirty();
@@ -1426,8 +1459,10 @@ namespace MxPlot.UI.Avalonia.Views
             int valueMode = data.ValueType == typeof(System.Numerics.Complex)
                 ? (int)_view.ComplexValueMode : 0;
             // Virtual: never force a full disk scan — use what is cached and report the rest as
-            // imperfect, exactly as LUT mode's ApplyAllModeRange does.
-            bool force = !data.IsVirtual;
+            // imperfect, exactly as LUT mode's ApplyAllModeRange does. A large scan on non-Virtual
+            // data runs in the background (DeferFullValueRangeScan), which re-applies these ranges
+            // when it finishes. Evaluated only for All below, so Current never starts a scan.
+            bool ForceScan() => !data.IsVirtual && !DeferFullValueRangeScan(data);
 
             switch (mode)
             {
@@ -1445,9 +1480,9 @@ namespace MxPlot.UI.Avalonia.Views
                     return (min, max, 0);
                 }
                 case ValueRangeMode.All when channelIndex < 0:
-                    return GlobalRangeOverAll(data, valueMode, force);
+                    return GlobalRangeOverAll(data, valueMode, ForceScan());
                 case ValueRangeMode.All:
-                    return GlobalRangeOverChannel(data, chAxis, channelIndex, valueMode, force);
+                    return GlobalRangeOverChannel(data, chAxis, channelIndex, valueMode, ForceScan());
                 default:
                     return (double.NaN, double.NaN, 0);   // Fixed / Roi: keep user values
             }
@@ -1517,7 +1552,16 @@ namespace MxPlot.UI.Avalonia.Views
                         }
                         _compositeRangeBar?.SetRange(min, max);
                     }
+                    else if (_compositeRecipes.Count > 0)
+                    {
+                        // Fixed: the recipes already hold the user's shared range, but the header
+                        // bar has no constructor path for a value (it starts blank), so a freshly
+                        // built header -- e.g. a child window seeded with a Fixed range -- would
+                        // otherwise show empty Min/Max.
+                        _compositeRangeBar?.SetRange(CurrentSharedMin(), CurrentSharedMax());
+                    }
                     _compositeRangeBar?.SetImperfect(invalid > 0, invalid);
+                    _compositeRangeBar?.SetFullScanAvailable(_currentData.IsVirtual); // see RefreshAllModeImperfectBadge
                 }
                 else
                 {
@@ -1537,6 +1581,7 @@ namespace MxPlot.UI.Avalonia.Views
                     }
                     UpdateCompositeHeaderUnion();
                     _compositeRangeBar?.SetImperfect(totalInvalid > 0, totalInvalid);
+                    _compositeRangeBar?.SetFullScanAvailable(_currentData.IsVirtual);
                 }
             }
 

@@ -20,7 +20,7 @@ namespace MxPlot.UI.Avalonia.Views
         // only the transform.
         //
         // Not to be confused with MatrixPlotterSyncGroup, which broadcasts display settings between
-        // peers with no source/follower hierarchy, or with CropAction's leader/follower ROI sync.
+        // peers with no source/follower hierarchy, or with CropTool's leader/follower ROI sync.
 
         /// <summary>How a recomputed result is pushed into the follower window.</summary>
         internal enum LinkedViewCommit
@@ -93,6 +93,9 @@ namespace MxPlot.UI.Avalonia.Views
             private bool _inFlight;
             private bool _disposed;
 
+            /// <summary>How a recomputed result is pushed into the follower.</summary>
+            internal LinkedViewCommit Commit => _commit;
+
             /// <param name="follower">The window being kept up to date.</param>
             /// <param name="source">The window driving it.</param>
             /// <param name="recompute">Produces the follower's new content.</param>
@@ -124,6 +127,7 @@ namespace MxPlot.UI.Avalonia.Views
 
                 source._syncFollowers.Add(follower);
                 follower._linkedView = this;
+                follower.UpdateFreezeButtonVisibility();
 
                 _refreshedHandler = (_, _) => Fire();
                 source.Refreshed += _refreshedHandler;
@@ -261,6 +265,39 @@ namespace MxPlot.UI.Avalonia.Views
         internal bool IsSyncFollower => _linkedView != null;
 
         /// <summary>
+        /// Whether this window's data is replaced by a new <see cref="IMatrixData"/> instance on every
+        /// update: a <see cref="LinkedView"/> follower committed with
+        /// <see cref="LinkedViewCommit.UpdateView"/> (Sync windows, ROI Views). A follower that is
+        /// refreshed in place keeps its one instance.
+        /// </summary>
+        private bool ReceivesNewDataInstances => _linkedView?.Commit == LinkedViewCommit.UpdateView;
+
+        /// <summary>
+        /// Shows the axis trackers' Freeze buttons (which open the orthogonal side views and the
+        /// XY-projection window) only while this window is not <see cref="ReceivesNewDataInstances"/>.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// The orthogonal controller keeps the instance it was activated with, but such a window gets
+        /// a new instance on every update (<see cref="UpdateProjectionData"/>). The controller would go
+        /// on reading a stale instance whose dimensions have been released, so the side views and the
+        /// projection would show outdated content or none at all. Re-targeting the controller on every
+        /// swap is not supported, so the feature is not offered.
+        /// </para>
+        /// <para>
+        /// This matters when such a window shows a Composite channel cube and is switched to LUT mode:
+        /// the cube then looks like a stack with a Channel axis, which invites a Freeze. To browse it
+        /// with orthogonal views, Duplicate the window: the copy is an ordinary window with its own data.
+        /// </para>
+        /// </remarks>
+        private void UpdateFreezeButtonVisibility()
+        {
+            bool available = !ReceivesNewDataInstances;
+            foreach (var tracker in _axisTrackers.Values)
+                tracker.FreezeButton.IsVisible = available;
+        }
+
+        /// <summary>
         /// Whether Processing dialogs should disable their "Replace data" option for this window -
         /// either because it is a genuine <see cref="LinkedView"/> follower (<see cref="IsSyncFollower"/>),
         /// or because the host opted out via <see cref="AllowDataReplace"/>. This is what call sites
@@ -289,8 +326,9 @@ namespace MxPlot.UI.Avalonia.Views
             {
                 // Nothing was swapped, so the ordinary redraw path is the whole commit: it renders
                 // the rewritten buffers, updates the derived panels and raises Refreshed for
-                // anything derived from this window in turn.
-                Refresh();
+                // anything derived from this window in turn. The orthogonal slices and projection
+                // are cut from those buffers too, so they are rebuilt with them.
+                Refresh(rebuildOrthogonalData: true);
                 return;
             }
 

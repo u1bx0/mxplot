@@ -15,7 +15,7 @@ It depends on `MxPlot.Core` as its model/backbone and provides:
 - An embeddable rendering control (`MxView`) with LUT, zoom, pan, and overlay support
 - An orthogonal (XYZ slice) view panel (`OrthogonalPanel`)
 - A profile plotter window (`ProfilePlotter`) for line-profile analysis
-- A plugin/action model for extending the UI without modifying the core
+- A plugin/tool model for extending the UI without modifying the core
 
 The library targets Avalonia 11 and runs on Windows, macOS, and Linux.
 
@@ -39,7 +39,7 @@ A full-featured `Window` subclass. One window per `IMatrixData`.
 | Composite mode | Multi-channel color compositing — see [Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md) |
 | ColorCoded projection | Depth-coded XY (Z-axis) projection, on its own child window — see [below](#colorcoded-depth-coded-projection) |
 | External control | Facade properties (`Lut`, `IsInvertedColor`, `LutDepth`, `RangeMode`, `IsFixedRange`, `FixedRange`) — see [Usage Guide](./MatrixPlotter_Usage_Guide.md) |
-| Plugin actions | `IPlotterAction` / `IMatrixPlotterContext` for tool extensions |
+| Interactive tools | `IPlotterTool` / `IMatrixPlotterContext` for tool extensions |
 
 **Factory method:**
 
@@ -97,14 +97,15 @@ Z-index* colorized through a depth palette. Because of that:
 - It only ever appears on the **ephemeral XY-projection child window** created by
   `MatrixPlotter.VolumeOperation.cs`'s `OnXYProjectionChanged` — never as something set directly
   on an ordinary window's `MxView`. `ProjectionSelector` offers it only on the X-Y (Z Projection)
-  row, as two extra picks (Color(Max)/Color(Min)) layered on top of the plain projection modes;
+  row, as four extra picks (Color(RGB-Max)/Color(RGB-Add)/Color(Max)/Color(Min)) layered on top of the plain projection modes;
   `MxPlot.Core`'s own `ProjectionMode` enum is untouched — the distinction is reported separately
   via `ProjectionSelector.IsColorCoded(plane)`.
+- The picks differ in how depth becomes color. `Color(Max)`/`Color(Min)` take the depth color of the single brightest/darkest slice per pixel, so the color reads directly as depth. `Color(RGB-Max)` tints every slice by its depth and keeps the largest R, G and B component separately; `Color(RGB-Add)` sums the tinted slices (clamped at 255) and whites out on dense stacks. Both RGB picks let structures at different depths overlap and mix, so colors outside the palette can appear.
 - The child window's own live `MatrixData` stays an ordinary winner-*value* projection result
   (same type as the source) — Duplicate/Convert/Filter/Save all work on it like any other
   projection. Only the **display** is special: `ColorCodedBitmapWriter` combines that data with a
   winner-index/depth-palette/range/invert bundle (`ColorCodedRenderInfo`), scanned and owned by
-  the *parent*'s `OrthogonalViewController`.
+  the *parent*'s `OrthogonalViewController`. `Color(RGB-Max)`/`Color(RGB-Add)` blend every slice of the swept range instead (`ColorCodedRgbBlender`, on a background thread, again owned by the parent) and hand the result over as `ColorCodedRenderInfo.BlendedArgb`, which the writer just copies to the bitmap.
 - It does have a **dedicated UI component**: `MatrixPlotter.ColorCoded.cs` reuses the ordinary LUT
   header's `LutSelector`/`ValueRangeBar` controls as-is, but swaps in its own details panel —
   Start/End (scan range) + Invert — replacing the normal Level/Histogram panel, which has no
@@ -165,36 +166,36 @@ for the full API and the thread-affinity contract shared with `MxPlotHostApplica
 
 ---
 
-## Plugin / Action Model
+## Plugin / Tool Model
 
 There are three distinct extension points, for three different jobs:
 
 | Interface | Job | Menu location |
 |---|---|---|
-| `IPlotterAction` | Interactive on-canvas tool (crop, measure, annotate) | Toolbar / context menu |
+| `IPlotterTool` | Interactive on-canvas tool (crop, measure, annotate) that stays active on its window until it completes or is cancelled | Processing menu (e.g. Crop) |
 | `IMatrixPlotterPlugin` | One-shot command against the current data/context | "Plugins" tab |
 | `IRenderExportPlugin` | Export the rendered view (not raw data) to a file | "Export as…" submenu |
 
-### `IPlotterAction`
+### `IPlotterTool`
 
-Implement `IPlotterAction` to create interactive tools (crop, measure, annotate, etc.).
+Implement `IPlotterTool` to create interactive tools (crop, measure, annotate, etc.).
 
 ```csharp
-public interface IPlotterAction : IDisposable
+public interface IPlotterTool : IDisposable
 {
     event EventHandler<IMatrixData?>? Completed;
     event EventHandler? Cancelled;
 
-    void Invoke(PlotterActionContext context);
-    void NotifyContextChanged(PlotterActionContext newContext) { }  // default: no-op
+    void Invoke(PlotterToolContext context);
+    void NotifyContextChanged(PlotterToolContext newContext) { }  // default: no-op
 }
 ```
 
-The active action is managed by `MatrixPlotter` internally. Only one action can be active at a time.
-`Invoke` starts the action and receives a `PlotterActionContext` (`MainView`, `HostVisual`, `Data`,
-`OrthoPanel`, `DepthAxisName`); when `Completed` fires, its `IMatrixData?` argument — the action
+The active tool is managed by `MatrixPlotter` internally. Only one tool can be active at a time.
+`Invoke` starts the tool and receives a `PlotterToolContext` (`MainView`, `HostVisual`, `Data`,
+`OrthoPanel`, `DepthAxisName`); when `Completed` fires, its `IMatrixData?` argument — the tool
 result, or `null` if no data change occurred — is applied (e.g., cropped data replaces the current
-dataset). `NotifyContextChanged` lets a running action re-validate itself when the host context
+dataset). `NotifyContextChanged` lets a running tool re-validate itself when the host context
 changes underneath it (e.g., the depth axis is switched, or the data is replaced).
 
 ### `IMatrixPlotterContext`
@@ -248,7 +249,7 @@ full `ExportAsync` contract (progress reporting, cancellation, `RequiresStack`).
 
 ### `MatrixPlotterPluginRegistry`
 
-Central static registry for all three kinds of plugin (`Plugins`, `ExportPlugins` — `IPlotterAction`
+Central static registry for all three kinds of plugin (`Plugins`, `ExportPlugins` — `IPlotterTool`
 instances are per-invocation, not registered here). Plugins can be added programmatically via
 `AddPlugin`/`AddExportPlugin` or discovered from a directory of DLLs via `LoadFromDirectory`.
 `PluginsChanged`/`ExportPluginsChanged` fire on the UI thread so `MatrixPlotter` can rebuild its

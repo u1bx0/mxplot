@@ -49,10 +49,7 @@ namespace MxPlot.Core
     /// <c>RemoteFrames&lt;T&gt;</c> as its <c>_arrayList</c>.
     /// </para>
     /// <para>
-    /// <strong>This interface is not yet implemented.</strong>
-    /// It is a forward-looking reservation. See the design memo at
-    /// <c>Tests.Documents/Working/MxPlot.Remote/RemoteFrames_Design.md</c>
-    /// §11 (progressive loading) and §12 (interface design policy) for details.
+    /// <strong>This interface is not yet implemented.</strong> It is a forward-looking reservation.
     /// </para>
     /// </remarks>
     public interface IRemoteMatrixData : IMatrixData

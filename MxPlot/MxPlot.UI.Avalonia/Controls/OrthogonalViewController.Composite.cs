@@ -1,8 +1,7 @@
 ﻿// OrthogonalViewController.Composite.cs
 //
 // Per-channel extraction + zero-copy merge used to render Composite mode (Channel-axis
-// blending) in the XZ/YZ side views and their MIP/MinIP/AIP projections. See
-// Tests.Documents/Working/Composite/CompositeMode_Step4-5_ImplementationPlan.md (Step F).
+// blending) in the XZ/YZ side views and their MIP/MinIP/AIP projections.
 using MxPlot.Core;
 using MxPlot.Core.Processing;
 using System;

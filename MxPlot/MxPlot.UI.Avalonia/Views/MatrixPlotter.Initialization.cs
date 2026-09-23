@@ -8,6 +8,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.ViewModels;
@@ -616,9 +617,9 @@ namespace MxPlot.UI.Avalonia.Views
             _view.OverlayManager.GhostCancelled += (_, _) =>
                 _view.OverlayInfoText = null;
             _view.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _view.CropRequested += (_, _) => InvokeCropAction();
+            _view.CropRequested += (_, _) => InvokeCropTool();
             _view.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_view);
-            _view.ExtractDimensionRequested += (_, _) => _ = InvokeExtractDimensionAsync();
+            _view.ExtractDimensionRequested += (_, _) => _ = CommandCatalog.ExtractDimension.RunAsync(this);
             _view.ScrollStateChanged += (_, _) => UpdateStatusBar();
             _view.SyncComplexValueModeRequested += (_, mode) =>
             {
@@ -634,7 +635,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.BottomView.OverlayManager.GhostCancelled += (_, _) =>
                 _orthoPanel.BottomView.OverlayInfoText = null;
             _orthoPanel.BottomView.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _orthoPanel.BottomView.CropRequested += (_, _) => InvokeCropAction();
+            _orthoPanel.BottomView.CropRequested += (_, _) => InvokeCropTool();
             _orthoPanel.BottomView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.BottomView);
             _orthoPanel.BottomView.SyncComplexValueModeRequested += (_, mode) =>
             {
@@ -651,7 +652,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.RightView.OverlayManager.GhostCancelled += (_, _) =>
                 _orthoPanel.RightView.OverlayInfoText = null;
             _orthoPanel.RightView.CopiedToClipboard += (_, msg) => ShowToast(msg);
-            _orthoPanel.RightView.CropRequested += (_, _) => InvokeCropAction();
+            _orthoPanel.RightView.CropRequested += (_, _) => InvokeCropTool();
             _orthoPanel.RightView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.RightView);
             _orthoPanel.RightView.SyncComplexValueModeRequested += (_, mode) =>
             {
@@ -853,6 +854,9 @@ namespace MxPlot.UI.Avalonia.Views
                     RaiseColorCodedParamsChanged();
                     return;
                 }
+                // Choosing a mode again is a fresh request: a previously cancelled background scan
+                // no longer holds All to the cached-only range.
+                _valueRangeScanDeclinedFor = null;
                 // Wrapped: this block sets IsFixedRange/FixedMin/FixedMax across several separate
                 // statements. Without ApplyViewMutationAtomically, the very first assignment could
                 // reentrantly cascade (View -> VM upsync -> OnDataContextChanged switch -> back into
@@ -936,32 +940,12 @@ namespace MxPlot.UI.Avalonia.Views
                 _view.FixedMin = args.Min;
                 _view.FixedMax = args.Max;
                 _orthoController.SyncRenderSettings();
-                SaveViewSettings();
-                bool vrMatchesSnapshot = _renderSnapshot != null
-                    && _renderSnapshot.VrMode == ValueRangeMode.Fixed
-                    && _view.FixedMin == _renderSnapshot.VrMin
-                    && _view.FixedMax == _renderSnapshot.VrMax;
-                SetVrDirty(!vrMatchesSnapshot);
-
-                if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
-                {
-                    if (!_reentrancy.IsActive(GuardContext.UiSync))
-                    {
-                        // External range change: rebuild histogram bins with new LUT range
-                        UpdateHistogram();
-                    }
-                    else
-                    {
-                        // During histogram drag (UiSync active): only update red line positions
-                        // without rebuilding bins (avoids resetting _plotMin/_plotMax)
-                        _histogramPlot.SetViewValueRange(args.Min, args.Max);
-                    }
-                }
-
-                if (!_reentrancy.IsActive(GuardContext.SyncApply))
-                    SyncFixedRangeChanged?.Invoke(this, (args.Min, args.Max));
+                OnLutFixedRangeApplied(args.Min, args.Max);
             };
 
+            // Search writes the bar with SetRange, which (unlike a typed edit) does not raise
+            // RangeChanged - so the histogram lines, dirty state, saved settings and Linked Sync
+            // that the RangeChanged handler above maintains have to be applied here explicitly.
             _rangeBar.SearchMinRequested += (_, _) =>
             {
                 // ColorCoded projection child: this window's "current frame" is the packed-ARGB
@@ -977,6 +961,7 @@ namespace MxPlot.UI.Avalonia.Views
                     _rangeBar.SetRange(min, _view.FixedMax);
                 });
                 _orthoController.SyncRenderSettings();
+                OnLutFixedRangeApplied(_view.FixedMin, _view.FixedMax);
             };
 
             _rangeBar.SearchMaxRequested += (_, _) =>
@@ -989,7 +974,44 @@ namespace MxPlot.UI.Avalonia.Views
                     _rangeBar.SetRange(_view.FixedMin, max);
                 });
                 _orthoController.SyncRenderSettings();
+                OnLutFixedRangeApplied(_view.FixedMin, _view.FixedMax);
             };
+
+            _rangeBar.FullScanRequested += async (_, _) => await RequestFullValueRangeScanAsync();
+        }
+
+        /// <summary>
+        /// Everything that must follow once LUT mode's Fixed range has been written to
+        /// <see cref="_view"/> (and the orthogonal controller synced): saved settings, the Revert
+        /// button's dirty state, the histogram's boundary lines, and the Linked Sync broadcast.
+        /// Shared by the range bar's RangeChanged handler and the Search Min/Max buttons.
+        /// </summary>
+        private void OnLutFixedRangeApplied(double min, double max)
+        {
+            SaveViewSettings();
+            bool vrMatchesSnapshot = _renderSnapshot != null
+                && _renderSnapshot.VrMode == ValueRangeMode.Fixed
+                && _view.FixedMin == _renderSnapshot.VrMin
+                && _view.FixedMax == _renderSnapshot.VrMax;
+            SetVrDirty(!vrMatchesSnapshot);
+
+            if (_lutModeDetails?.IsVisible == true && _histogramPlot != null)
+            {
+                if (!_reentrancy.IsActive(GuardContext.UiSync))
+                {
+                    // External range change: rebuild histogram bins with new LUT range
+                    UpdateHistogram();
+                }
+                else
+                {
+                    // During histogram drag (UiSync active): only update red line positions
+                    // without rebuilding bins (avoids resetting _plotMin/_plotMax)
+                    _histogramPlot.SetViewValueRange(min, max);
+                }
+            }
+
+            if (!_reentrancy.IsActive(GuardContext.SyncApply))
+                SyncFixedRangeChanged?.Invoke(this, (min, max));
         }
 
         /// <summary>

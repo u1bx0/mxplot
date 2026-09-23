@@ -4,12 +4,9 @@
 
 using MxPlot.Core.IO.CacheStrategies;
 using System;
-using System.Buffers.Binary;
 using System.Collections;
 using System.Diagnostics;
-using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Text;
 
 
@@ -22,164 +19,99 @@ namespace MxPlot.Core.IO
     /// </summary>
     public record CacheSnapshot(List<int> CachedIndices, List<int> PreloadingIndices);
 
-    public interface IVirtualFrameList
-    {
-        ICacheStrategy CacheStrategy { get; set; }
-        int CacheCapacity { get; set; }
-        bool IsOwned { get; set; }
-        bool IsDisposed { get; }
-        string FilePath { get; }
-
-        /// <summary>Captures a diagnostic snapshot of the current cache state.</summary>
-        CacheSnapshot GetCacheStatus();
-
-        /// <summary>
-        /// Sets <see cref="CacheCapacity"/> to <paramref name="newCapacity"/> and, unlike assigning
-        /// the property directly, proactively evicts down to it immediately instead of waiting for
-        /// future cache-miss traffic to do it lazily. Use this to actually release memory after a
-        /// temporary elevated-budget mode (e.g. orthogonal/Volume-mode viewing) ends.
-        /// </summary>
-        void TrimCacheTo(int newCapacity);
-    }
-
     /// <summary>
-    /// Centralizes the heuristics <see cref="VirtualFrames{T}"/> uses to size its LRU frame
-    /// cache from available memory and per-frame byte size, instead of a flat percentage of the
-    /// frame count that knows nothing about either.
+    /// Abstract skeleton for a demand-loaded, LRU-cached view over <c>Count</c> logical frames,
+    /// independent of how a missing frame is actually materialized. Concrete subclasses implement
+    /// <see cref="ReadFrame"/>: <see cref="MmfFrames{T}"/> reads raw bytes from a memory-mapped
+    /// file, <c>TiffDecodedFrames&lt;T&gt;</c> (MxPlot.Extensions.Tiff) runs a real format
+    /// decoder, and a chunk-routing backend can resolve/fetch a chunk and slice out one frame --
+    /// none of that is this class's concern.
     /// </summary>
     /// <remarks>
-    /// <para>
-    /// <see cref="MemoryBudgetFraction"/> is deliberately conservative (not 1.0): opening several
-    /// large virtual datasets one after another is a realistic workflow, and each dataset only
-    /// queries "available" memory at its own construction/growth time. Capping the fraction any
-    /// one dataset can claim leaves headroom for datasets opened later (which will in turn see a
-    /// smaller "available" figure, since the earlier ones' caches already exist) -- a cheap,
-    /// self-limiting approximation, not a true cross-instance budget coordinator.
-    /// </para>
-    /// <para>
-    /// Growing a <see cref="VirtualFrames{T}.CacheCapacity"/> at runtime takes effect immediately
-    /// and safely (the eviction check re-reads it on every insert). Shrinking it does not by
-    /// itself proactively trim anything already cached -- callers that want memory back must call
-    /// <see cref="VirtualFrames{T}.TrimCacheTo"/> explicitly (see its own remarks for why).
-    /// </para>
+    /// <see cref="GetKey"/>/<see cref="IndexOf"/> are virtual with a trivial (no physical-frame
+    /// deduplication) default here, because whether two logical indices can legitimately point at
+    /// the same physical data is backend-specific -- <see cref="MmfFrames{T}"/> overrides this with
+    /// real offset-based deduplication. <see cref="IsOwned"/> lives here (not on
+    /// <see cref="IMmfFrameList"/>) because the double-dispose hazard it guards against -- multiple
+    /// <c>MatrixData&lt;T&gt;</c> instances sharing this same backing list by reference (e.g. via
+    /// <c>Reorder(deepCopy: false)</c>) -- applies to any resource-holding
+    /// <see cref="ILazyDataSource"/>, not just MMF.
     /// </remarks>
-    public static class VirtualCachePolicy
-    {
-        /// <summary>
-        /// Fraction of <see cref="GC.GetGCMemoryInfo"/>'s <c>TotalAvailableMemoryBytes</c> that a
-        /// single <see cref="VirtualFrames{T}"/> instance may claim for its baseline frame cache
-        /// (i.e. outside of a temporary, higher-budget mode like <see cref="VolumeModeMemoryBudgetFraction"/>).
-        /// </summary>
-        public static double MemoryBudgetFraction { get; set; } = 0.25;
-
-        /// <summary>
-        /// Fraction of available memory allowed for a temporary, deliberately-elevated budget --
-        /// e.g. while <c>DimensionStrategy</c> is in Volume mode for an active orthogonal view,
-        /// whose access pattern (every frame along the sliced axis, touched on every crosshair
-        /// move) thrashes badly even a few frames short of fully fitting the cache (a cyclic full
-        /// scan against LRU eviction degrades sharply, not gracefully, once undersized). Higher
-        /// than <see cref="MemoryBudgetFraction"/> because this elevated budget is meant to be
-        /// temporary and is expected to be released (via <see cref="VirtualFrames{T}.TrimCacheTo"/>)
-        /// once the caller-specific mode that requested it ends.
-        /// </summary>
-        public static double VolumeModeMemoryBudgetFraction { get; set; } = 0.5;
-
-        /// <summary>Absolute floor on any computed capacity, in frames.</summary>
-        public static int MinCapacity { get; set; } = 16;
-
-        /// <summary>
-        /// Absolute ceiling on any computed capacity, in frames -- independent of how much memory
-        /// the budget would otherwise allow, since holding very large frame counts has real
-        /// per-frame bookkeeping overhead (LRU list nodes, dictionary entries) beyond raw bytes.
-        /// </summary>
-        public static int MaxCapacity { get; set; } = 8192;
-
-        /// <summary>
-        /// Computes a cache capacity (in frames) for <paramref name="idealFrameCount"/> frames of
-        /// <paramref name="frameSizeBytes"/> each, clamped to what <see cref="MemoryBudgetFraction"/>
-        /// of currently available memory allows (and to <see cref="MinCapacity"/>/<see cref="MaxCapacity"/>).
-        /// </summary>
-        /// <param name="frameSizeBytes">Byte size of a single frame.</param>
-        /// <param name="idealFrameCount">
-        /// The frame count that would fully avoid thrashing for the access pattern being sized for
-        /// -- e.g. the total physical frame count for an initial baseline, or
-        /// (target-axis length × composite-axis length) for an orthogonal/Volume-mode working set.
-        /// </param>
-        public static int ComputeCapacity(long frameSizeBytes, int idealFrameCount)
-            => ComputeCapacity(frameSizeBytes, idealFrameCount, MemoryBudgetFraction);
-
-        /// <summary>
-        /// Same as <see cref="ComputeCapacity(long, int)"/> but with an explicit budget fraction
-        /// (e.g. <see cref="VolumeModeMemoryBudgetFraction"/>) instead of <see cref="MemoryBudgetFraction"/>.
-        /// </summary>
-        public static int ComputeCapacity(long frameSizeBytes, int idealFrameCount, double budgetFraction)
-        {
-            if (frameSizeBytes <= 0 || idealFrameCount <= 0)
-                return MinCapacity;
-
-            long availableBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-            long budgetBytes = (long)(availableBytes * budgetFraction);
-            long budgetFrames = budgetBytes / frameSizeBytes;
-
-            long recommended = Math.Min(budgetFrames, idealFrameCount);
-            return (int)Math.Clamp(recommended, MinCapacity, MaxCapacity);
-        }
-    }
-
-    /// <summary>
-    /// Provides a virtualized, demand-loaded view of a large image file via a
-    /// Memory-Mapped File (MMF). The backing data resides on disk; individual frames
-    /// are decoded into RAM only when their index is first accessed.
-    /// </summary>
     /// <typeparam name="T">Unmanaged pixel element type (e.g., <c>ushort</c>, <c>float</c>).</typeparam>
     public abstract class VirtualFrames<T>
-        : IVirtualFrameList, ILazyFrameList, IList<T[]>, IFrameKeyProvider<T>, IDisposable
+        : ILazyDataSource, ICacheableFrameList, IList<T[]>, IFrameKeyProvider<T>, IDisposable
         where T : unmanaged
     {
 #if VF_DEBUG
-        protected long _accessCount = 0; 
+        protected long _accessCount = 0;
 #endif
-
-        protected FileStream _fileStream;
-        protected MemoryMappedFile _mmf;
-        protected MemoryMappedViewAccessor _accessor;
-        protected MemoryMappedFileAccess _accessMode;
-
-        // Exposed as protected so derived classes (stripped and tiled layouts) can access the
-        // physical layout directly. The jagged structure supports both strip-based and tile-based
-        // formats: _offsets[frameIndex][stripOrTileIndex].
-        protected readonly long[][] _offsets;
-        protected readonly long[][] _byteCounts;
-
-        /// <summary>
-        /// Provides a mapping from the frame offsets (offsets[frameIndex][0]) to unique dummy arrays that serve as keys for ValueRangeMap.
-        /// </summary>
-        protected readonly Dictionary<long, T[]> _offsetToKeyMap;
-
-        protected readonly Dictionary<T[], int> _keyToIndexMap;
-
-        // When true, each frame is flipped vertically as it is decoded
-        // (for formats whose pixel origin is at the bottom-left instead of the top-left).
-        protected readonly bool _isYFlipped;
-
-        // True when the source file's byte order differs from the host's, so raw MMF reads
-        // (which bypass any format library's own decode-time byte-swapping) need an explicit
-        // swap. Computed once from the caller-supplied _isBigEndian against the actual host
-        // order, rather than assuming the host is little-endian.
-        protected readonly bool _needsByteSwap;
-
-        /// <summary>
-        /// Indicates whether this instance is owned by an external component responsible for managing its disposal.
-        /// </summary>
-        /// <remarks>If the value is <see langword="true"/>, an external owner is responsible for calling
-        /// <see cref="IDisposable.Dispose"/> on this instance. If <see langword="false"/>, this instance manages its
-        /// own disposal. This flag should be set appropriately to avoid resource leaks or premature disposal.</remarks>
-        private bool _isOwned = false;
-
-        private int _lastAccessedIndex = 0;
 
         private readonly int _instanceId = VirtualFramesIdProvider.Next(); // unique instance id used for diagnostics / ToString
         private ICacheStrategy _cacheStrategy = new NeighborStrategy();     // default prefetch / eviction strategy
+
+        private int _lastAccessedIndex = 0;
+
+        // ── ILazyDataSource ──────────────────────────────────────────────────
+        public string SourcePath { get; protected set; }
+        public int StoredFrameCount { get { lock (_cacheLock) return _cache.Count; } }
+        public event EventHandler<int>? FrameStored;
+        public event EventHandler<int>? FrameEvicted;
+        public event EventHandler? IsVirtualChanged;
+
+        private bool _isOwned = false;
+
+        /// <summary>
+        /// Gets/Sets a value indicating whether this instance is owned by an external component
+        /// (e.g. a <c>MatrixData&lt;T&gt;</c> instance) responsible for its disposal. First-claim-
+        /// wins arbitration for a backend that may be reference-shared across several
+        /// <c>MatrixData&lt;T&gt;</c> instances (e.g. via <c>Reorder(deepCopy: false)</c>), so
+        /// exactly one of them ends up responsible for calling <see cref="Dispose"/>.
+        /// </summary>
+        public bool IsOwned
+        {
+            get => _isOwned;
+            set
+            {
+                if (IsDisposed)
+                    throw new ObjectDisposedException(nameof(VirtualFrames<T>), "Cannot change ownership of a disposed VirtualFrames instance.");
+                if (_isOwned == true) // Cannot change ownership once set to true, to prevent accidental ownership transfer
+                    throw new InvalidOperationException("This VirtualFrames instance is already owned. Ownership cannot be changed.");
+                _isOwned = value;
+            }
+        }
+
+        public bool IsDisposed { get; private set; }
+
+        /// <summary>
+        /// Whether this instance currently does <em>not</em> hold every frame resident in memory.
+        /// Backs <see cref="IMatrixData.IsVirtual"/>. Default: <see cref="StoredFrameCount"/> &lt;
+        /// <see cref="Count"/>, so it converges to <see langword="false"/> once a backend that's
+        /// meant to eventually hold everything (a decoder background-filling its cache, a fetcher
+        /// that's retrieved every chunk) actually gets there. <see cref="MmfFrames{T}"/> overrides
+        /// this to unconditionally <see langword="true"/>, since its cache is bounded/evicting by
+        /// design (see <see cref="VirtualCachePolicy"/>) and never works toward a "fully loaded"
+        /// state -- a momentarily-full cache says nothing about the next access.
+        /// </summary>
+        public virtual bool IsVirtual => StoredFrameCount < Count;
+
+        // Last IsVirtual value announced via IsVirtualChanged (guarded by _cacheLock). Seeded in
+        // the constructor with the initial state -- an empty cache is Virtual whenever there is at
+        // least one frame -- so the very first fill-complete transition is reported too.
+        private bool _lastIsVirtual;
+
+        /// <summary>
+        /// Re-evaluates <see cref="IsVirtual"/> against the last announced value. Must be called
+        /// under <c>_cacheLock</c> after any change to <c>_cache</c> membership; returns
+        /// <see langword="true"/> when the caller should raise <see cref="IsVirtualChanged"/> once
+        /// it has released the lock.
+        /// </summary>
+        private bool UpdateIsVirtualUnderLock()
+        {
+            bool now = IsVirtual;
+            if (now == _lastIsVirtual) return false;
+            _lastIsVirtual = now;
+            return true;
+        }
 
         #region private fields for caching and prefetching (optional, can be extended with ICacheStrategy)
 
@@ -202,9 +134,29 @@ namespace MxPlot.Core.IO
 
 
         protected readonly object _cacheLock = new object();
-        private readonly SemaphoreSlim _ioSemaphore = new SemaphoreSlim(1, 1); // serialises disk I/O: at most one read at a time
-        private readonly HashSet<int> _preloadingIndices = new HashSet<int>(); // tracks in-flight preloads to prevent duplicate tasks
-        private CancellationTokenSource _prefetchCts = new CancellationTokenSource();
+
+        // ── Background preload scheduler (all guarded by _cacheLock) ─────────────────────────
+        // A small pool of workers drains one priority queue, instead of one async Task per target
+        // frame waiting on a single I/O semaphore. Every SchedulePreload call replaces the queue
+        // with the strategy's current target order, so reading always follows the latest cursor
+        // position, and nothing needs to be cancelled when the target set moves -- at most
+        // MaxConcurrentPreloads frames are ever in flight.
+        //
+        // Invariants: _queued, _inFlight and _cache are pairwise disjoint except for a frame a
+        // synchronous indexer read inserts while a worker is still reading it (at most
+        // MaxConcurrentPreloads, resolved when that read finishes). _queue may hold entries no
+        // longer in _queued (taken, cached, or superseded); they are skipped when dequeued.
+        private int[] _queue = Array.Empty<int>();
+        private int _queueHead;
+        private int _queueBuiltAtIndex = int.MinValue / 2; // cursor position the queue was last built for
+        private const int ReorderDistance = 32;
+        private readonly HashSet<int> _queued = new();
+        private readonly HashSet<int> _inFlight = new();
+        private int _activeWorkers;
+        private int _maxConcurrentPreloads = 1;
+        private bool _disposing;
+        private readonly Stack<PreloadReader> _readerPool = new(); // idle readers, reused by the next worker
+        private readonly CancellationTokenSource _disposeCts = new();
 
         // Bumped on every actual _cache membership change (insert or evict); used by
         // SchedulePreload's Volume-mode fast path to know whether a previously-confirmed "fully
@@ -244,11 +196,9 @@ namespace MxPlot.Core.IO
 
             lock (_cacheLock)
             {
-                // 1. Cancel all in-flight prefetch tasks and reset the cancellation token.
-                _prefetchCts.Cancel();
-                _prefetchCts.Dispose();
-                _prefetchCts = new CancellationTokenSource();
-                _preloadingIndices.Clear();
+                // 1. Drop queued preloads (frames already in flight just finish; there are at most
+                //    MaxConcurrentPreloads of them). SchedulePreload below queues the new targets.
+                ClearQueueUnderLock();
                 _lastPreloadSatisfiedAtCacheVersion = -1; // strategy changed; force SchedulePreload to re-derive, not trust a stale "fully covered" result
 
                 if (CacheStrategy == null) return;
@@ -274,7 +224,12 @@ namespace MxPlot.Core.IO
                 foreach (var idx in lowPriority) LruAddLast(idx);
             }
 
-            // 3. Kick off prefetch from the last-accessed index under the new strategy.
+            // 3. Kick off prefetch from the last-accessed index under the new strategy -- unless
+            //    nothing has been read yet, so there is no position to preload around. The first
+            //    read's own SchedulePreload starts it instead. This keeps constructing a backend,
+            //    which typically assigns its strategy, from starting background reads (and opening
+            //    per-worker resources) before a MatrixData owns it.
+            if (StoredFrameCount == 0) return;
             SchedulePreload(_lastAccessedIndex);
         }
 
@@ -294,8 +249,8 @@ namespace MxPlot.Core.IO
         ///   <item>
         ///     <term>PreloadingIndices</term>
         ///     <description>
-        ///       Frames currently being fetched from disk. These are "in-flight" tasks 
-        ///       working to move data into the <c>CachedIndices</c>.
+        ///       Frames being read in the background right now, followed by the frames still queued
+        ///       for background reading (in priority order).
         ///     </description>
         ///   </item>
         /// </list>
@@ -303,234 +258,59 @@ namespace MxPlot.Core.IO
         /// <remarks>
         /// <b>Diagnostic Guide - How to interpret the state:</b>
         /// <para/>
-        /// 1. <b>System Efficiency:</b> If the currently displayed frame index is in <c>CachedIndices</c>, the UI is stutter-free (Cache Hit). 
+        /// 1. <b>System Efficiency:</b> If the currently displayed frame index is in <c>CachedIndices</c>, the UI is stutter-free (Cache Hit).
         /// If it is in <c>PreloadingIndices</c>, the prefetcher is working but hasn't finished yet (Potential Stutter).
         /// <para/>
-        /// 2. <b>IO Health:</b> A high count of <c>PreloadingIndices</c> that don't transition quickly to <c>CachedIndices</c> 
+        /// 2. <b>IO Health:</b> A high count of <c>PreloadingIndices</c> that don't transition quickly to <c>CachedIndices</c>
         /// indicates a slow storage device or a bottleneck in the disk I/O thread.
         /// <para/>
-        /// 3. <b>Strategy Accuracy:</b> Compare the indices in <c>PreloadingIndices</c> with the user's scroll direction. 
+        /// 3. <b>Strategy Accuracy:</b> Compare the indices in <c>PreloadingIndices</c> with the user's scroll direction.
         /// If they don't match, the current <see cref="ICacheStrategy"/> is mispredicting movement.
         /// <para/>
-        /// 4. <b>Eviction Risk:</b> If the current frame is near the end of the <c>CachedIndices</c> list, 
+        /// 4. <b>Eviction Risk:</b> If the current frame is near the end of the <c>CachedIndices</c> list,
         /// it is at risk of being purged from memory soon.
         /// </remarks>
         public CacheSnapshot GetCacheStatus()
         {
             lock (_cacheLock)
             {
-                return new CacheSnapshot(
-                    _lruList.ToList(),
-                    _preloadingIndices.ToList()
-                );
+                var preloading = new List<int>(_inFlight.Count + _queued.Count);
+                preloading.AddRange(_inFlight);
+                for (int i = _queueHead; i < _queue.Length; i++)
+                    if (_queued.Contains(_queue[i])) preloading.Add(_queue[i]);
+                return new CacheSnapshot(_lruList.ToList(), preloading);
             }
         }
 
         #endregion
 
-        /// <summary>
-        /// Gets/Sets a value indicating whether the virtual list is owned by the other component (e.g., a MatrixData instance). 
-        /// If true, there is an owner having a responsibility to dispose this instance.
-        /// </summary>
-        public bool IsOwned
-        {
-            get => _isOwned;
-            set
-            {
-                if (IsDisposed)
-                    throw new ObjectDisposedException(nameof(VirtualFrames<T>), "Cannot change ownership of a disposed VirtualFrameList.");
-                if (_isOwned == true) // Cannot change ownership once set to true, to prevent accidental ownership transfer
-                    throw new InvalidOperationException("This VirtualFrameList is already owned. Ownership cannot be changed.");
-                _isOwned = value;
-            }
-        }
-
-        public bool IsDisposed { get; private set; }
+        /// <summary>Total number of logical frames. Fixed at construction.</summary>
+        public int Count { get; }
 
         /// <summary>
-        /// File path that was set in the constructor.
+        /// Initializes a new instance with the given logical frame count.
         /// </summary>
-        public string FilePath { get; protected set; }
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="VirtualFrames{T}"/> class using the specified file.
-        /// This provides virtualized frame access by mapping the file into the process's address space.
-        /// </summary>
-        /// <param name="filePath">The path to the file to be mapped. The file must exist, and the process must have 
-        /// sufficient permissions according to the specified <paramref name="access"/>.</param>
-        /// <param name="offsets">A jagged array representing the starting offsets for each virtual frame. 
-        /// Each inner array corresponds to the physical layout of a specific frame in the file.</param>
-        /// <param name="bytesCounts">A jagged array representing the data size (in bytes) for each virtual frame, 
-        /// matching the structure of <paramref name="offsets"/>.</param>
-        /// <param name="isYFlipped">Indicates whether the Y-axis of the frames should be flipped during access. This is relevant for certain image formats where the origin is at the bottom-left instead of the top-left.</param>
-        /// <param name="isBigEndian">Whether the source file's multi-byte samples are stored big-endian. Pass the
-        /// actual property of the file (e.g. a TIFF reader's own byte-order flag) -- not a swap decision; the
-        /// class compares it against the host's actual byte order itself. Irrelevant for <see cref="byte"/>/<see
-        /// cref="sbyte"/> frames.</param>
-        /// <param name="access">The access mode for the memory-mapped file.
-        /// Use <see cref="MemoryMappedFileAccess.Read"/> (default) for read-only access, or
-        /// <see cref="MemoryMappedFileAccess.ReadWrite"/> to enable write-back functionality to the disk.</param>
-        /// <exception cref="FileNotFoundException">Thrown if the specified <paramref name="filePath"/> cannot be found.</exception>
-        /// <exception cref="UnauthorizedAccessException">Thrown if the process lacks the required permissions for the requested <paramref name="access"/> mode.</exception>
-        /// <exception cref="IOException">Thrown if an I/O error occurs during file opening, or if the file is locked by another process with incompatible sharing modes.</exception>
-        public VirtualFrames(string filePath, long[][] offsets, long[][] bytesCounts,
-            bool isYFlipped, bool isBigEndian, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
+        /// <param name="frameCount">Total number of logical frames.</param>
+        /// <param name="sourcePath">
+        /// Where this data actually comes from (a local file path, a URL, etc.) -- surfaced via
+        /// <see cref="SourcePath"/> for diagnostics, independent of how the concrete subclass reads it.
+        /// </param>
+        protected VirtualFrames(int frameCount, string sourcePath)
         {
-            if (!File.Exists(filePath))
-                throw new FileNotFoundException("Target file not found.", filePath);
-
-            FilePath = filePath;
-            _offsets = offsets;
-            _byteCounts = bytesCounts;
-            _accessMode = access;
-            _needsByteSwap = isBigEndian != !BitConverter.IsLittleEndian;
-
-            /*
-            var fileAccess = (access == MemoryMappedFileAccess.ReadWrite) ? FileAccess.ReadWrite : FileAccess.Read;
-            _fileStream = new FileStream(filePath, FileMode.Open, fileAccess, FileShare.ReadWrite);
-            _mmf = MemoryMappedFile.CreateFromFile(_fileStream, null, 0, access, HandleInheritability.None, leaveOpen: false);
-            _accessor = _mmf.CreateViewAccessor(0, 0, access);
-            */
-            _fileStream = null!;
-            _mmf = null!;
-            _accessor = null!;
-            // Mount the MMF here.
-            Mount(access);
-
-            _isYFlipped = isYFlipped;
-
-            // ========================================================
-            // Build offset→key dictionaries
-            // ========================================================
-            _offsetToKeyMap = new Dictionary<long, T[]>();
-            _keyToIndexMap = new Dictionary<T[], int>();
-
-            for (int frameIndex = 0; frameIndex < _offsets.Length; frameIndex++)
-            {
-                long[] offsetArray = _offsets[frameIndex];
-                // Defensive guard: an empty offset array should never occur per TIFF spec.
-                if (offsetArray == null || offsetArray.Length == 0) continue;
-
-                // Only create a new dummy key for offsets not yet registered (new physical frame).
-                if (!_offsetToKeyMap.ContainsKey(offsetArray[0])) // offset[0] is the primary key
-                {
-                    var key = new T[1];
-                    _offsetToKeyMap[offsetArray[0]] = key; // T[1] dummy array
-                    _keyToIndexMap[key] = frameIndex;
-                }
-            }
-
-            // Derive an initial CacheCapacity from available memory and per-frame byte size, aiming
-            // to cache the whole dataset (uniquePhysicalFrames) when that comfortably fits the
-            // memory budget -- after one full read pass (e.g. building an orthogonal slice), every
-            // subsequent access is then served from RAM regardless of access pattern.
-            int uniquePhysicalFrames = _offsetToKeyMap.Count;
-            long frameSizeBytes = SumByteCounts(_byteCounts.Length > 0 ? _byteCounts[0] : null);
-
-            this.CacheCapacity = VirtualCachePolicy.ComputeCapacity(frameSizeBytes, uniquePhysicalFrames);
-            Debug.WriteLine($"[VirtualFrameList] Initialized with CacheCapacity={CacheCapacity} (Unique Physical Frames: {uniquePhysicalFrames}, FrameSizeBytes={frameSizeBytes})");
+            Count = frameCount;
+            SourcePath = sourcePath;
+            _lastIsVirtual = frameCount > 0;
         }
-
-        /// <summary>Total bytes across every strip/tile of one frame (works uniformly for both layouts).</summary>
-        private static long SumByteCounts(long[]? byteCounts)
-        {
-            if (byteCounts == null) return 0;
-            long sum = 0;
-            foreach (var b in byteCounts) sum += b;
-            return sum;
-        }
-
-        protected void Unmount()
-        {
-            // Dispose the MMF and FileStream to release the OS-level file lock.
-            // Cached T[] arrays in RAM are intentionally left intact.
-            _accessor?.Dispose();
-            _mmf?.Dispose();
-            _fileStream?.Dispose();
-
-            _accessor = null!;
-            _mmf = null!;
-            _fileStream = null!;
-        }
-
-        protected void Mount(MemoryMappedFileAccess access)
-        {
-            // Re-open FileStream and MMF using the current FilePath (which may have changed after SaveAs).
-            var fileAccess = (access == MemoryMappedFileAccess.ReadWrite) ? FileAccess.ReadWrite : FileAccess.Read;
-            _fileStream = new FileStream(FilePath, FileMode.Open, fileAccess, FileShare.ReadWrite);
-            _mmf = MemoryMappedFile.CreateFromFile(_fileStream, null, 0, access, HandleInheritability.None, leaveOpen: false);
-            _accessor = _mmf.CreateViewAccessor(0, 0, access);
-        }
-
-        /// <summary>
-        /// Returns the unique dummy key array for the specified logical frame index,
-        /// used as a reference-identity key in <c>ValueRangeMap</c>.
-        /// </summary>
-        /// <param name="frameIndex">Zero-based logical frame index.</param>
-        /// <returns>
-        /// A <c>T[1]</c> dummy array whose object identity uniquely identifies the underlying
-        /// physical frame. Two logical indices that share the same physical offset return the
-        /// same array reference, enabling <c>ValueRangeMap</c> sharing across them.
-        /// </returns>
-        /// <exception cref="ArgumentOutOfRangeException">
-        /// Thrown when <paramref name="frameIndex"/> is outside the valid range.
-        /// </exception>
-        public T[] GetKey(int frameIndex)
-        {
-            if ((uint)frameIndex >= (uint)_offsets.Length)
-                throw new ArgumentOutOfRangeException(nameof(frameIndex));
-
-            // 1. Resolve the physical offset array for this frame index.
-            long[] offsets = _offsets[frameIndex];
-
-            // 2. Return the unique dummy array keyed by the first (primary) offset.
-            return _offsetToKeyMap[offsets[0]];
-        }
-
-        /// <summary>
-        /// Returns the first logical frame index whose key matches <paramref name="item"/>
-        /// by reference identity, or <c>-1</c> if not found.
-        /// </summary>
-        public int IndexOf(T[] item)
-        {
-            return _keyToIndexMap.TryGetValue(item, out int index) ? index : -1;
-        }
-
-#if VF_DEBUG
-        // 統計用カウンタ
-        private long _cacheHitCount = 0;
-        private long _cacheMissCount = 0;
-        private long _prefetchSuccessCount = 0;
-
-        public void PrintCacheStats()
-        {
-            lock (_cacheLock)
-            {
-                long total = _cacheHitCount + _cacheMissCount;
-                double hitRate = total == 0 ? 0 : (double)_cacheHitCount / total * 100;
-
-                // Note: whether the cache is full (pinned at the ceiling) is also diagnostically important.
-                Trace.WriteLine($"[VirtualFrameList] --Cache Stats--
-            }
-        }
-#endif
-
-
-        // ==========================================
-        // IList<T[]> core implementation (read)
-        // ==========================================
-
-        public int Count => _offsets.GetLength(0); // logical frame count equals the number of entries in the offset table
 
         /// <summary>
         /// Gets a value indicating whether the <see cref="T:System.Collections.Generic.IList`1" /> is read-only.
         /// </summary>
         /// <remarks>
         /// <strong>Architectural Note (Pragmatic Hack):</strong><br/>
-        /// In standard C# semantics, this flag indicates whether the list structure itself (adding, removing, or replacing elements) is immutable. 
-        /// However, in this framework, we pragmatically repurpose this flag to also represent the mutability of the underlying data layer 
+        /// In standard C# semantics, this flag indicates whether the list structure itself (adding, removing, or replacing elements) is immutable.
+        /// However, in this framework, we pragmatically repurpose this flag to also represent the mutability of the underlying data layer
         /// (i.e., whether the contents of the retrieved array <c>T[]</c> can be modified and reflected in the actual data store).
-        /// 
+        ///
         /// <c>MatrixData.GetArray()</c> relies on this property to control cache invalidation:
         /// <list type="bullet">
         /// <item>
@@ -542,7 +322,7 @@ namespace MxPlot.Core.IO
         /// <description>Assumes no valid write operations will occur (since modifying the array won't affect the underlying read-only file). It safely skips cache invalidation and avoids unnecessary exceptions. Any modification to the array in this state is strictly at the caller's own risk.</description>
         /// </item>
         /// </list>
-        /// 
+        ///
         /// <strong>Note:</strong> For strict read-only access and zero-allocation performance, use <c>AsSpan()</c> or <c>AsMemory()</c> instead of <c>GetArray()</c>.
         /// </remarks>
         public virtual bool IsReadOnly => true;
@@ -551,7 +331,8 @@ namespace MxPlot.Core.IO
         {
             get
             {
-                if (IsDisposed) throw new ObjectDisposedException(nameof(VirtualFrames<T>));
+                if (IsDisposed) throw new ObjectDisposedException(GetType().Name);
+                int previousIndex = _lastAccessedIndex;
                 _lastAccessedIndex = index;
 
 #if VF_DEBUG
@@ -586,15 +367,28 @@ namespace MxPlot.Core.IO
 
                 if (hit)
                 {
-                    // Even on a cache hit, trigger prefetch for neighbouring frames.
-                    SchedulePreload(index);
+                    // Trigger prefetch for neighbouring frames -- but only when this access actually
+                    // moved somewhere new. A repeat read of the same index (e.g. a cursor read-out
+                    // re-sampling the still-current frame on every pointer move) carries no new
+                    // navigation information: the preload target set SchedulePreload would recompute
+                    // is identical to the one already built (or in progress) from the prior call, so
+                    // recomputing it again is pure overhead. Once genuinely oversubscribed (target
+                    // set bigger than CacheCapacity), that overhead stops being merely wasted CPU and
+                    // starts being unbounded churn: SchedulePreload's "already satisfied" fast path
+                    // (see its own comment) can never trip because the full target set never fits, so
+                    // every repeat call would otherwise re-enqueue the same not-yet-cached remainder
+                    // and keep evicting/refetching among equally-high-priority frames forever, even
+                    // though nothing the caller is looking at has changed. Skipping here lets a
+                    // landed-on queue drain once and settle instead of endlessly re-arming itself.
+                    if (index != previousIndex)
+                        SchedulePreload(index);
                     return data!;
                 }
 #if VF_DEBUG
                 _cacheMissCount++;
 #endif
                 // Cache miss: synchronous read is unavoidable here.
-                data = ReadFrameFromSource(index, CancellationToken.None);
+                data = ReadFrame(index, CancellationToken.None);
                 UpdateCache(index, data);
 
                 // UpdateCache skips insertion when the index is already present.
@@ -612,7 +406,7 @@ namespace MxPlot.Core.IO
 #if VF_DEBUG
                 PrintCacheStats();
 #endif
-                return data;
+                return data!;
             }
 
             set => throw new NotSupportedException();
@@ -620,7 +414,8 @@ namespace MxPlot.Core.IO
 
         /// <summary>
         /// Reads and assembles one logical frame from the backing store.
-        /// Implemented by concrete subclasses for each physical layout (stripped or tiled).
+        /// Implemented by concrete subclasses for each backend (MMF strip/tile layout, a real
+        /// format decoder, a chunk-routing fetch, ...).
         /// </summary>
         /// <param name="index">Zero-based logical frame index.</param>
         /// <param name="ct">
@@ -631,51 +426,94 @@ namespace MxPlot.Core.IO
         /// A <c>T[]</c> of length <c>Width × Height</c> in row-major order,
         /// or <see langword="null"/> if the operation was cancelled.
         /// </returns>
-        protected abstract T[]? ReadFrameFromSource(int index, CancellationToken ct);
+        protected abstract T[]? ReadFrame(int index, CancellationToken ct);
+
+        // ── IFrameKeyProvider<T> ─────────────────────────────────────────────
+        // Trivial default: no physical-frame deduplication (every logical index gets its own,
+        // permanently-stable dummy key). Whether two logical indices can legitimately point at the
+        // same physical data is backend-specific -- MmfFrames<T> overrides this with real
+        // offset-based deduplication (see its own GetKey/IndexOf).
+
+        private T[][]? _defaultKeys;
+
+        private T[][] EnsureDefaultKeys()
+        {
+            if (_defaultKeys == null)
+            {
+                var keys = new T[Count][];
+                for (int i = 0; i < Count; i++) keys[i] = new T[1];
+                _defaultKeys = keys;
+            }
+            return _defaultKeys;
+        }
 
         /// <summary>
-        /// Reverses the byte order of every element in <paramref name="data"/> in place. Raw MMF reads copy bytes
-        /// verbatim (no format library involved to normalize them, unlike e.g. LibTiff's scanline/strip decode),
-        /// so derived classes must call this themselves after reading when <see cref="_needsByteSwap"/> is set.
-        /// A no-op for <see cref="byte"/>/<see cref="sbyte"/>, which have no byte order. Uses the vectorized
-        /// <see cref="BinaryPrimitives.ReverseEndianness(ReadOnlySpan{ushort}, Span{ushort})"/>-family overloads
-        /// via a same-size reinterpret cast, not a per-element scalar loop.
+        /// Returns the unique dummy key array for the specified logical frame index, used as a
+        /// reference-identity key in <c>ValueRangeMap</c>. The default implementation returns a
+        /// distinct, stable key per index (no deduplication); override to share a key across
+        /// logical indices that point at the same physical data.
         /// </summary>
-        protected static void SwapEndiannessInPlace(Span<T> data)
+        public virtual T[] GetKey(int frameIndex)
         {
-            if (typeof(T) == typeof(ushort) || typeof(T) == typeof(short))
+            if ((uint)frameIndex >= (uint)Count)
+                throw new ArgumentOutOfRangeException(nameof(frameIndex));
+            return EnsureDefaultKeys()[frameIndex];
+        }
+
+        /// <summary>
+        /// Returns the first logical frame index whose key matches <paramref name="item"/>
+        /// by reference identity, or <c>-1</c> if not found.
+        /// </summary>
+        public virtual int IndexOf(T[] item)
+        {
+            if (_defaultKeys == null) return -1;
+            return Array.IndexOf(_defaultKeys, item);
+        }
+
+#if VF_DEBUG
+        // Counters for diagnostics; incremented under _cacheLock to avoid races.
+        private long _cacheHitCount = 0;
+        private long _cacheMissCount = 0;
+        private long _prefetchSuccessCount = 0;
+
+        public void PrintCacheStats()
+        {
+            lock (_cacheLock)
             {
-                var s = MemoryMarshal.Cast<T, ushort>(data);
-                BinaryPrimitives.ReverseEndianness(s, s);
+                long total = _cacheHitCount + _cacheMissCount;
+                double hitRate = total == 0 ? 0 : (double)_cacheHitCount / total * 100;
+
+                // Note: whether the cache is full (pinned at the ceiling) is also diagnostically important.
+                Trace.WriteLine($"[VirtualFrames] --Cache Stats--");
             }
-            else if (typeof(T) == typeof(uint) || typeof(T) == typeof(int) || typeof(T) == typeof(float))
-            {
-                var s = MemoryMarshal.Cast<T, uint>(data);
-                BinaryPrimitives.ReverseEndianness(s, s);
-            }
-            else if (typeof(T) == typeof(ulong) || typeof(T) == typeof(long) || typeof(T) == typeof(double))
-            {
-                var s = MemoryMarshal.Cast<T, ulong>(data);
-                BinaryPrimitives.ReverseEndianness(s, s);
-            }
-            // byte/sbyte: single byte, no byte order -- nothing to do.
+        }
+#endif
+
+        /// <summary>
+        /// Called after a frame has been inserted into the cache, outside <c>_cacheLock</c>.
+        /// Raises <see cref="FrameStored"/>; an override must call the base implementation.
+        /// </summary>
+        /// <param name="frameIndex">Index of the stored frame.</param>
+        protected virtual void OnFrameStored(int frameIndex)
+        {
+            FrameStored?.Invoke(this, frameIndex);
         }
 
         /// <summary>
         /// Called after a frame has been evicted from the cache, outside <c>_cacheLock</c>.
-        /// Override in derived classes to perform post-eviction work such as flushing dirty data.
-        /// The base implementation is a no-op.
+        /// Raises <see cref="FrameEvicted"/>. Override in derived classes to perform post-eviction
+        /// work such as flushing dirty data, and call the base implementation afterward.
         /// </summary>
         /// <param name="frameIndex">Index of the evicted frame.</param>
         /// <param name="frameData">The evicted <c>T[]</c> array.</param>
         protected virtual void OnFrameEvicted(int frameIndex, T[] frameData)
         {
-            // Do nothing in the base class, but derived classes can override this to perform actions when a frame is evicted from the cache.
+            FrameEvicted?.Invoke(this, frameIndex);
         }
 
         /// <summary>
         /// Override hook that allows a derived class to veto eviction of a specific frame.
-        /// <see cref="WritableVirtualStrippedFrames{T}"/> overrides this to protect dirty (unsaved) frames.
+        /// <c>WritableStrippedMmfFrames{T}</c> overrides this to protect dirty (unsaved) frames.
         /// </summary>
         /// <remarks>
         /// Always called while <c>_cacheLock</c> is held inside <see cref="UpdateCache"/>.
@@ -688,16 +526,6 @@ namespace MxPlot.Core.IO
         /// </returns>
         protected virtual bool CanEvict(int frameIndex) => true;
 
-        /// <summary>
-        /// Inserts a decoded frame into the LRU cache, evicting the least-recently-used
-        /// frame(s) as needed to stay within <see cref="CacheCapacity"/>.
-        /// </summary>
-        /// <remarks>
-        /// If <paramref name="index"/> is already in the cache this method is a no-op,
-        /// so concurrent preloads that finish after a synchronous read are safely discarded.
-        /// <see cref="OnFrameEvicted"/> is called outside the lock to allow derived classes
-        /// to perform I/O (e.g., flushing dirty frames) without blocking the cache.
-        /// </remarks>
         // ── _lruList / _lruNodes helpers (must be called under _cacheLock) ──────────────────
         // All of _lruList's mutation goes through these so _lruNodes never drifts out of sync.
         // See the field comment on _lruNodes above for why this exists.
@@ -747,25 +575,56 @@ namespace MxPlot.Core.IO
         private LinkedListNode<int>? FindEvictionCandidateUnderLock()
         {
             var node = _lruList.Last;
+            LinkedListNode<int>? fallback = null; // oldest evictable node seen so far, in case none are low-priority
             while (node != null)
             {
-                if (CanEvict(node.Value))
+                // Pinned (actually on screen right now, e.g. the active frame or every currently-
+                // blended Composite channel): never a candidate, not even as the high-priority
+                // fallback below -- unlike IsHighPriority, which a whole oversubscribed axis sweep
+                // can legitimately hold all at once, this is reserved for the handful of frames a
+                // caller has said must survive no matter what.
+                if (CacheStrategy?.IsPinned(node.Value) != true && CanEvict(node.Value))
                 {
-                    // Evictable: prefer low-priority frames; fall back to the head as a last resort.
-                    if (CacheStrategy == null || !CacheStrategy.IsHighPriority(node.Value) || node == _lruList.First)
-                        return node;
+                    if (CacheStrategy == null || !CacheStrategy.IsHighPriority(node.Value))
+                        return node; // genuine low-priority candidate: always prefer it
+
+                    // High-priority, but still evictable -- remember it (first one found = LRU-oldest
+                    // among evictable nodes) in case the whole list turns out to be high-priority.
+                    // Falling back to _lruList.First here used to mean "evict whatever was touched
+                    // most recently" -- for a strategy that marks its entire working set high-priority
+                    // at once (e.g. DimensionStrategy's Volume mode on a single-axis dataset, where
+                    // every frame is high-priority and none ever isn't), that is *always* the frame
+                    // currently on screen: every hover-driven read re-touches it to the front, a
+                    // background fetch then evicts it as the "last resort", the next read is a miss
+                    // that re-arms preloading, and the cycle repeats without ever settling. Evicting
+                    // the LRU-oldest evictable node instead (ordinary LRU semantics) sacrifices
+                    // whichever high-priority frame has gone the longest untouched, not the one still
+                    // actively being looked at.
+                    fallback ??= node;
                 }
-                // Dirty or high-priority frame: skip and try the next newer one.
+                // Dirty frame: skip and try the next newer one.
                 node = node.Previous;
             }
-            return null;
+            return fallback;
         }
 
+        /// <summary>
+        /// Inserts a decoded frame into the LRU cache, evicting the least-recently-used
+        /// frame(s) as needed to stay within <see cref="CacheCapacity"/>.
+        /// </summary>
+        /// <remarks>
+        /// If <paramref name="index"/> is already in the cache this method is a no-op,
+        /// so concurrent preloads that finish after a synchronous read are safely discarded.
+        /// <see cref="OnFrameEvicted"/> is called outside the lock to allow derived classes
+        /// to perform I/O (e.g., flushing dirty frames) without blocking the cache.
+        /// </remarks>
         private void UpdateCache(int index, T[] data)
         {
             // Collect eviction info inside the lock; call OnFrameEvicted outside to avoid
             // derived-class I/O from blocking _cacheLock.
             List<(int evictedIndex, T[] evictedData)>? pendingEvictions = null;
+            bool inserted = false;
+            bool isVirtualChanged;
 
             lock (_cacheLock)
             {
@@ -790,7 +649,10 @@ namespace MxPlot.Core.IO
 
                 _cache[index] = data;
                 LruAddFirst(index);
+                _queued.Remove(index); // cached by some other path first (e.g. a synchronous read); no longer needs a worker
                 _cacheVersion++;
+                inserted = true;
+                isVirtualChanged = UpdateIsVirtualUnderLock();
             }
 
             // Call OnFrameEvicted after releasing the lock so derived classes
@@ -798,6 +660,46 @@ namespace MxPlot.Core.IO
             if (pendingEvictions != null)
                 foreach (var (ei, ed) in pendingEvictions)
                     OnFrameEvicted(ei, ed);
+
+            if (inserted)
+                OnFrameStored(index);
+
+            if (isVirtualChanged)
+                IsVirtualChanged?.Invoke(this, EventArgs.Empty);
+        }
+
+        /// <summary>
+        /// Drops the cached copy of <paramref name="frameIndex"/>, if any, with the same bookkeeping
+        /// as a capacity eviction (LRU list, cache version, <see cref="IsVirtual"/> tracking,
+        /// <see cref="OnFrameEvicted"/>). For subclasses whose backing data changed underneath the
+        /// cache (e.g. a direct write); never remove entries from <c>_cache</c> by hand, or the LRU
+        /// list keeps an index the cache no longer holds.
+        /// </summary>
+        /// <remarks>
+        /// Must be called without holding <c>_cacheLock</c>, since <see cref="OnFrameEvicted"/> runs
+        /// here and may do I/O. <see cref="CanEvict"/> is not consulted: the caller has decided the
+        /// cached copy is no longer valid.
+        /// </remarks>
+        /// <returns><see langword="true"/> if a cached copy was dropped.</returns>
+        protected bool RemoveFromCache(int frameIndex)
+        {
+            T[]? data;
+            bool isVirtualChanged;
+
+            lock (_cacheLock)
+            {
+                if (!_cache.Remove(frameIndex, out data)) return false;
+                if (_lruNodes.TryGetValue(frameIndex, out var node))
+                    LruRemoveNode(node);
+                _cacheVersion++;
+                isVirtualChanged = UpdateIsVirtualUnderLock();
+            }
+
+            OnFrameEvicted(frameIndex, data);
+
+            if (isVirtualChanged)
+                IsVirtualChanged?.Invoke(this, EventArgs.Empty);
+            return true;
         }
 
         /// <summary>
@@ -817,6 +719,7 @@ namespace MxPlot.Core.IO
         public void TrimCacheTo(int newCapacity)
         {
             List<(int evictedIndex, T[] evictedData)>? pendingEvictions = null;
+            bool isVirtualChanged;
 
             lock (_cacheLock)
             {
@@ -837,16 +740,44 @@ namespace MxPlot.Core.IO
                     pendingEvictions ??= new List<(int, T[])>();
                     pendingEvictions.Add((evictedIndex, evictedData));
                 }
+                isVirtualChanged = UpdateIsVirtualUnderLock();
             }
 
             if (pendingEvictions != null)
                 foreach (var (ei, ed) in pendingEvictions)
                     OnFrameEvicted(ei, ed);
+
+            if (isVirtualChanged)
+                IsVirtualChanged?.Invoke(this, EventArgs.Empty);
         }
 
         private void SchedulePreload(int currentIndex)
         {
             if (CacheStrategy == null) return;
+
+            // Nothing left to prefetch once every logical frame is already resident -- true once
+            // navigation (or a background fill, see TiffDecodedFrames<T>) has caught up to a cache
+            // capacity that comfortably holds the whole dataset. Without this, a plain strategy
+            // (unlike DimensionStrategy's own Volume-mode fast path below) would keep rebuilding
+            // and scanning its target set on every single frame access forever, for no benefit.
+            if (StoredFrameCount >= Count) return;
+
+            // Similar while a whole-dataset fill is still running (e.g. TiffDecodedFrames<T>'s
+            // unbounded NeighborStrategy): once every frame is cached, in flight or queued, a
+            // rebuild could only reorder the queue, not add to it. Rebuilding on every access
+            // enumerated and scanned all Count indices on the caller's (usually UI) thread --
+            // measured ~2 ms per access, spiking to ~20 ms, for 60,000 frames -- so reorder only
+            // once the cursor has moved ReorderDistance frames from where the queue was last built:
+            // a jump is followed at once, while scrolling rebuilds every ReorderDistance frames. A
+            // bounded strategy never reaches this state short of a window as large as the dataset,
+            // and an eviction drops the sum below Count again, so it keeps rebuilding every call.
+            lock (_cacheLock)
+            {
+                if (_disposing) return;
+                if (_cache.Count + _inFlight.Count + _queued.Count >= Count
+                    && Math.Abs(currentIndex - _queueBuiltAtIndex) < ReorderDistance)
+                    return;
+            }
 
             // Fast path for DimensionStrategy's Volume mode specifically: its preload target set
             // does not depend on currentIndex's own position along TargetAxis -- every value of
@@ -858,7 +789,7 @@ namespace MxPlot.Core.IO
             // from _cache since (tracked by _cacheVersion) and nothing is still in flight. Skipping
             // straight to return here avoids rebuilding+rescanning the whole target set (up to
             // targetLength * channelCount entries) on every single call -- measured to be the
-            // dominant remaining per-access cost once VirtualFrames' own lock/LRU overhead was
+            // dominant remaining per-access cost once this class' own lock/LRU overhead was
             // fixed, since a fully warmed cache would otherwise still redo this every touch. Not
             // applied to other strategies/modes (e.g. SinglePlane's neighbor set genuinely changes
             // as currentIndex moves, so those must keep recomputing every call).
@@ -866,139 +797,250 @@ namespace MxPlot.Core.IO
             {
                 lock (_cacheLock)
                 {
-                    if (_preloadingIndices.Count == 0 && _cacheVersion == _lastPreloadSatisfiedAtCacheVersion)
+                    if (_inFlight.Count == 0 && _queued.Count == 0 && _cacheVersion == _lastPreloadSatisfiedAtCacheVersion)
                         return;
                 }
             }
 
             // Compute preload targets outside the lock; dimension calculations in the
-            // strategy may be non-trivial.
-            var newTargetSet = new HashSet<int>(CacheStrategy.GetPreloadIndices(currentIndex, Count));
+            // strategy may be non-trivial. The strategy's order is the read priority.
+            int[] targets = CacheStrategy.GetPreloadIndices(currentIndex, Count).ToArray();
 
             lock (_cacheLock)
             {
-                // Check whether any in-flight preload is no longer in the new target set
-                // (i.e., the navigation context changed and those frames are no longer needed).
-                // Exclude currentIndex itself since it may be mid-synchronous-read.
-                bool hasStalePreloads = _preloadingIndices
-                    .Any(i => i != currentIndex && !newTargetSet.Contains(i));
+                if (_disposing) return;
 
-                if (hasStalePreloads)
+                // Replace -- not append to -- the queue: whatever was still waiting belonged to an
+                // older cursor position. Frames already in flight simply finish and land in the
+                // cache, so no cancellation is needed when the navigation context changes.
+                ClearQueueUnderLock();
+                var queue = new List<int>(targets.Length);
+                foreach (int target in targets)
                 {
-                    // Cancel only when the context has changed (e.g., user switched to a different axis).
-                    _prefetchCts.Cancel();
-                    _prefetchCts.Dispose();
-                    _prefetchCts = new CancellationTokenSource();
-                    _preloadingIndices.Clear();
-#if VF_DEBUG
-                    Trace.WriteLine($"[VirtualFrameList.SchedulePreload] Stale preloads detected → Canceled and restarted from index {currentIndex}.");
-#endif
-                }
-
-                var token = _prefetchCts.Token;
-
-                foreach (var target in newTargetSet)
-                {
-                    if (_cache.ContainsKey(target) || _preloadingIndices.Contains(target))
+                    if ((uint)target >= (uint)Count || _cache.ContainsKey(target) || _inFlight.Contains(target))
                         continue;
-                    _preloadingIndices.Add(target);
-                    _ = PreloadInternalAsync(target, token);
+                    if (_queued.Add(target)) // first occurrence keeps its priority
+                        queue.Add(target);
                 }
+                _queue = queue.ToArray();
+                _queueHead = 0;
+                _queueBuiltAtIndex = currentIndex;
 
                 // Remember: as of the current _cache contents, this target set is fully covered
                 // and nothing is in flight -- the Volume-mode fast path above can trust that until
                 // _cacheVersion moves (a real insert/evict) or the strategy changes.
-                if (_preloadingIndices.Count == 0)
+                if (_queued.Count == 0 && _inFlight.Count == 0)
                     _lastPreloadSatisfiedAtCacheVersion = _cacheVersion;
+
+                StartWorkersUnderLock();
             }
         }
 
         /// <summary>
-        /// Background task that acquires the I/O semaphore, reads one frame from disk,
-        /// and stores the result in the cache. Designed for silent cancellation:
-        /// cancellation is treated as a normal exit rather than an exception.
+        /// Maximum number of frames read in the background at the same time (default 1). Every
+        /// concurrent worker reads through its own <see cref="PreloadReader"/> from
+        /// <see cref="CreatePreloadReader"/>, so a value above 1 only helps a backend whose readers
+        /// are genuinely independent -- e.g. a decoder that opens its own file handle per reader.
+        /// Synchronous reads through the indexer are not counted and never wait on this.
+        /// </summary>
+        public int MaxConcurrentPreloads
+        {
+            get { lock (_cacheLock) return _maxConcurrentPreloads; }
+            set
+            {
+                if (value < 1)
+                    throw new ArgumentOutOfRangeException(nameof(value), "MaxConcurrentPreloads must be at least 1.");
+                lock (_cacheLock)
+                {
+                    _maxConcurrentPreloads = value;
+                    StartWorkersUnderLock(); // takes effect for work already queued
+                }
+            }
+        }
+
+        /// <summary>
+        /// Reads frames for one background preload worker. A worker keeps the same reader for as
+        /// long as it runs and never shares it, so an implementation may hold per-reader state that
+        /// is not thread-safe (e.g. its own file handle and decoder position).
         /// </summary>
         /// <remarks>
-        /// The semaphore wait is raced against <c>Task.Delay(-1, ct)</c> so that
-        /// cancellation during the wait returns immediately without throwing
-        /// <see cref="OperationCanceledException"/>. If the semaphore is acquired just
-        /// after cancellation, a continuation ensures it is released immediately to prevent leaks.
+        /// Readers are pooled while the source is still loading and disposed once every frame is
+        /// cached or the source is disposed; a later need (e.g. after a capacity trim) creates new
+        /// ones through <see cref="CreatePreloadReader"/>.
         /// </remarks>
-        private async Task PreloadInternalAsync(int index, CancellationToken ct)
+        protected abstract class PreloadReader : IDisposable
         {
-            try
-            {
-                // Race semaphore acquisition against cancellation to exit silently.
-                // The direct await _ioSemaphore.WaitAsync(ct) pattern is intentionally avoided
-                // because it surfaces OperationCanceledException in the debug output.
-                //await _ioSemaphore.WaitAsync(ct);
+            /// <summary>Reads one frame, or returns <see langword="null"/> if <paramref name="ct"/> is cancelled.</summary>
+            public abstract T[]? Read(int index, CancellationToken ct);
 
-                Task waitTask = _ioSemaphore.WaitAsync();
-                // Race "semaphore acquired" vs "cancelled".
-                // Task.Delay(-1, ct) never completes unless cancelled, so whichever wins first exits.
-                if (await Task.WhenAny(waitTask, Task.Delay(-1, ct)) != waitTask)
+            public virtual void Dispose() { }
+        }
+
+        /// <summary>
+        /// Creates a reader for a background preload worker. The default reads through
+        /// <see cref="ReadFrame"/> on this instance, which is right for a backend whose
+        /// <see cref="ReadFrame"/> is safe to call concurrently with the indexer (e.g. MMF). Override
+        /// to give each worker an independent resource so background reads neither contend with
+        /// each other nor with synchronous reads.
+        /// </summary>
+        protected virtual PreloadReader CreatePreloadReader() => new ReadFrameReader(this);
+
+        private sealed class ReadFrameReader : PreloadReader
+        {
+            private readonly VirtualFrames<T> _owner;
+            public ReadFrameReader(VirtualFrames<T> owner) => _owner = owner;
+            public override T[]? Read(int index, CancellationToken ct) => _owner.ReadFrame(index, ct);
+        }
+
+        private void ClearQueueUnderLock()
+        {
+            _queue = Array.Empty<int>();
+            _queueHead = 0;
+            _queued.Clear();
+        }
+
+        private bool TryDequeueUnderLock(out int index)
+        {
+            while (_queueHead < _queue.Length)
+            {
+                int candidate = _queue[_queueHead++];
+                if (_queued.Remove(candidate)) // skips entries already taken, cached, or superseded
                 {
-#if VF_CANCEL_NOTICE
-                    // Primary silent-exit route.
-                    Trace.WriteLine($"[VirtualFrameList.PreloadInternalAsync] Frame {index}: Canceled during semaphore wait (New request arrived).");
-#endif
-                    // Cancellation won the race. If waitTask eventually acquires the semaphore,
-                    // schedule a continuation to release it immediately (leak prevention).
-                    _ = waitTask.ContinueWith(t =>
+                    index = candidate;
+                    return true;
+                }
+            }
+            index = -1;
+            return false;
+        }
+
+        private void StartWorkersUnderLock()
+        {
+            if (_disposing) return;
+            int toStart = Math.Min(_maxConcurrentPreloads - _activeWorkers, _queued.Count);
+            for (int i = 0; i < toStart; i++)
+            {
+                _activeWorkers++;
+                _ = Task.Run(RunPreloadWorker);
+            }
+        }
+
+        /// <summary>
+        /// One background worker: takes the highest-priority queued frame, reads it through its own
+        /// reader, stores it, and repeats until the queue is empty.
+        /// </summary>
+        /// <remarks>
+        /// An exiting worker closes (or pools) its reader first and only then leaves
+        /// <c>_activeWorkers</c>, so <see cref="Dispose"/> never returns while a reader is still open.
+        /// Because the exit decision and the decrement are therefore not atomic, the decrement is
+        /// followed by <see cref="StartWorkersUnderLock"/>: work queued in between is never left
+        /// behind with no worker to take it.
+        /// </remarks>
+        private void RunPreloadWorker()
+        {
+            PreloadReader? reader = null;
+            while (true)
+            {
+                int index;
+                List<PreloadReader>? toDispose = null;
+                bool exit = false;
+
+                lock (_cacheLock)
+                {
+                    // Also exit when MaxConcurrentPreloads was lowered below the running worker
+                    // count, so a smaller limit takes effect after the current frame, not only for
+                    // workers started later.
+                    if (_disposing || _activeWorkers > _maxConcurrentPreloads || !TryDequeueUnderLock(out index))
                     {
-                        if (t.Status == TaskStatus.RanToCompletion) _ioSemaphore.Release();
-                    });
-                    return; // exit silently — no exception
+                        exit = true;
+                        index = -1;
+                        toDispose = ReturnReaderUnderLock(reader);
+                        reader = null;
+                    }
+                    else
+                    {
+                        _inFlight.Add(index);
+                    }
+                }
+
+                if (exit)
+                {
+                    // Close readers before leaving the active count: Dispose returns once the count
+                    // reaches zero, and the subclass then expects no handle of its file to be open.
+                    DisposeReaders(toDispose);
+                    lock (_cacheLock)
+                    {
+                        _activeWorkers--;
+                        Monitor.PulseAll(_cacheLock); // Dispose may be waiting for workers to finish
+                        // Work queued while this worker was closing its reader saw it as still active
+                        // and may not have started a replacement; start one now.
+                        StartWorkersUnderLock();
+                    }
+                    return;
                 }
 
                 try
                 {
-                    if (ct.IsCancellationRequested)
-                    {
-#if VF_CANCEL_NOTICE
-                        Trace.WriteLine($"[VirtualFrameList.PreloadInternalAsync] Frame {index}: Canceled after acquiring semaphore.");
-#endif
-                        return;
-                    }
-
-                    // Offload the blocking disk read to a thread-pool thread.
-                    var data = await Task.Run(() => ReadFrameFromSource(index, ct), ct);
-
-                    if (ct.IsCancellationRequested)
-                    {
-#if VF_CANCEL_NOTICE
-                        Trace.WriteLine($"[VirtualFrameList.PreloadInternalAsync] Frame {index}: Canceled after IO complete (Discarding data).");
-#endif
-                        return;
-                    }
-                    if (data != null)
+                    reader ??= RentPreloadReader();
+                    T[]? data = reader.Read(index, _disposeCts.Token);
+                    if (data != null && !_disposeCts.IsCancellationRequested)
                     {
                         UpdateCache(index, data);
 #if VF_DEBUG
-                        Interlocked.Increment(ref _prefetchSuccessCount); 
+                        Interlocked.Increment(ref _prefetchSuccessCount);
 #endif
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                    // Disposal in progress; the next loop iteration exits.
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[VirtualFrames] Preload error at frame {index}: {ex.Message}");
+                }
                 finally
                 {
-                    _ioSemaphore.Release();
+                    lock (_cacheLock) { _inFlight.Remove(index); }
                 }
             }
-            catch (OperationCanceledException)
+        }
+
+        private PreloadReader RentPreloadReader()
+        {
+            lock (_cacheLock)
             {
-                // Cancellation is normal flow. The design eliminates most paths that raise this
-                // exception, so reaching here is unexpected but harmless.
-#if VF_DEBUG || DEBUG
-                Trace.WriteLine($"[VirtualFrameList] Catch OperationCanceledException: Preload for frame {index} was canceled.");
-#endif
+                if (_readerPool.Count > 0) return _readerPool.Pop();
             }
-            catch (Exception ex)
+            return CreatePreloadReader();
+        }
+
+        /// <summary>
+        /// Returns an exiting worker's reader to the pool, or -- once every frame is cached or the
+        /// source is being disposed -- collects it and every pooled reader for disposal outside the
+        /// lock.
+        /// </summary>
+        private List<PreloadReader>? ReturnReaderUnderLock(PreloadReader? reader)
+        {
+            bool release = _disposing || _cache.Count >= Count;
+            List<PreloadReader>? toDispose = null;
+            if (reader != null)
             {
-                Debug.WriteLine($"[VirtualFrameList] Preload Error: {ex.Message}");
+                if (release) (toDispose ??= new()).Add(reader);
+                else _readerPool.Push(reader);
             }
-            finally
+            if (release)
+                while (_readerPool.Count > 0) (toDispose ??= new()).Add(_readerPool.Pop());
+            return toDispose;
+        }
+
+        private static void DisposeReaders(List<PreloadReader>? readers)
+        {
+            if (readers == null) return;
+            foreach (var r in readers)
             {
-                lock (_cacheLock) { _preloadingIndices.Remove(index); }
+                try { r.Dispose(); }
+                catch (Exception ex) { Debug.WriteLine($"[VirtualFrames] Preload reader dispose error: {ex.Message}"); }
             }
         }
 
@@ -1028,19 +1070,41 @@ namespace MxPlot.Core.IO
                 Trace.WriteLine("--- Final Cache Statistics ---");
                 PrintCacheStats();
 #endif
+                List<PreloadReader> readers;
                 lock (_cacheLock)
                 {
-                    _prefetchCts.Cancel(); // abort any in-flight prefetch tasks
+                    if (_disposing) return; // a concurrent Dispose is already tearing down
+                    _disposing = true;
+                    _disposeCts.Cancel(); // readers that honor the token stop mid-frame
+                    ClearQueueUnderLock();
+
+                    // Wait for in-flight background reads to finish: subclasses release the
+                    // resources those reads use (MMF view, file handles) right after this returns.
+                    // Monitor.Wait releases the lock, so workers can still reach their exit path.
+                    // Bounded so a reader that ignores cancellation, or a Dispose called from a
+                    // worker's own event handler, cannot hang the caller forever.
+                    long deadline = Environment.TickCount64 + 10_000;
+                    while (_activeWorkers > 0)
+                    {
+                        long remaining = deadline - Environment.TickCount64;
+                        if (remaining <= 0)
+                        {
+                            Debug.WriteLine($"[VirtualFrames] Dispose: {_activeWorkers} preload worker(s) still running after 10 s. obj={this}");
+                            break;
+                        }
+                        Monitor.Wait(_cacheLock, (int)remaining);
+                    }
+
                     _cache.Clear();
                     LruClear();
+                    readers = new List<PreloadReader>(_readerPool);
+                    _readerPool.Clear();
                 }
-                _ioSemaphore.Dispose();
-                _accessor?.Dispose();
-                _mmf?.Dispose();
+                DisposeReaders(readers);
                 IsDisposed = true;
 
 #if VF_DEBUG || DEBUG
-                Trace.WriteLine($"[VirtualFrameList] Disposed. obj={this}");
+                Trace.WriteLine($"[VirtualFrames] Disposed. obj={this}");
 #endif
             }
         }
@@ -1075,14 +1139,14 @@ namespace MxPlot.Core.IO
 
         // ==========================================
         // IList<T[]> mutation methods (all unsupported)
-        // The virtual list is a read-only view over an existing file; structural mutations are not permitted.
+        // The list is a read-only view over an on-demand source; structural mutations are not permitted.
         // ==========================================
         public void Add(T[] item) => throw new NotSupportedException();
         public void Clear() => throw new NotSupportedException();
         public void Insert(int index, T[] item) => throw new NotSupportedException();
         public bool Remove(T[] item) => throw new NotSupportedException();
         public void RemoveAt(int index) => throw new NotSupportedException();
-        public bool Contains(T[] item) => throw new NotSupportedException("Contains is not supported on VirtualFrameList.");
+        public virtual bool Contains(T[] item) => throw new NotSupportedException("Contains is not supported on VirtualFrames.");
 
         public void CopyTo(T[][] array, int arrayIndex) => throw new NotSupportedException("Use explicit loop for copying to avoid memory exhaustion.");
     }
@@ -1092,216 +1156,4 @@ namespace MxPlot.Core.IO
         private static int _instanceCounter = 0;
         public static int Next() => Interlocked.Increment(ref _instanceCounter);
     }
-
-    public class VirtualStrippedFrames<T> : VirtualFrames<T> where T : unmanaged
-    {
-        protected readonly int _width;
-        protected readonly int _height;
-        //private readonly int _frameLength; // element count per frame (Width × Height)
-
-        public VirtualStrippedFrames(string path, int w, int h, long[][] offsets, long[][] byteCounts, bool isYFlipped, bool isBigEndian, MemoryMappedFileAccess access = MemoryMappedFileAccess.Read)
-            : base(path, offsets, byteCounts, isYFlipped, isBigEndian, access)
-        {
-            _width = w; _height = h;
-            //_frameLength = w * h;
-        }
-
-        protected override T[]? ReadFrameFromSource(int index, CancellationToken ct)
-        {
-            return ReadStripsFromMMF(index, ct);
-        }
-
-        private unsafe T[]? ReadStripsFromMMF(int frameIndex, CancellationToken ct)
-        {
-#if VF_DEBUG
-    var sw = Stopwatch.StartNew();
-    long elapsed = 0; long totalTime = 0;
-    var sb = new StringBuilder();
-    sb.AppendLine($"[VirtualStrippedFrameList] Reading frame {frameIndex} from MMF as stripes... Total access count = {_accessCount}");
-#endif
-            T[] frameData = new T[_width * _height];
-            long[] stripOffsets = _offsets[frameIndex];
-            long[] stripByteCounts = _byteCounts[frameIndex];
-            int sizeOfT = Unsafe.SizeOf<T>();
-            long rowBytes = (long)_width * sizeOfT;
-#if VF_DEBUG
-    elapsed = sw.ElapsedMilliseconds; totalTime += elapsed;
-    sb.AppendLine($"[VirtualStrippedFrameList] Prepared buffer in {elapsed} ms."); sw.Restart();
-#endif
-
-            if (!_isYFlipped)
-            {
-                // fast path: sequential strip layout, no vertical flip needed
-                int destIndex = 0;
-                for (int i = 0; i < stripOffsets.Length; i++)
-                {
-                    if (ct.IsCancellationRequested) return null;
-                    long offset = stripOffsets[i];
-                    long byteCount = stripByteCounts[i];
-                    if (offset == 0 || byteCount == 0) continue;
-                    int elementCount = (int)(byteCount / sizeOfT);
-                    _accessor.ReadArray(offset, frameData, destIndex, elementCount);
-                    destIndex += elementCount;
-                }
-            }
-            else
-            {
-                // Y-flip path: file row f is written to destination row (height-1-f) — the inverse of WriteBackToDisk
-                var handle = _accessor.SafeMemoryMappedViewHandle;
-                byte* pBase = null;
-                int currentFileRow = 0;
-                try
-                {
-                    handle.AcquirePointer(ref pBase);
-                    fixed (T* pDest = frameData)
-                    {
-                        for (int i = 0; i < stripOffsets.Length; i++)
-                        {
-                            if (ct.IsCancellationRequested)
-                                return null;
-
-                            long offset = stripOffsets[i];
-                            long byteCount = stripByteCounts[i];
-                            if (offset == 0 || byteCount == 0)
-                                continue;
-
-                            int rowsInStrip = (int)(byteCount / rowBytes);
-                            // Guard: the last strip may be shorter than a full strip height.
-                            rowsInStrip = Math.Min(rowsInStrip, _height - currentFileRow);
-                            for (int rowInStrip = 0; rowInStrip < rowsInStrip; rowInStrip++)
-                            {
-                                if (ct.IsCancellationRequested) return null;
-                                byte* pSrcRow = pBase + offset + (long)rowInStrip * rowBytes;
-                                int destRow = (_height - 1) - currentFileRow;
-                                T* pDestRow = pDest + (long)destRow * _width;
-                                Buffer.MemoryCopy(pSrcRow, pDestRow, rowBytes, rowBytes);
-                                currentFileRow++;
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    if (pBase != null) handle.ReleasePointer(); // always release, even on early null return
-                }
-            }
-            if (_needsByteSwap)
-                SwapEndiannessInPlace(frameData.AsSpan());
-#if VF_DEBUG
-    elapsed = sw.ElapsedMilliseconds; totalTime += elapsed;
-    sb.AppendLine($"[VirtualStrippedFrameList] Read done in {elapsed} ms. Total={totalTime} ms.");
-    Trace.WriteLine(sb.ToString()); sw.Stop();
-#endif
-            return frameData;
-        }
-    }
-
-    public class VirtualTiledFrames<T> : VirtualFrames<T> where T : unmanaged
-    {
-        private readonly int _imageWidth;
-        private readonly int _imageHeight;
-        private readonly int _tileWidth;
-        private readonly int _tileLength;
-
-        public VirtualTiledFrames(string path, int imgW, int imgH, int tileW, int tileH, long[][] offsets, long[][] byteCounts, bool isYFlipped, bool isBigEndian)
-            : base(path, offsets, byteCounts, isYFlipped, isBigEndian)
-        {
-            _imageWidth = imgW;
-            _imageHeight = imgH;
-            _tileWidth = tileW;
-            _tileLength = tileH;
-        }
-
-        protected override T[]? ReadFrameFromSource(int index, CancellationToken ct)
-        {
-            return ReadAndStitchTilesFromMMF(index, ct);
-        }
-
-        private T[]? ReadAndStitchTilesFromMMF(int frameIndex, CancellationToken ct)
-        {
-#if VF_DEBUG
-            var sw = Stopwatch.StartNew();
-            long elapsed = 0;
-            long totalTime = 0;
-            var sb = new StringBuilder();
-            sb.AppendLine($"[VirtualTiledFrameList] Reading frame {frameIndex} from MMF as tiles ... Total access count = {_accessCount}");
-#endif
-
-            // Output buffer: the fully assembled frame in row-major order.
-            T[] frameData = new T[_imageWidth * _imageHeight];
-
-            // Tile layout for the requested frame.
-            long[] tileOffsets = _offsets[frameIndex];
-            long[] tileByteCounts = _byteCounts[frameIndex];
-
-            // Number of tile columns and rows (ceiling division to cover the full image).
-            int tilesAcross = (_imageWidth + _tileWidth - 1) / _tileWidth;
-            int tilesDown = (_imageHeight + _tileLength - 1) / _tileLength;
-
-            // Reusable scratch buffer for one tile; allocated once and reused per iteration.
-            T[] tileBuffer = new T[_tileWidth * _tileLength];
-            int sizeOfT = Unsafe.SizeOf<T>(); // byte size of T (e.g., 2 for ushort)
-
-#if VF_DEBUG
-            elapsed = sw.ElapsedMilliseconds;
-            totalTime += elapsed;
-            sb.AppendLine($"[VirtualTiledFrameList] Prepared frameData and tileBuffer, calculated tile grid in {elapsed} ms.");
-            sw.Restart();
-#endif
-            // Iterate over every tile and stitch it into the output frame buffer.
-            for (int tileIndex = 0; tileIndex < tileOffsets.Length; tileIndex++)
-            {
-                if (ct.IsCancellationRequested) return null;
-
-                long offset = tileOffsets[tileIndex];
-                long byteCount = tileByteCounts[tileIndex];
-
-                if (offset == 0 || byteCount == 0) continue; // skip empty tiles (rare but valid per TIFF spec)
-
-                // 1. Read one tile's raw data from the MMF directly into the scratch buffer.
-                int elementCount = (int)(byteCount / sizeOfT);
-                _accessor.ReadArray(offset, tileBuffer, 0, elementCount);
-
-                if (_needsByteSwap)
-                    SwapEndiannessInPlace(tileBuffer.AsSpan(0, elementCount));
-
-                // 2. Compute the tile's grid position (column and row index in the tile grid).
-                int tileCol = tileIndex % tilesAcross;
-                int tileRow = tileIndex / tilesAcross;
-
-                // Top-left pixel coordinate of this tile in the full image.
-                int startX = tileCol * _tileWidth;
-                int startY = tileRow * _tileLength;
-
-                // 3. Clip to image boundaries: edge tiles carry padding that must be discarded.
-                int actualTileWidth = Math.Min(_tileWidth, _imageWidth - startX);
-                int actualTileHeight = Math.Min(_tileLength, _imageHeight - startY);
-
-                // 4. Row-by-row stitch: copy each tile row into the correct position in the output buffer.
-                for (int y = 0; y < actualTileHeight; y++)
-                {
-                    if (ct.IsCancellationRequested) return null;
-                    int srcOffset = y * _tileWidth;
-
-                    // If Y-flipped, mirror the destination row index vertically.
-                    int destRow = _isYFlipped ? (_imageHeight - 1 - startY - y) : (startY + y);
-                    int destOffset = destRow * _imageWidth + startX;
-
-                    tileBuffer.AsSpan(srcOffset, actualTileWidth)
-                              .CopyTo(frameData.AsSpan(destOffset, actualTileWidth));
-                }
-            }
-#if VF_DEBUG
-            elapsed = sw.ElapsedMilliseconds;
-            totalTime += elapsed;
-            sb.AppendLine($"[VirtualTiledFrameList] Frame data read and assembled in {elapsed} ms");
-            sb.AppendLine($"[VirtualTiledFrameList] Total time to read frame {frameData}: {totalTime} ms");
-            Trace.WriteLine(sb.ToString());
-            sw.Stop();
-#endif
-            return frameData;
-        }
-
-    }
-
 }

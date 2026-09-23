@@ -25,7 +25,7 @@
   Explains how MatrixData manages min/max values per frame and shares them across instances (ValueRange / Invalidate design).
 
 - **[VirtualFrames Guide](./VirtualFrames_Guide.md)**  
-  Architecture overview of MMF-backed Virtual storage: backend classes (`VirtualStrippedFrames`, `WritableVirtualStrippedFrames`), the `AsVirtualBuilder` creation path, `LoadVirtual`, the SaveAs fast-path, Clone behavior, and `VirtualPolicy` thresholds. Includes known limitations and planned work (`IVesselCreatable`).
+  Architecture overview of on-demand Virtual storage: the `VirtualFrames<T>` skeleton, MMF backends (`StrippedMmfFrames`, `TiledMmfFrames`, `WritableStrippedMmfFrames`), Lazy decode for compressed TIFF (`TiffDecodedFrames`), cache sizing and prefetch strategies, the `AsVirtualBuilder` creation path, `LoadVirtual`, the SaveAs fast-path, Clone behavior, `VirtualPolicy` thresholds, and diagnostics (`GetDiagnosticCacheableList`). Includes known limitations and planned work (`IVesselCreatable`).
 
 - **[MatrixData Method Call Map](./MatrixData_MethodCallMap.md)** ([日本語](./MatrixData_MethodCallMap_ja.md))  
   Comprehensive reference mapping the call relationships, dependencies, and zero-copy strategies of all `MatrixData<T>` operation methods across `MxPlot.Core` and `MxPlot.Core.Processing`.

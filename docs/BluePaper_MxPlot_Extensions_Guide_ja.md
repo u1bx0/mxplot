@@ -62,7 +62,7 @@ MxPlot は 3 種類の外部拡張ポイントを持っています。
 
 ```csharp
 using MxPlot.Core;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.Collections.Generic;
 
 namespace MxPlot.Extensions.Zarr
@@ -187,8 +187,13 @@ public sealed class ZarrFormat : IMatrixDataReader, IVirtualLoadable
 ### 3.4 仮想読み込み（Virtual Mode）の詳細実装
 
 「Virtual Mode」とは、ファイル全体を RAM に読み込まず、
-フレームを **オンデマンドで MMF 経由で読み込む** モードです。
-数 GB を超える非圧縮ファイルに有効です。
+フレームを **オンデマンドで読み込む** モードです。
+非圧縮ファイルではメモリマップドファイル（MMF）経由で読み込み、この節ではその実装を説明します。
+数 GB を超えるファイルに有効です。
+
+フレーム単位で独立に圧縮されている場合（圧縮マルチ IFD の TIFF など）は MMF を使えませんが、
+`VirtualFrames<T>` を継承して `ReadFrame(index, ct)` で 1 フレームをデコードする実装にすれば、
+遅延読み込みは可能です。参考実装は `MxPlot.Extensions.Tiff` の `TiffDecodedFrames<T>` です。
 
 #### 前提：Virtual Mode に適したフォーマットの条件
 
@@ -199,7 +204,7 @@ public sealed class ZarrFormat : IMatrixDataReader, IVirtualLoadable
 | **固定レイアウト** | フレーム i のオフセットをスキャンできる |
 
 FITS や Raw Binary はこの条件を満たします。
-フレームが JPEG/PNG 圧縮されている場合は InMemory のみが現実的です。
+フレームが JPEG/PNG 圧縮されている場合、MMF ルートは使えません（上記の `VirtualFrames<T>` 継承による遅延デコードか、InMemory を選びます）。
 
 #### 実装パターン
 
@@ -229,7 +234,7 @@ private static (long[][] offsets, long[][] byteCounts) ScanOffsets(
 }
 ```
 
-**Step 2：`VirtualStrippedFrames<T>` を構築して `MatrixData<T>` に渡す**
+**Step 2：`StrippedMmfFrames<T>` を構築して `MatrixData<T>` に渡す**
 
 ```csharp
 public IMatrixData ReadVirtual(string path)
@@ -240,10 +245,11 @@ public IMatrixData ReadVirtual(string path)
     // ② オフセットテーブルをスキャン（ピクセルは読まない）
     var (offsets, byteCounts) = ScanOffsets(path, frameCount, width, height, bytesPerPixel);
 
-    // ③ VirtualStrippedFrames を生成（MMF はここで開かれる）
-    //    isYFlipped: ファイルが bottom-up 格納なら true（FITS は top-down なので false）
-    var vf = new VirtualStrippedFrames<float>(
-        path, width, height, offsets, byteCounts, isYFlipped: false);
+    // ③ StrippedMmfFrames を生成（MMF はここで開かれる）
+    //    isYFlipped: ファイルが上の行から格納されているなら true（下記「Y 方向の向き」参照）
+    //    isBigEndian: ファイルのバイトオーダー。ホストと異なる場合だけ自動でスワップされる
+    var vf = new StrippedMmfFrames<float>(
+        path, width, height, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 
     // ④ MatrixData に渡す（所有権は MatrixData に移転、Dispose は自動）
     var md = MatrixData<float>.CreateAsVirtualFrames(width, height, vf);
@@ -284,30 +290,30 @@ public sealed class MyFormat : IMatrixDataReader, IVirtualLoadable
 
 | レイアウト | クラス | 典型的なフォーマット |
 |---|---|---|
-| **ストリップ**（1 フレーム = 1〜N 行のまとまり） | `VirtualStrippedFrames<T>` | FITS, Raw Binary, ストリップ TIFF |
-| **タイル**（1 フレーム = M×N タイルのまとまり） | `VirtualTiledFrames<T>` | タイル TIFF, 大型顕微鏡フォーマット |
+| **ストリップ**（1 フレーム = 1〜N 行のまとまり） | `StrippedMmfFrames<T>` | FITS, Raw Binary, ストリップ TIFF |
+| **タイル**（1 フレーム = M×N タイルのまとまり） | `TiledMmfFrames<T>` | タイル TIFF, 大型顕微鏡フォーマット |
 
-**ストリップの場合**（`VirtualStrippedFrames<T>`）：
+**ストリップの場合**（`StrippedMmfFrames<T>`）：
 
 ```csharp
 // offsets[frameIndex][stripIndex] — 行のまとまりごとのオフセット
 // 非圧縮の場合は stripIndex = 0 のみ（1 フレーム 1 ストリップ）
-var vf = new VirtualStrippedFrames<float>(
-    path, width, height, offsets, byteCounts, isYFlipped: false);
+var vf = new StrippedMmfFrames<float>(
+    path, width, height, offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 ```
 
-**タイルの場合**（`VirtualTiledFrames<T>`）：
+**タイルの場合**（`TiledMmfFrames<T>`）：
 
 ```csharp
 // offsets[frameIndex][tileIndex] — tileIndex は左→右、上→下の順
 // tileWidth, tileHeight はフォーマット固有のタイルサイズ
-var vf = new VirtualTiledFrames<ushort>(
+var vf = new TiledMmfFrames<ushort>(
     path, imageWidth, imageHeight,
     tileWidth, tileHeight,
-    offsets, byteCounts, isYFlipped: false);
+    offsets, byteCounts, isYFlipped: false, isBigEndian: false);
 
 // 右端・下端のタイルはパディングを持つ場合があるが、
-// VirtualTiledFrames がクリッピングを自動処理する
+// TiledMmfFrames がクリッピングを自動処理する
 ```
 
 タイルフォーマットでは `offsets[frameIndex]` の各要素が  
@@ -315,24 +321,25 @@ var vf = new VirtualTiledFrames<ushort>(
 
 #### キャッシュの設定
 
-デフォルトでは LRU キャッシュ（16 フレーム）+ NeighborStrategy（前後プリフェッチ）が
-使われます。必要に応じて変更できます。
+デフォルトでは、キャッシュサイズは空きメモリとフレームサイズから自動で決まり
+（`VirtualCachePolicy`、16〜8192 フレーム）、`NeighborStrategy` が近傍フレームを先読みします。
+必要に応じて変更できます。
 
 ```csharp
-vf.CacheCapacity = 32;                          // キャッシュサイズを増やす
-vf.CacheStrategy = new NeighborStrategy(ahead: 4, behind: 2); // 先読みを調整
+vf.CacheCapacity = 32;                                                // キャッシュサイズを変更
+vf.CacheStrategy = new NeighborStrategy(lookAhead: 4, lookBehind: 2); // 先読みを調整
 ```
 
 #### Y 方向の向き
 
-| フォーマット | `isYFlipped` |
-|---|---|
-| TIFF（top-down） | `false` |
-| FITS（top-down） | `false` |
-| BMP / 多くの天文フォーマット（bottom-up） | `true` |
+MatrixData は左下原点（0 行目が一番下の行）です。ファイルが上の行から格納されている場合は
+`isYFlipped: true` にすると、読み出し時に行の順序が反転されます。
 
-`isYFlipped = true` にすると、`VirtualStrippedFrames<T>` が読み出し時に
-行ベースのコピーで Y 反転を自動適用します。
+| フォーマット | ファイル内の行順 | `isYFlipped` |
+|---|---|---|
+| TIFF | 上の行から | `true` |
+| FITS | 下の行から | `false` |
+| BMP（高さが正の値） | 下の行から | `false` |
 
 ---
 
@@ -489,7 +496,7 @@ MxPlot ダッシュボード（メインウィンドウ）の **☰ → Tools �
 using Avalonia.Platform.Storage;
 using MxPlot.App.Plugins;
 using MxPlot.Core;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -657,7 +664,7 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 - [ ] （オプション）`IsCancellable` + `CancellationToken` (explicit impl) でキャンセル対応
 - [ ] （オプション）`IVirtualLoadable` で仮想読み込み（3.4 節参照）
   - [ ] ヘッダースキャンでオフセットテーブルを構築
-  - [ ] ストリップ形式 → `VirtualStrippedFrames<T>`、タイル形式 → `VirtualTiledFrames<T>` を選択
+  - [ ] ストリップ形式 → `StrippedMmfFrames<T>`、タイル形式 → `TiledMmfFrames<T>` を選択（フレーム単位の圧縮なら `VirtualFrames<T>` を継承）
   - [ ] `MatrixData<T>.CreateAsVirtualFrames()` で MatrixData に渡す
   - [ ] `VirtualPolicy.Resolve()` で Auto 判定
 

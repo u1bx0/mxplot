@@ -26,6 +26,17 @@ namespace MxPlot.Core.IO
         bool IsHighPriority(int index);
 
         /// <summary>
+        /// Gets whether <paramref name="index"/> is one of the frames actually on screen right now
+        /// and must never be evicted, regardless of priority -- e.g. the single active frame, or
+        /// every currently-blended channel at the current position in Composite mode. Unlike
+        /// <see cref="IsHighPriority"/>, which can legitimately mark an entire axis sweep as
+        /// protected (Volume mode) and therefore cannot itself guarantee any single frame survives
+        /// an oversubscribed cache, a pinned frame is exempt from eviction outright. Defaults to
+        /// <see langword="false"/> for strategies that have no notion of "currently displayed".
+        /// </summary>
+        bool IsPinned(int index) => false;
+
+        /// <summary>
         /// Occurs when the internal state or parameters of the strategy change, 
         /// indicating that the cache manager should re-evaluate priorities or preloads.
         /// </summary>

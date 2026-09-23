@@ -1,4 +1,4 @@
-﻿namespace MxPlot.Core.IO
+﻿namespace MxPlot.Core.IO.Formats
 {
     /// <summary>
     /// Provides FITS (Flexible Image Transport System) format reading and writing for MxPlot.

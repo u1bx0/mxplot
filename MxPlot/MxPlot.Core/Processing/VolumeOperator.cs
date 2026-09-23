@@ -57,13 +57,11 @@ namespace MxPlot.Core.Processing
         /// ColorCoded use case this exists for.
         /// </summary>
         /// <remarks>
-        /// Only supports the XY-plane (project-along-depth) case -- matches
-        /// Tests.Documents/Working/ColorCoded/ColorCoded_View_InitialDesign.md section 3.3.1's
-        /// decision to keep ColorCoded's live view to the MainView/XY case (no ViewFrom parameter,
-        /// unlike <see cref="CreateProjection{T}"/>, which also handles the X/Y orthogonal planes).
-        /// A straightforward per-row parallel scan, not the tiled/SIMD approach
-        /// <see cref="ProjectAlongZ_Tiled_Safe{T}"/> uses -- correctness first; revisit only if
-        /// profiling shows it matters for realistic slice counts.
+        /// Only supports the XY-plane (project-along-depth) case, since that's all ColorCoded's
+        /// live view needs (no <c>ViewFrom</c> parameter, unlike <see cref="CreateProjection{T}"/>,
+        /// which also handles the X/Y orthogonal planes). A straightforward per-row parallel scan,
+        /// not the tiled/SIMD approach <see cref="ProjectAlongZ_Tiled_Safe{T}"/> uses -- correctness
+        /// first; revisit only if profiling shows it matters for realistic slice counts.
         /// </remarks>
         public static (MatrixData<int> WinnerIndex, MatrixData<T> WinnerValue) CreateExtremumIndex<T>(
             this VolumeAccessor<T> vol, ProjectionMode mode, int start, int end)

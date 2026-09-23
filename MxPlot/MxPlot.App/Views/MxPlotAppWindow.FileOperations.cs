@@ -1,7 +1,7 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;

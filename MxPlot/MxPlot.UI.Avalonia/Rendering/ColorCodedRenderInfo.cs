@@ -52,7 +52,14 @@ namespace MxPlot.UI.Avalonia.Rendering
     /// itself on the UI thread. <see langword="null"/> only if <see cref="Axis"/> was somehow
     /// unresolvable at compute time.
     /// </param>
+    /// <param name="BlendedArgb">
+    /// Color (RGB-Max) / (RGB-Add) only (and the RGB-Avg blend, which has no ComboBox item): the already-blended packed-ARGB image (one frame, row-major, the
+    /// window's XY size) from <see cref="ColorCodedRgbBlender"/>. When non-<see langword="null"/>,
+    /// <see cref="ColorCodedBitmapWriter"/> just copies it to the bitmap and ignores the
+    /// winner-index/depth-color path; <see cref="WinnerIndex"/> still carries the peak depth for the
+    /// depth histogram and pointer read-out. <see langword="null"/> for Color(Max)/(Min).
+    /// </param>
     public sealed record ColorCodedRenderInfo(
         IMatrixData WinnerIndex, int Start, IReadOnlyList<int> DepthColors,
-        double ValueMin, double ValueMax, Axis Axis, int[]? Histogram = null);
+        double ValueMin, double ValueMax, Axis Axis, int[]? Histogram = null, int[]? BlendedArgb = null);
 }

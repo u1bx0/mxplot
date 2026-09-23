@@ -125,6 +125,19 @@ namespace MxPlot.Core
         /// use <see cref="AsMemory"/> or <see cref="AsSpan"/> instead. These methods return read-only views
         /// that do not trigger cache invalidation, avoiding unnecessary min/max recalculation on the next access.
         /// </para>
+        /// <para>
+        /// <strong>Read-only / Virtual (MMF) backends:</strong> when the backing frame list is read-only
+        /// (e.g. a read-only <c>VirtualFrames&lt;T&gt;</c>), invalidation is silently skipped here instead
+        /// of throwing (unlike <see cref="SetArray"/>, which does throw for a read-only backend). The array
+        /// returned in that case is a decoded cache entry, not a direct view of the backing file, so writing
+        /// into it has no lasting effect: the mutation is never reflected in cached min/max statistics, and
+        /// once the frame is evicted from the cache it is re-read from the backing store, silently discarding
+        /// the change with no warning. The same cached array may also be shared with other
+        /// <see cref="MatrixData{T}"/> instances (see the frame-sharing model), so a mutation can leak into
+        /// them too until eviction. Do not write into the result of this call when the source is
+        /// read-only/Virtual — use <see cref="AsSpan"/>/<see cref="AsMemory"/> for read access, or
+        /// <c>Duplicate()</c>/<c>Clone()</c> to obtain a genuinely writable copy first.
+        /// </para>
         /// </summary>
         /// <param name="frameIndex">The zero-based frame index, or -1 to use <see cref="ActiveIndex"/>.</param>
         /// <returns>The underlying array for the specified frame. Modifications are permitted but will require

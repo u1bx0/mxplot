@@ -2,7 +2,7 @@
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
-using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System.Threading.Tasks;
 
 namespace MxPlot.App.Views

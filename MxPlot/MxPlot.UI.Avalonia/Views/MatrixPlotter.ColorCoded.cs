@@ -68,12 +68,6 @@ namespace MxPlot.UI.Avalonia.Views
         private BusyIndicator? _colorCodedBusyIndicator;
         private Border? _colorCodedDetails;
 
-        // Set while EnterColorCodedProjectionMode is seeding initial values into the shared
-        // LutSelector/ValueRangeBar/Start/End/Invert controls, so their change handlers don't
-        // read those programmatic writes back as a user edit and bounce a redundant recompute
-        // request straight back up to the parent.
-        private bool _suppressColorCodedEvents;
-
         // The natural (Auto) range from the most recent parent recompute, pushed by
         // UpdateColorCodedAutoRange -- cached here (not just displayed) so the 🔍 Search Min/Max
         // buttons have something to search for even while Fixed mode is selected. Null until the
@@ -121,27 +115,31 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         internal void EnterColorCodedProjectionMode(int axisCount, ColorCodedProjectionParams initial)
         {
-            _suppressColorCodedEvents = true;
-            try
+            // Deliberately outside the UiSync scope below: RenderingPropertyChanged skips its
+            // View -> ViewModel upsync while UiSync is active, and forcing Grayscale here must still
+            // reach vm.Lut (otherwise a later DataContext re-apply would restore the stale LUT).
+            // Only on a genuine LUT/Max/Min -> ColorCoded transition, not a hypothetical re-entry
+            // while already active (see this method's "safe to call again" note) -- otherwise
+            // we'd capture the Grayscale we ourselves just forced instead of the real LUT.
+            if (!IsColorCodedProjectionChild)
             {
-                // Only on a genuine LUT/Max/Min -> ColorCoded transition, not a hypothetical re-entry
-                // while already active (see this method's "safe to call again" note) -- otherwise
-                // we'd capture the Grayscale we ourselves just forced instead of the real LUT.
-                if (!IsColorCodedProjectionChild)
-                {
-                    _colorCodedRevertLutName = _view.Lut?.Name;
-                    _view.Lut = ColorThemes.Grayscale;
-                }
-                _view.RenderingMode = RenderingMode.ColorCoded;
-                IsColorCodedProjectionChild = true;
+                _colorCodedRevertLutName = _view.Lut?.Name;
+                _view.Lut = ColorThemes.Grayscale;
+            }
+            _view.RenderingMode = RenderingMode.ColorCoded;
+            IsColorCodedProjectionChild = true;
 
-                if (_colorCodedDetails == null)
-                    _colorCodedDetails = BuildColorCodedModeDetails();
-                _lutModeDetails.IsVisible = false;
-                if (_detailsContainer != null) _detailsContainer.Content = _colorCodedDetails;
-                _settingsBtn.Content = "▾";
-                _settingsBtn.Background = Brushes.Transparent;
+            if (_colorCodedDetails == null)
+                _colorCodedDetails = BuildColorCodedModeDetails();
+            _lutModeDetails.IsVisible = false;
+            if (_detailsContainer != null) _detailsContainer.Content = _colorCodedDetails;
+            _settingsBtn.Content = "▾";
+            _settingsBtn.Background = Brushes.Transparent;
 
+            // Seeding the shared controls: their change handlers must not read these programmatic
+            // writes as a user edit and bounce a redundant recompute request up to the parent.
+            using (_reentrancy.Begin(GuardContext.UiSync))
+            {
                 int maxIndex = Math.Max(0, axisCount - 1);
                 _colorCodedStartNud!.Maximum = maxIndex;
                 _colorCodedEndNud!.Maximum = maxIndex;
@@ -164,7 +162,6 @@ namespace MxPlot.UI.Avalonia.Views
                 UpdateWindowIcon();
                 UpdateColorCodedRangeToolTips();
             }
-            finally { _suppressColorCodedEvents = false; }
         }
 
         /// <summary>
@@ -303,9 +300,8 @@ namespace MxPlot.UI.Avalonia.Views
             _colorCodedLastAutoMax = max;
             if (!IsColorCodedProjectionChild || _rangeBar.Mode != ValueRangeMode.Current) return;
             if (min is not double m1 || max is not double m2) return;
-            _suppressColorCodedEvents = true;
-            try { _rangeBar.SetRange(m1, m2); }
-            finally { _suppressColorCodedEvents = false; }
+            using (_reentrancy.Begin(GuardContext.UiSync))
+                _rangeBar.SetRange(m1, m2);
         }
 
         /// <summary>
@@ -341,13 +337,11 @@ namespace MxPlot.UI.Avalonia.Views
 
             if (apply)
             {
-                _suppressColorCodedEvents = true;
-                try
+                using (_reentrancy.Begin(GuardContext.UiSync))
                 {
                     _colorCodedStartNud.Value = start;
                     _colorCodedEndNud.Value = end;
                 }
-                finally { _suppressColorCodedEvents = false; }
             }
 
             return (start, end);
@@ -378,7 +372,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void RaiseColorCodedParamsChanged()
         {
-            if (_suppressColorCodedEvents || !IsColorCodedProjectionChild) return;
+            if (_reentrancy.IsActive(GuardContext.UiSync) || !IsColorCodedProjectionChild) return;
 
             var (start, end) = ClampColorCodedRangeInputs(apply: true);
             UpdateColorCodedRangeToolTips();
@@ -423,7 +417,7 @@ namespace MxPlot.UI.Avalonia.Views
             _colorCodedStartNud.Classes.Add("compact");
             _colorCodedStartNud.ValueChanged += (_, _) =>
             {
-                if (_suppressColorCodedEvents) return;
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
                 var (start, end) = ClampColorCodedRangeInputs(apply: true);
                 // Keep the histogram's red lines following manual Start/End edits too, not just
                 // drags on the histogram itself -- SetViewValueRange does not fire ViewRangeChanged,
@@ -451,7 +445,7 @@ namespace MxPlot.UI.Avalonia.Views
             _colorCodedEndNud.Classes.Add("compact");
             _colorCodedEndNud.ValueChanged += (_, _) =>
             {
-                if (_suppressColorCodedEvents) return;
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
                 var (start, end) = ClampColorCodedRangeInputs(apply: true);
                 _colorCodedHistogram?.SetViewValueRange(start, end);
                 RaiseColorCodedParamsChanged();
@@ -511,6 +505,10 @@ namespace MxPlot.UI.Avalonia.Views
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 2, 0, 4),
                 IsVisible = false,
+                // Blue, not the ordinary histogram's red: these boundary lines mark the frame range
+                // used for color coding (Start/End), not a value range -- see the Description below.
+                BoundaryBrush = Brushes.DodgerBlue,
+                Description = "Frame range used for color coding (Start/End), not a value range.",
             };
             _colorCodedHistogram.ViewRangeChanged += (min, max) =>
             {
@@ -518,13 +516,11 @@ namespace MxPlot.UI.Avalonia.Views
                 int maxIndex = (int)_colorCodedStartNud.Maximum; // Start/End share the same Maximum (axisCount-1)
                 int newStart = Math.Clamp((int)Math.Round(min), 0, maxIndex);
                 int newEnd = Math.Clamp((int)Math.Round(max), newStart, maxIndex);
-                _suppressColorCodedEvents = true;
-                try
+                using (_reentrancy.Begin(GuardContext.UiSync))
                 {
                     _colorCodedStartNud.Value = newStart;
                     _colorCodedEndNud.Value = newEnd;
                 }
-                finally { _suppressColorCodedEvents = false; }
                 RaiseColorCodedParamsChanged();
             };
 

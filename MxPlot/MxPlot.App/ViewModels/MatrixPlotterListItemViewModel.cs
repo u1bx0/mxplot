@@ -1,5 +1,6 @@
 ﻿using Avalonia.Threading;
 using MxPlot.Core;
+using MxPlot.Core.IO;
 using MxPlot.UI.Avalonia.Views;
 using System;
 using System.Collections.Generic;
@@ -9,7 +10,7 @@ namespace MxPlot.App.ViewModels
 {
     /// <summary>
     /// Specialised <see cref="WindowListItemViewModel"/> for <see cref="MatrixPlotter"/> windows.
-    /// Tracks <see cref="MatrixData"/> changes, exposes virtual/in-memory badges,
+    /// Tracks <see cref="MatrixData"/> changes, exposes virtual badges,
     /// and schedules live thumbnail captures.
     /// </summary>
     public sealed class MatrixPlotterListItemViewModel : WindowListItemViewModel, IExportableAsImage
@@ -26,7 +27,7 @@ namespace MxPlot.App.ViewModels
             {
                 if (_matrixData == value) return;
                 _matrixData = value;
-                OnPropertyChanged(nameof(IsInMemory));
+                TrackLazySource(value);
                 OnPropertyChanged(nameof(IsVirtualReadOnly));
                 OnPropertyChanged(nameof(IsVirtualWritable));
                 OnPropertyChanged(nameof(DimensionsText));
@@ -35,8 +36,11 @@ namespace MxPlot.App.ViewModels
             }
         }
 
-        /// <inheritdoc/>
-        public override bool IsInMemory => _matrixData != null && !_matrixData.IsVirtual;
+        // Backend of _matrixData whose IsVirtualChanged keeps the Virtual badge current (null for
+        // in-memory data). A Lazy-decode dataset stops being Virtual once every frame is cached --
+        // often before the window has even finished opening -- so evaluating the badge only when
+        // the data is assigned showed it or not depending on load timing.
+        private ILazyDataSource? _lazySource;
 
         /// <inheritdoc/>
         public override bool IsVirtualReadOnly => _matrixData?.IsVirtual == true && _matrixData.IsWritable == false;
@@ -91,6 +95,8 @@ namespace MxPlot.App.ViewModels
             _matrixData = data;
             _hasUnsavedChanges = plotter.IsModified;
             RefreshMetaData();
+            TrackLazySource(data);
+            plotter.Closed += (_, _) => TrackLazySource(null);
 
             EventHandler onViewUpdated = (_, _) => ScheduleThumbnailUpdate(plotter);
             plotter.ViewUpdated += onViewUpdated;
@@ -111,6 +117,35 @@ namespace MxPlot.App.ViewModels
             // Defer the initial capture to Background priority so it runs after
             // Show() and any RestoreViewSettings-triggered re-renders complete.
             ScheduleThumbnailUpdate(plotter);
+        }
+
+        /// <summary>
+        /// Points the <see cref="ILazyDataSource.IsVirtualChanged"/> subscription at
+        /// <paramref name="data"/>'s backend, or at nothing.
+        /// </summary>
+        private void TrackLazySource(IMatrixData? data)
+        {
+            var source = data?.GetDiagnosticCacheableList() as ILazyDataSource;
+            if (ReferenceEquals(source, _lazySource)) return;
+
+            if (_lazySource != null)
+                _lazySource.IsVirtualChanged -= OnLazySourceIsVirtualChanged;
+            _lazySource = source;
+            if (source == null) return;
+
+            source.IsVirtualChanged += OnLazySourceIsVirtualChanged;
+            // The flip may already have happened before this subscription existed.
+            Dispatcher.UIThread.Post(NotifyVirtualBadgesChanged);
+        }
+
+        // Raised on a background prefetch thread.
+        private void OnLazySourceIsVirtualChanged(object? sender, EventArgs e)
+            => Dispatcher.UIThread.Post(NotifyVirtualBadgesChanged);
+
+        private void NotifyVirtualBadgesChanged()
+        {
+            OnPropertyChanged(nameof(IsVirtualReadOnly));
+            OnPropertyChanged(nameof(IsVirtualWritable));
         }
 
         /// <inheritdoc/>
@@ -141,6 +176,12 @@ namespace MxPlot.App.ViewModels
             Dispatcher.UIThread.Post(() =>
             {
                 _thumbnailPending = false;
+                // A window can swap its data without raising MatrixDataChanged (a linked ROI view, an
+                // orthogonal extract or a sync follower replaces its payload in place under a live
+                // feed), so the displayed size and tooltip would keep describing the old payload.
+                // Every such swap redraws the window and so reaches this callback, which runs after
+                // the swap has completed; a no-op when the instance is unchanged.
+                if (plotter.MatrixData is { } current) MatrixData = current;
                 var snap = plotter.CaptureThumbnail(ThumbnailCaptureSize);
                 if (snap != null) Thumbnail = snap;
             }, DispatcherPriority.Background);

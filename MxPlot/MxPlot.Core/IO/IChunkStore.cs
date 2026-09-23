@@ -28,10 +28,6 @@ namespace MxPlot.Core.IO
     /// <c>RemoteFrames&lt;T&gt;</c> (also in Core) can depend on it without
     /// pulling in any cloud SDK references.
     /// </para>
-    /// <para>
-    /// See <c>Tests.Documents/Working/MxPlot.Remote/RemoteFrames_Design.md</c> §6
-    /// for the full design and URI routing convention.
-    /// </para>
     /// </remarks>
     public interface IChunkStore
     {

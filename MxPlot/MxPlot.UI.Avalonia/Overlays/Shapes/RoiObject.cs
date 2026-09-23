@@ -296,7 +296,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         /// <summary>
         /// When <c>true</c>, <see cref="GetInfo"/> appends a double-click hint to the status text while the ROI is selected.
-        /// Set by <c>CropAction</c> on the leader ROI that has a size-edit dialog.
+        /// Set by <c>CropTool</c> on the leader ROI that has a size-edit dialog.
         /// </summary>
         public bool ShowSizeEditHint { get; set; } = false;
 
@@ -323,7 +323,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         /// <summary>
         /// Applies a new width and height (in world/pixel-edge units) coming from a size-edit dialog,
         /// clamps the position so the ROI stays within <see cref="DataBounds"/>, then fires
-        /// <see cref="BoundsChanged"/> so that the hosting <c>CropAction</c> can propagate
+        /// <see cref="BoundsChanged"/> so that the hosting <c>CropTool</c> can propagate
         /// the change through the sync group.
         /// </summary>
         internal void ApplySizeFromDialog(double newWidth, double newHeight)

@@ -5,6 +5,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Plugins;
 using System;
@@ -82,27 +83,6 @@ namespace MxPlot.UI.Avalonia.Views
             if (ActiveHamburgerButton != null) ActiveHamburgerButton.Background = Brushes.Transparent;
         }
 
-        /// <summary>
-        /// ハンバーガーメニューを開き、Scale タブを前面に出す。
-        /// <see cref="_scaleTabBody"/> の Parent チェーン（StackPanel → ScrollViewer → TabItem → TabControl）
-        /// を遡るため、TabControl をフィールド化する必要がない。
-        /// <para>
-        /// ハンバーガーボタンが一度も押されていない場合は <see cref="_menuPanel"/> が未初期化のため、
-        /// ここで遅延ビルドする。
-        /// </para>
-        /// </summary>
-        private void ShowMenuPanelOnScaleTab()
-        {
-            if (_menuPanel == null)
-                _menuPanel = BuildMenuPanel();
-            ShowMenuPanel();
-            if (_scaleTabBody?.Parent is ScrollViewer sv &&
-                sv.Parent is TabItem ti &&
-                ti.Parent is TabControl tc)
-            {
-                tc.SelectedItem = ti;
-            }
-        }
 
         /// <summary>
         /// Closes the menu panel when the pointer is pressed outside it (and outside the
@@ -435,14 +415,14 @@ namespace MxPlot.UI.Avalonia.Views
             Action Act(Action a) => () => { HideMenuPanel(); a(); };
             Action ActAsync(Func<Task> a) => async () => { HideMenuPanel(); await a(); };
 
-            // ── Actions tab
+            // ── Data tab
             bool isSaveCopy = _currentData != null && !_currentData.IsWritable;
             string saveLabel = isSaveCopy ? "Save a Copy (S)\u2026" : "Save As (S)\u2026";
             string saveHint = isSaveCopy
                 ? "Exports data to a new file. The current view remains backed by the original."
                 : "Saves data to a new file and updates the window title.";
 
-            var actionsItems = new StackPanel { Spacing = 3, Margin = new Thickness(4, 6, 4, 4) };
+            var dataItems = new StackPanel { Spacing = 3, Margin = new Thickness(4, 6, 4, 4) };
 
             var fileMenuItems = new List<Control>
             {
@@ -475,7 +455,7 @@ namespace MxPlot.UI.Avalonia.Views
             fileMenuItems.Add(ControlFactory.MakeMenuGroup("Export as\u2026", [.. exportItems],
                 icon: MenuIcons.Image, initiallyExpanded: false, indent: 10,
                 headerFontWeight: FontWeight.Regular));
-            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("File", [.. fileMenuItems], icon: MenuIcons.Folder));
+            dataItems.Children.Add(ControlFactory.MakeMenuGroup("File", [.. fileMenuItems], icon: MenuIcons.Folder));
 
             // Convert menu item: label and tooltip change for Complex data
             bool isComplex = _currentData?.ValueType == typeof(System.Numerics.Complex);
@@ -484,24 +464,23 @@ namespace MxPlot.UI.Avalonia.Views
                 ? "Converts complex data to double by extracting a component (Magnitude, Real, Imaginary, Phase, or Power)."
                 : "Converts the matrix data to a different numerical type (e.g., float to ushort).";
 
-            var editItems = new List<Control>
+            var copyItems = new List<Control>
             {
                 ControlFactory.MakeChildMenuItem("Copy to Clipboard", ActAsync(CopyFrameToClipboardAsync), "Copies the current frame to the clipboard as an image or tab-separated text.", icon: MenuIcons.Copy),
                 ControlFactory.MakeChildMenuItem("Duplicate Window",  ActAsync(DuplicateWindowAsync),      "Opens a new window with an independent deep copy of the data.", icon: MenuIcons.Duplicate),
-                ControlFactory.MakeChildMenuItem(convertLabel, Act(ConvertValueTypeAsync), convertHint, icon: MenuIcons.ConvertType),
             };
-            // Only meaningful when there is more than one channel to collapse.
-            if (_currentData?.Axes.FindAxis("Channel")?.Count > 1)
+            dataItems.Children.Add(ControlFactory.MakeMenuGroup("Copy", [.. copyItems], icon: MenuIcons.Briefcase));
+
+            var conversionItems = new List<Control>
             {
-                editItems.Add(ControlFactory.MakeChildMenuItem("Convert to Grayscale…",
-                    ActAsync(InvokeConvertToGrayscaleAsync),
-                    "Collapses the Channel axis into a single grayscale channel and lets you choose whether to replace the current window or open a new one.",
-                    icon: MenuIcons.Grayscale));
-            }
-            actionsItems.Children.Add(ControlFactory.MakeMenuGroup("Edit", [.. editItems], icon: MenuIcons.Edit));
+                ControlFactory.MakeChildMenuItem(convertLabel, ActAsync(ConvertValueTypeAsync), convertHint, icon: MenuIcons.ConvertType),
+            };
+            conversionItems.AddRange(CommandItems("Conversion"));
+            dataItems.Children.Add(ControlFactory.MakeMenuGroup("Conversion", [.. conversionItems], icon: MenuIcons.ViewGrid));
+
             var processingItems = new List<Control>
             {
-                ControlFactory.MakeChildMenuItem("Crop", Act(InvokeCropAction), "Crop the image to ROI selection", icon: MenuIcons.Crop),
+                ControlFactory.MakeChildMenuItem("Crop", Act(InvokeCropTool), "Crop the image to ROI selection", icon: MenuIcons.Crop),
             };
             if (_cropUndoData != null)
             {
@@ -509,11 +488,7 @@ namespace MxPlot.UI.Avalonia.Views
                 revertItem.Margin = new Thickness(22, revertItem.Margin.Top, revertItem.Margin.Right, revertItem.Margin.Bottom);
                 processingItems.Add(revertItem);
             }
-            if (_currentData?.FrameCount > 1)
-            {
-                processingItems.Add(ControlFactory.MakeChildMenuItem("Reverse Stack\u2026", ActAsync(InvokeReverseStackAsync), "Reverse the frame order along a selected axis", icon: MenuIcons.Layers));
-            }
-            processingItems.Add(ControlFactory.MakeChildMenuItem("Transpose…", ActAsync(InvokeTransposeAsync), "Swap X and Y; result opens in a new window", icon: MenuIcons.AutoFix));
+            processingItems.AddRange(CommandItems("Geometry & Dimensions"));
             /*
             //NOTE: These are placeholders for potential future features, currently disabled until implemented
             if (_currentData?.FrameCount > 1)
@@ -523,13 +498,6 @@ namespace MxPlot.UI.Avalonia.Views
                 processingItems.Add(ControlFactory.MakeChildMenuItem("Select", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));
             }
             */
-            // example
-            //actionsItems.Children.Add(ControlFactory.MakeSep(new Thickness(6, 3)));
-            //actionsItems.Children.Add(ControlFactory.MakeMenuItem("Dummy Process", ActAsync(DummyProcessAsync), icon: MenuIcons.Refresh));
-
-            actionsItems.Children.Add(ControlFactory.MakeSep(new Thickness(6, 3)));
-            actionsItems.Children.Add(ControlFactory.MakeMenuItem("About", ActAsync(ShowAboutAsync), icon: MenuIcons.Info));
-            actionsItems.Children.Add(ControlFactory.MakeMenuItem("Close", Act(Close), icon: MenuIcons.Close));
 
             // ── Info tab ──────────────────────────────────────────────────────
             _scaleTabBody = new StackPanel { Margin = new Thickness(2, 5, 2, 2) };
@@ -562,11 +530,11 @@ namespace MxPlot.UI.Avalonia.Views
             };
             tabControl.Items.Add(new TabItem
             {
-                Header = TabHdr("Actions", MenuIcons.Lightning),
+                Header = TabHdr("Data", MenuIcons.Database),
                 Padding = new Thickness(0),
                 Content = new ScrollViewer
                 {
-                    Content = actionsItems,
+                    Content = dataItems,
                     VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                     HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 },
@@ -589,21 +557,20 @@ namespace MxPlot.UI.Avalonia.Views
             processingTabBody.Children.Add(
                 ControlFactory.MakeMenuGroup("Geometry & Dimensions", [.. processingItems], icon: MenuIcons.Processing));
 
-            var filterItems = new Control[]
-            {
-                ControlFactory.MakeChildMenuItem("Median\u2026",   ActAsync(InvokeMedianFilterAsync),   "Apply a median (hot-pixel removal) filter",  icon: MenuIcons.AutoFix),
-                ControlFactory.MakeChildMenuItem("Gaussian\u2026", ActAsync(InvokeGaussianFilterAsync), "Apply a Gaussian (smoothing) filter",        icon: MenuIcons.AutoFix),
-            };
-            processingTabBody.Children.Add(
-                ControlFactory.MakeMenuGroup("Filters", filterItems, icon: MenuIcons.Processing));
+            // Groups of commands from the catalog: the menu only wires an item to its command.
+            Control[] CommandItems(string group) => CommandCatalog.InGroup(group, this)
+                .Select(c => (Control)ControlFactory.MakeChildMenuItem(
+                    c.Label, ActAsync(() => c.Command.RunAsync(this)), c.Hint, icon: c.Icon))
+                .ToArray();
 
-            var intensityItems = new Control[]
-            {
-                ControlFactory.MakeChildMenuItem("Normalize\u2026",     ActAsync(InvokeNormalizeAsync),     "Scale pixel values so the maximum equals a target value", icon: MenuIcons.AutoFix),
-                ControlFactory.MakeChildMenuItem("Log Transform\u2026", ActAsync(InvokeLogTransformAsync), "Apply a logarithm transform (ln / log\u2081\u2080 / log\u2082); outputs double", icon: MenuIcons.AutoFix),
-            };
             processingTabBody.Children.Add(
-                ControlFactory.MakeMenuGroup("Intensity", intensityItems, icon: MenuIcons.Processing));
+                ControlFactory.MakeMenuGroup("Filters", CommandItems("Filters"), icon: MenuIcons.Processing));
+
+            processingTabBody.Children.Add(
+                ControlFactory.MakeMenuGroup("Intensity", CommandItems("Intensity"), icon: MenuIcons.Processing));
+
+            processingTabBody.Children.Add(
+                ControlFactory.MakeMenuGroup("Frequency", CommandItems("Frequency"), icon: MenuIcons.Processing));
 
             var pluginsContainer = new StackPanel();
             void RebuildPluginsGroup()
@@ -681,12 +648,45 @@ namespace MxPlot.UI.Avalonia.Views
                 },
             };
 
+            // About sits bottom-left, opposite the resize grip.
+            var aboutIcon = new PathIcon { Data = MenuIcons.Info, Width = 14, Height = 14 };
+            if (MenuIcons.DefaultBrush(MenuIcons.Info) is { } aboutBrush) aboutIcon.Foreground = aboutBrush;
+            var aboutBtn = new Button
+            {
+                Content = aboutIcon,
+                Width = 22,
+                Height = 18,
+                Padding = new Thickness(0),
+                Background = Brushes.Transparent,
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Bottom,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 2, 0, 2),
+            };
+            ToolTip.SetTip(aboutBtn, "About");
+            aboutBtn.Click += (_, _) => ActAsync(ShowAboutAsync)();
+
+            // A rule above the footer row, in the color of the one under the tab strip, that stops
+            // short of the resize grip.
+            var footerLine = new Border
+            {
+                Height = 1,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 0, grip.Width + grip.Margin.Right, 0),
+            };
+            footerLine.Bind(Border.BackgroundProperty, footerLine.GetResourceObservable("MenuTabSelectedBorder"));
+
             var outerGrid = new Grid();
             outerGrid.RowDefinitions.Add(new RowDefinition(GridLength.Star));
             outerGrid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
             Grid.SetRow(tabControl, 0);
+            Grid.SetRow(footerLine, 1);
+            Grid.SetRow(aboutBtn, 1);
             Grid.SetRow(grip, 1);
             outerGrid.Children.Add(tabControl);
+            outerGrid.Children.Add(footerLine);
+            outerGrid.Children.Add(aboutBtn);
             outerGrid.Children.Add(grip);
 
             var panel = new Border

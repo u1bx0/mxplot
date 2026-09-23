@@ -8,6 +8,7 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
+using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -54,9 +55,10 @@ namespace MxPlot.UI.Avalonia.Controls
 
         private const double BaseFontSize = 11; // base font size for labels and mode button; 
 
-        // Everything in the row except the two value boxes: mode button (+ its right margin),
-        // the Min/Max labels, the two search buttons, the column spacing and the grid margin.
-        private const double FixedPartsWidth = 52 + 6 + 26 + 26 + BtnSize * 2 + 6 * 2 + 4 * 2;
+        // Everything in the row except the two value boxes: mode button + full-scan button (+ the
+        // small gap between them and the group's own right margin), the Min/Max labels, the two
+        // search buttons, the column spacing and the grid margin.
+        private const double FixedPartsWidth = 52 + BtnSize + 2 + 6 + 26 + 26 + BtnSize * 2 + 6 * 2 + 4 * 2;
 
         /// <summary>
         /// Narrowest width at which the bar is still fully usable, i.e. both value boxes at
@@ -82,12 +84,14 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly Button _searchMinBtn;
         private readonly Button _searchMaxBtn;
         private readonly TextBlock _imperfectBadge; // * indicator shown in All mode when imperfect
+        private readonly Button _fullScanBtn;   // 🔄 manual full min/max scan, shown next to the mode button
 
         // ── State ─────────────────────────────────────────────────────────────
         private ValueRangeMode _mode;       // current display mode
         private bool _isMultiFrame;         // true when FrameCount > 1
         private bool _isImperfect;          // true when All range is only partially scanned
         private int _invalidCount;          // number of frames not yet scanned
+        private bool _fullScanAvailable;    // true while the owner's backend supports a manual full scan (see SetFullScanAvailable)
         private bool _roiAvailable;         // true when an ROI overlay is designated
         private bool _forceReadOnly;        // Composite Channel-wise header: read-only even in Fixed
         private bool _updating;
@@ -108,12 +112,21 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Fired when the user clicks the 🔍 button next to Max.</summary>
         public event EventHandler? SearchMaxRequested;
 
+        /// <summary>
+        /// Fired when the user clicks the 🔄 full-scan button (see <see cref="SetFullScanAvailable"/>).
+        /// The owner decides what "full scan" means and whether to confirm with the user first --
+        /// this control only reports the click.
+        /// </summary>
+        public event EventHandler? FullScanRequested;
+
         // ── Public properties ─────────────────────────────────────────────────
 
         /// <summary>True when <see cref="Mode"/> is <see cref="ValueRangeMode.Fixed"/>.</summary>
         public bool IsFixedRange => _mode == ValueRangeMode.Fixed;
         /// <summary>The current display/control mode.</summary>
         public ValueRangeMode Mode => _mode;
+        /// <summary>True when the All-mode range is flagged as only partially scanned (see <see cref="SetImperfect"/>).</summary>
+        internal bool IsImperfect => _isImperfect;
 
         /// <summary>The min value currently displayed in the bar (valid for all modes).</summary>
         public double DisplayedMinValue => _lastMin;
@@ -164,7 +177,6 @@ namespace MxPlot.UI.Avalonia.Controls
                 Content = modeBtnContent,
                 Height = BtnSize,
                 Padding = new Thickness(4, 0),
-                Margin = new Thickness(0,0,6,0),
                 MinWidth = 34,
                 Width = 52,  // Fixed width to prevent content-driven resizing
                 VerticalAlignment = VerticalAlignment.Center,
@@ -184,11 +196,31 @@ namespace MxPlot.UI.Avalonia.Controls
 
             _searchMinBtn = MakeSearchBtn(isMin: true,  "Find min value in current frame");
             _searchMaxBtn = MakeSearchBtn(isMin: false, "Find max value in current frame");
-            
+
+            // Same footprint as _searchMinBtn/_searchMaxBtn; spacing to _modeBtn comes from the
+            // wrapping StackPanel below (see modeAndScanPanel), not from its own margin, so a
+            // hidden button leaves no leftover gap.
+            _fullScanBtn = new Button
+            {
+                // Always enabled while visible (no grayed-out state like the search buttons have),
+                // so it uses their "enabled" color outright rather than SearchDisabledBrush.
+                Content = new PathIcon { Data = MenuIcons.Refresh, Width = 11, Height = 11, Foreground = SearchEnabledBrush },
+                Width = BtnSize,
+                Height = BtnSize,
+                Padding = new Thickness(0),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Background = Brushes.Transparent,
+                IsVisible = false, // shown only via SetFullScanAvailable, alongside the "*" indicator
+            };
+            ToolTip.SetTip(_fullScanBtn, "Scan every frame for the exact min/max");
+
             // ── Wire events ───────────────────────────────────────────────────
             _modeBtn.Click += (_, _) => OpenModePopup();
             _searchMinBtn.Click += (_, _) => SearchMinRequested?.Invoke(this, EventArgs.Empty);
             _searchMaxBtn.Click += (_, _) => SearchMaxRequested?.Invoke(this, EventArgs.Empty);
+            _fullScanBtn.Click += (_, _) => FullScanRequested?.Invoke(this, EventArgs.Empty);
 
             RegisterBoxEvents(_minBox, isMin: true,  nextFocus: _maxBox);
             RegisterBoxEvents(_maxBox, isMin: false, nextFocus: _modeBtn);
@@ -200,13 +232,26 @@ namespace MxPlot.UI.Avalonia.Controls
             var minLabel = MakeLabel("Min");
             var maxLabel = MakeLabel("Max");
 
+            // ModeBtn + FullScanBtn share one grid column via a StackPanel: its Spacing only
+            // applies between children that are actually visible, so a hidden FullScanBtn leaves
+            // no leftover gap -- unlike giving it its own grid column, whose ColumnSpacing gap
+            // would persist even while empty.
+            var modeAndScanPanel = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 2,
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Children = { _modeBtn, _fullScanBtn },
+            };
+
             var grid = new Grid
             {
                 Margin = new Thickness(4, 1),
                 VerticalAlignment = VerticalAlignment.Center,
                 ColumnSpacing = 2,
             };
-            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                                                       // 0: ModeBtn
+            grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                                                       // 0: ModeBtn + FullScanBtn
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                                                       // 1: "Min"
             grid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star) { MinWidth = MinBoxWidth, MaxWidth = BoxWidth });   // 2: MinBox
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                                                       // 3: SearchMin
@@ -214,7 +259,7 @@ namespace MxPlot.UI.Avalonia.Controls
             grid.ColumnDefinitions.Add(new ColumnDefinition(1, GridUnitType.Star) { MinWidth = MinBoxWidth, MaxWidth = BoxWidth });   // 5: MaxBox
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));                                                       // 6: SearchMax
 
-            Grid.SetColumn(_modeBtn, 0);
+            Grid.SetColumn(modeAndScanPanel, 0);
             Grid.SetColumn(minLabel, 1);
             Grid.SetColumn(_minBox, 2);
             Grid.SetColumn(_searchMinBtn, 3);
@@ -222,7 +267,7 @@ namespace MxPlot.UI.Avalonia.Controls
             Grid.SetColumn(_maxBox, 5);
             Grid.SetColumn(_searchMaxBtn, 6);
 
-            grid.Children.Add(_modeBtn);
+            grid.Children.Add(modeAndScanPanel);
             grid.Children.Add(minLabel);
             grid.Children.Add(_minBox);
             grid.Children.Add(_searchMinBtn);
@@ -393,6 +438,25 @@ namespace MxPlot.UI.Avalonia.Controls
         }
 
         /// <summary>
+        /// Tells the bar whether the owner's current backend supports a manual full min/max scan
+        /// (e.g. MMF, or a still-filling Lazy-decode backend) -- unrelated to whether one is
+        /// currently needed. The 🔄 button is shown only when this is <see langword="true"/> *and*
+        /// the "*" indicator is showing -- that is, <see cref="IsImperfect"/> is true and either
+        /// <see cref="Mode"/> is <see cref="ValueRangeMode.All"/> or the bar is the read-only
+        /// summary of other bars (<see cref="SetRangeEditable"/>).
+        /// The owner is expected to call this every time it also calls <see cref="SetImperfect"/>,
+        /// passing <see langword="false"/> once the backend stops needing it (e.g. a Lazy-decode
+        /// backend that just finished its background fill) so the button quietly disappears instead
+        /// of lingering for an operation that no longer applies.
+        /// </summary>
+        public void SetFullScanAvailable(bool available)
+        {
+            if (_fullScanAvailable == available) return;
+            _fullScanAvailable = available;
+            UpdateModeBtnLabel();
+        }
+
+        /// <summary>
         /// Makes the whole range control non-interactive: the mode menu, the Min/Max boxes and the
         /// search buttons.
         /// Used by Composite mode's header bar in Channel-wise scope, where the displayed range is a
@@ -405,6 +469,7 @@ namespace MxPlot.UI.Avalonia.Controls
             if (_forceReadOnly == !editable) return;
             _forceReadOnly = !editable;
             ApplyEditableState();
+            UpdateModeBtnLabel(); // the read-only summary shows "*" / the scan button on its own terms
         }
 
         /// <summary>
@@ -448,12 +513,25 @@ namespace MxPlot.UI.Avalonia.Controls
             textBlock.Text = label;
             ToolTip.SetTip(_modeBtn, tip);
 
-            // Show * indicator ONLY when All mode is active AND imperfect
-            _imperfectBadge.IsVisible = _mode == ValueRangeMode.All && _isImperfect;
-            if (_imperfectBadge.IsVisible)
+            // Show the * indicator while imperfect, in All mode -- or in any mode while read-only.
+            // A read-only bar is Composite's header: a summary of the per-channel rows, whose own
+            // mode chip is a leftover from Global scope and says nothing about what the rows are
+            // doing. There the summary's own "some frames are not scanned" is what matters.
+            bool showImperfect = _isImperfect && (_forceReadOnly || _mode == ValueRangeMode.All);
+            _imperfectBadge.IsVisible = showImperfect;
+            if (showImperfect)
             {
-                ToolTip.SetTip(_imperfectBadge, tip);
+                // In All mode the mode tooltip already says it; otherwise (read-only summary) the
+                // mode tooltip describes a different mode entirely, so word it here.
+                ToolTip.SetTip(_imperfectBadge, _mode == ValueRangeMode.All
+                    ? tip
+                    : _invalidCount > 0
+                        ? $"{_invalidCount} frame{(_invalidCount == 1 ? "" : "s")} not yet scanned"
+                        : "Some frames not yet scanned");
             }
+
+            // Same gating as the * indicator, plus the owner's own availability signal.
+            _fullScanBtn.IsVisible = showImperfect && _fullScanAvailable;
         }
 
         // ── Mode picker flyout ────────────────────────────────────────────────

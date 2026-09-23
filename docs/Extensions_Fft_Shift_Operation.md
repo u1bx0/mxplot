@@ -50,6 +50,22 @@ public enum ShiftOption
 
 `MatrixData` defines spatial coordinates via `XMin`...`YMax`. In `BothCentered` mode, the coordinate system is physically consistent: the array center corresponds to $(0,0)$ in both Spatial and Frequency domains.
 
+## Scale of the Result
+
+The transform itself uses only the pixel counts and the pixel pitch of the input. The input's `XMin`/`XMax` are ignored: the origin is index `[0]` (the array center for `BothCentered`), whatever coordinates the input carries. The scale of the output is derived accordingly.
+
+* **Pitch.** The DFT treats its $N$ samples as one period of a periodic signal, so the period is the full width of $N$ pixel cells, `XLength` ($= N \cdot \mathrm{XStep}$), not `XRange` ($= (N-1) \cdot \mathrm{XStep}$, first to last pixel center). The output pitch is $1 / \mathrm{XLength}$ of the input: the frequency step $df = 1/(N\,dx)$ for a forward transform, the pixel pitch $dx' = 1/(N\,df)$ for an inverse one. Bin $k$ lies at $k\,df$, so index `[0]` is exactly DC.
+* **Range.** `XMin`/`XMax` of the output are pixel centers (the library convention). The axis is centered on 0, with `XMin` $= -\lfloor N/2 \rfloor$ pitches, when the output has its origin at the array center; otherwise it runs from 0 to $(N-1)$ pitches.
+
+| Transform | Option | Output axis |
+| :--- | :--- | :--- |
+| Forward | `None` | from 0 (DC at `[0]`) |
+| Forward | `Centered`, `BothCentered` | centered on 0 (DC at the center) |
+| Inverse | `None`, `Centered` | from 0 (origin at `[0]`) |
+| Inverse | `BothCentered` | centered on 0 (origin at the center) |
+
+An inverse transform without `BothCentered` therefore always returns coordinates starting at 0, regardless of the input's scale or of the option chosen: the frequency-domain data does not carry the `XMin` of the data it came from.
+
 ## Sequential Execution: The "4-Swap" Pipeline
 
 To maintain intuitive "Centered" data handling throughout an `FFT -> Action -> IFFT` pipeline, we use `BothCentered` for both steps:

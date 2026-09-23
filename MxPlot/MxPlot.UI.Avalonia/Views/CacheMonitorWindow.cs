@@ -1,11 +1,13 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using MxPlot.Core;
 using MxPlot.Core.IO;
 using MxPlot.Core.IO.CacheStrategies;
+using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -20,14 +22,21 @@ namespace MxPlot.UI.Avalonia.Views
     internal sealed class CacheMonitorWindow : Window
     {
         private readonly IMatrixData     _matrixData;
-        private readonly IVirtualFrameList _virtualList;
+        private readonly IMmfFrameList _virtualList;
         private readonly TextBlock       _outputBlock;
+        private readonly CacheGridControl _grid;
+        private readonly ScrollViewer    _scrollViewer;
+        private readonly CheckBox        _flatModeCheck;
+        private readonly CheckBox        _wrapCheck;
         private readonly DispatcherTimer  _timer;
         private readonly long            _frameSize;
 
         public CacheMonitorWindow(IMatrixData matrixData)
         {
-            var virtualList = matrixData.GetDiagnosticVirtualList()
+            // This window is deliberately MMF-only (its ASCII cache-grid assumes a bounded,
+            // physically-addressable frame set) -- pattern-match the generic diagnostic accessor
+            // against the MMF marker interface rather than needing a separate narrower method.
+            var virtualList = matrixData.GetDiagnosticCacheableList() as IMmfFrameList
                 ?? throw new InvalidOperationException("Target is not in virtual mode.");
 
             _matrixData  = matrixData;
@@ -46,12 +55,37 @@ namespace MxPlot.UI.Avalonia.Views
                 Margin       = new Thickness(4),
             };
 
-            Content = new ScrollViewer
+            _grid = new CacheGridControl
+            {
+                Margin              = new Thickness(4, 0, 4, 4),
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+
+            _scrollViewer = new ScrollViewer
             {
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
                 VerticalScrollBarVisibility   = ScrollBarVisibility.Auto,
-                Content = _outputBlock,
+                Content = new StackPanel { Children = { _outputBlock, _grid } },
             };
+
+            _flatModeCheck = ControlFactory.MakeCheckBox("Flat grid", hint: "Show one square-ish 2D grid of every frame instead of grouping by axis.");
+            _wrapCheck     = ControlFactory.MakeCheckBox("Wrap to window", hint: "Flat grid only: size the grid to the window width instead of a fixed square.");
+            _flatModeCheck.IsCheckedChanged += (_, _) => UpdateStatus();
+            _wrapCheck.IsCheckedChanged     += (_, _) => UpdateStatus();
+
+            var header = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing     = 12,
+                Margin      = new Thickness(4, 4, 4, 0),
+                Children    = { _flatModeCheck, _wrapCheck },
+            };
+
+            var root = new DockPanel();
+            DockPanel.SetDock(header, Dock.Top);
+            root.Children.Add(header);
+            root.Children.Add(_scrollViewer);
+            Content = root;
 
             _timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
             _timer.Tick += (_, _) => UpdateStatus();
@@ -64,6 +98,22 @@ namespace MxPlot.UI.Avalonia.Views
         private void UpdateStatus()
         {
             if (_virtualList.IsDisposed) return;
+
+            // Applies to both modes, not just the flat grid -- the axis-grouped view can produce
+            // very long single lines too (one per outer-axis value), and forcing a horizontal
+            // scrollbar there is exactly the same readability problem the flat grid was built to fix.
+            bool wrap = _wrapCheck.IsChecked == true;
+            _outputBlock.TextWrapping = wrap ? TextWrapping.Wrap : TextWrapping.NoWrap;
+
+            // A ScrollViewer with HorizontalScrollBarVisibility=Auto hands its content unconstrained
+            // width to measure against (so it CAN scroll horizontally) -- which also means a wrapping
+            // TextBlock inside it never actually wraps, since it's never given a width to wrap at.
+            // Disabling the horizontal bar while wrapping is on forces the real available width
+            // through instead. The flat grid doesn't depend on this (it hand-wraps into its own
+            // fixed-width lines), only the axis-grouped view's long lines do.
+            _scrollViewer.HorizontalScrollBarVisibility = wrap
+                ? ScrollBarVisibility.Disabled
+                : ScrollBarVisibility.Auto;
 
             var snapshot    = _virtualList.GetCacheStatus();
             var cachedSet   = new HashSet<int>(snapshot.CachedIndices);
@@ -117,6 +167,21 @@ namespace MxPlot.UI.Avalonia.Views
                 double pct = workingSetTotal > 0 ? 100.0 * workingSetCached / workingSetTotal : 0;
                 sb.AppendLine($"[Working Set]  {workingSetCached} / {workingSetTotal} frames  ({pct:F1}%)  " +
                               $"-- TargetAxis={ds.TargetAxis?.Name ?? "(none)"} x CompositeAxis={ds.CompositeAxis?.Name ?? "(none)"}");
+            }
+
+            bool flatMode = _flatModeCheck.IsChecked == true;
+            int total = _matrixData.FrameCount;
+            _grid.IsVisible = flatMode && total > 0;
+
+            if (flatMode)
+            {
+                // The flat grid draws its own legend, so the header text ends here.
+                if (total <= 0) sb.AppendLine("(no frames)");
+                else UpdateFlatGrid(total, cachedSet);
+
+                if (_outputBlock.Text != sb.ToString())
+                    _outputBlock.Text = sb.ToString();
+                return;
             }
 
             sb.AppendLine("[Legend]       # = cached in RAM    - = not cached (reads from disk on next access)");
@@ -195,6 +260,26 @@ namespace MxPlot.UI.Avalonia.Views
 
             if (_outputBlock.Text != sb.ToString())
                 _outputBlock.Text = sb.ToString();
+        }
+
+        /// <summary>
+        /// Shows every frame's cache state as one 2D grid (frame index = x + y*columns), instead of
+        /// grouping by axis -- readable at a glance for large frame counts, where the axis-grouped
+        /// view degenerates into either very long lines or a wall of short ones. The grid is roughly
+        /// square, or as wide as the window when wrapping is on -- in either case with a whole number
+        /// of blocks per row.
+        /// </summary>
+        private void UpdateFlatGrid(int total, HashSet<int> cachedSet)
+        {
+            // Leaves room for the vertical scroll bar, which the viewport width includes.
+            const double ScrollBarAllowance = 20;
+
+            double viewportPx = _scrollViewer.Bounds.Width - ScrollBarAllowance;
+            int columns = _wrapCheck.IsChecked == true && viewportPx > 0
+                ? _grid.ColumnsFitting(viewportPx, total)
+                : CacheGridControl.PreferredColumns(total);
+
+            _grid.SetState(total, columns, cachedSet);
         }
     }
 }

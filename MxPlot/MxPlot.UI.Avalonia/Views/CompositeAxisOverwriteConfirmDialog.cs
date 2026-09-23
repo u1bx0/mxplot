@@ -9,9 +9,8 @@ namespace MxPlot.UI.Avalonia.Views
     /// <summary>
     /// Modal dialog warning that Composite settings (recipes: colors, ranges, gains) saved for one
     /// axis will be discarded when Composite is switched to a different axis -- the
-    /// <c>mxplot.composite.*</c> metadata keys are not namespaced per axis (see Tests.Documents/
-    /// Working/ColorCoded/ColorCoded_View_InitialDesign.md, "recipeメタデータキーがaxisで
-    /// 名前空間化されていない" gap), so <c>RemoveCompositeKeys</c> unconditionally clears the prior
+    /// <c>mxplot.composite.*</c> metadata keys are not namespaced per axis, so
+    /// <c>RemoveCompositeKeys</c> unconditionally clears the prior
     /// axis's entries before the new axis's recipes are written. Shown only when saved metadata
     /// names an axis different from the one about to be composited; a fresh axis (no saved
     /// Composite metadata yet) or re-entering the same saved axis never triggers this.

@@ -1,6 +1,7 @@
 ﻿using BitMiracle.LibTiff.Classic;
 using MxPlot.Core;
 using MxPlot.Core.IO;
+using MxPlot.Core.IO.Formats;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -234,6 +235,10 @@ namespace MxPlot.Extensions.Tiff
                 ReadOmeMetadata(tiff, data);
                 Debug.WriteLine($"[ReadHyperstack] Metadata read.");
 
+                // Every frame below is addressed by IFD offset: LibTiff.NET's directory-number APIs
+                // (NumberOfDirectories/SetDirectory/ReadDirectory hops) break past 32,767 IFDs.
+                long[] ifdOffsets = TiffIfdIndex.ReadOffsets(filename, ct);
+
                 // Multi-file OME-TIFF fallback:
                 // If the OME-XML references external files via TiffData/UUID/FileName, we cannot
                 // follow those references here.  Instead we clamp TotalFrames to the actual IFD
@@ -241,7 +246,7 @@ namespace MxPlot.Extensions.Tiff
                 // The warning is stored in data.MultiFileWarning for the caller to surface.
                 if (data.MultiFileWarning != null)
                 {
-                    int actualDirs = tiff.NumberOfDirectories();
+                    int actualDirs = ifdOffsets.Length;
                     string currentBaseName = Path.GetFileName(filename);
                     Debug.WriteLine($"[ReadHyperstack] Multi-file OME-TIFF detected. Referenced: {data.MultiFileWarning}. Clamping to {actualDirs} IFDs.");
 
@@ -269,40 +274,56 @@ namespace MxPlot.Extensions.Tiff
                 Debug.WriteLine($"[ReadHyperstack] Data: {data.Width} x {data.Height} x {data.TotalFrames}");
                 Debug.WriteLine($"[ReadHyperstack] Data size: {(totalMB > 0 ? totalMB.ToString() + " MB" : "< 1 MB")}");
 
-                // Check compression at frame 0 before resolving loading mode.
-                // Virtual mode requires uncompressed data (NONE); compressed files must fall back to InMemory.
+                // Check compression at frame 0 before resolving loading mode. Virtual now has two
+                // routes, mutually exclusive: MMF (uncompressed only, offset table scanned up
+                // front) and Lazy decode (works regardless of compression, one real decode per
+                // frame on access) -- so compressed data no longer forces InMemory.
                 FieldValue[]? compTag = tiff.GetField(TiffTag.COMPRESSION);
                 bool isCompressed = compTag != null && compTag[0].ToInt() != (int)Compression.NONE;
-                Debug.WriteLine($"[ReadHyperstack] Compression: {(isCompressed ? "yes (InMemory forced)" : "none")}");
+                Debug.WriteLine($"[ReadHyperstack] Compression: {(isCompressed ? "yes (Lazy decode route)" : "none (MMF route)")}");
 
-                var resolvedMode = VirtualPolicy.Resolve(mode, totalBytes, frameCount: data.TotalFrames, canVirtual: !isCompressed);
+                var resolvedMode = VirtualPolicy.Resolve(mode, totalBytes, frameCount: data.TotalFrames, canVirtual: true);
                 if (resolvedMode == LoadingMode.Virtual)
                 {
-                    Debug.WriteLine("[ReadHyperstack] Virtual loading enabled");
                     data.IsVirtualMode = true;
 
-                    bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
-                    Debug.WriteLine($"[ReadHyperstack] Stored data structure: {(isTiled ? "Tile" : "Strip")}");
-
-                    // The raw MMF read path bypasses LibTiff's own decode-time byte-order normalization,
-                    // so the source file's actual byte order must be threaded through explicitly.
-                    bool isBigEndian = tiff.IsBigEndian();
-
-                    if (isTiled)
+                    if (isCompressed)
                     {
-                        (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) = ScanTileInfo(tiff, data.TotalFrames, progress, ct);
-                        Debug.WriteLine($"[ReadHyperstack] offset array for tiled image was extracted. length = {offsets.Length}");
-                        var vl = new VirtualTiledFrames<T>(filename, data.Width, data.Height, tileWidth, tileLength, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
-                        data.ImageStack = vl;
+                        // Lazy decode: TiffDecodedFrames<T> reads each frame directly via its own
+                        // Tiff handle on access -- flipY: true because, like the MMF route below,
+                        // no separate bulk HyperstackData<T>.FlipY() pass ever runs over Virtual
+                        // data (that pass is InMemory-only).
+                        Debug.WriteLine("[ReadHyperstack] Virtual loading (Lazy decode) enabled");
+                        data.ImageStack = new TiffDecodedFrames<T>(filename, data.Width, data.Height, ifdOffsets, data.TotalFrames, flipY: true);
+                        Debug.WriteLine($"[ReadHyperstack] TiffDecodedFrames was initialized.");
                     }
-                    else //Strip
+                    else
                     {
-                        var (offsets, byteCounts) = ScanStripInfo(tiff, data.TotalFrames, progress, ct);
-                        Debug.WriteLine($"[ReadHyperstack] offset array for stripped image was extracted. length = {offsets.Length}");
-                        data.ImageStack = new VirtualStrippedFrames<T>(filename, data.Width, data.Height, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
-                    }
+                        Debug.WriteLine("[ReadHyperstack] Virtual loading (MMF) enabled");
 
-                    Debug.WriteLine($"[ReadHyperstack] VirtualFrameList was initialized.");
+                        bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
+                        Debug.WriteLine($"[ReadHyperstack] Stored data structure: {(isTiled ? "Tile" : "Strip")}");
+
+                        // The raw MMF read path bypasses LibTiff's own decode-time byte-order normalization,
+                        // so the source file's actual byte order must be threaded through explicitly.
+                        bool isBigEndian = tiff.IsBigEndian();
+
+                        if (isTiled)
+                        {
+                            (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) = ScanTileInfo(tiff, ifdOffsets, data.TotalFrames, progress, ct);
+                            Debug.WriteLine($"[ReadHyperstack] offset array for tiled image was extracted. length = {offsets.Length}");
+                            var vl = new TiledMmfFrames<T>(filename, data.Width, data.Height, tileWidth, tileLength, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
+                            data.ImageStack = vl;
+                        }
+                        else //Strip
+                        {
+                            var (offsets, byteCounts) = ScanStripInfo(tiff, ifdOffsets, data.TotalFrames, progress, ct);
+                            Debug.WriteLine($"[ReadHyperstack] offset array for stripped image was extracted. length = {offsets.Length}");
+                            data.ImageStack = new StrippedMmfFrames<T>(filename, data.Width, data.Height, offsets, byteCounts, isYFlipped: true, isBigEndian: isBigEndian);
+                        }
+
+                        Debug.WriteLine($"[ReadHyperstack] VirtualFrameList was initialized.");
+                    }
                 }
                 else
                 {
@@ -313,11 +334,11 @@ namespace MxPlot.Extensions.Tiff
                     if (MaxParallelDegree > 1)
                     {
                         Debug.WriteLine($"[ReadHyperstack] Parallel loading (degree={MaxParallelDegree})");
-                        ReadImageDataParallel(filename, data, MaxParallelDegree, isTiledInMemory, progress, ct);
+                        ReadImageDataParallel(filename, data, ifdOffsets, MaxParallelDegree, isTiledInMemory, progress, ct);
                     }
                     else
                     {
-                        ReadImageData(tiff, data, progress, ct);
+                        ReadImageData(tiff, data, ifdOffsets, progress, ct);
                     }
                     Debug.WriteLine($"[ReadHyperstack] All frames were read.");
                 }
@@ -336,13 +357,13 @@ namespace MxPlot.Extensions.Tiff
 
             using (var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "r"))
             {
-                int totalDirectories = tiff.NumberOfDirectories();
+                long[] ifdOffsets = TiffIfdIndex.ReadOffsets(filename);
                 var width = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
                 var height = tiff.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
 
-                for (int directory = 0; directory < totalDirectories; directory++)
+                for (int directory = 0; directory < ifdOffsets.Length; directory++)
                 {
-                    tiff.SetDirectory((short)directory);
+                    TiffIfdIndex.SetFrame(tiff, ifdOffsets, directory);
                     bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
                     yield return isTiled
                         ? ReadSingleFrameTiled(tiff, width, height)
@@ -361,10 +382,11 @@ namespace MxPlot.Extensions.Tiff
 
             using (var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "r"))
             {
-                if (frameIndex >= tiff.NumberOfDirectories())
+                long[] ifdOffsets = TiffIfdIndex.ReadOffsets(filename);
+                if ((uint)frameIndex >= (uint)ifdOffsets.Length)
                     throw new ArgumentOutOfRangeException(nameof(frameIndex), $"Out of bounds:  frameIndex= {frameIndex}");
 
-                tiff.SetDirectory((short)frameIndex);
+                TiffIfdIndex.SetFrame(tiff, ifdOffsets, frameIndex);
                 var width = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
                 var height = tiff.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
                 bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
@@ -655,7 +677,7 @@ namespace MxPlot.Extensions.Tiff
             data.Height = height?[0].ToInt() ?? 0;
             data.Channels = 1;
             data.ZSlices = 1;
-            data.TimePoints = tiff.NumberOfDirectories();
+            data.TimePoints = TiffIfdIndex.ReadOffsets(tiff).Length; // not NumberOfDirectories(): Int16, wraps past 32,767
         }
 
         private void ReadMatrixDataMetadataAnnotation(string omeXml, HyperstackMetadata data)
@@ -807,16 +829,15 @@ namespace MxPlot.Extensions.Tiff
 
 
 
-        private void ReadImageData(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackData<T> data, IProgress<int>? progress = null, CancellationToken ct = default)
+        private void ReadImageData(BitMiracle.LibTiff.Classic.Tiff tiff, HyperstackData<T> data, long[] ifdOffsets, IProgress<int>? progress = null, CancellationToken ct = default)
         {
             int totalFrames  = data.TotalFrames;
-            int actualFrames = Math.Min(totalFrames, tiff.NumberOfDirectories());
+            int actualFrames = Math.Min(totalFrames, ifdOffsets.Length);
             data.ImageStack  = new List<T[]>(actualFrames);
 
-            // Determine layout once from the first directory (same for all frames).
-            // SetDirectory(0) is used only here; subsequent frames advance via ReadDirectory()
-            // so that each IFD is visited exactly once — O(N) instead of O(N²).
-            tiff.SetDirectory(0);
+            // Determine layout once from the first directory (same for all frames). Each IFD is
+            // then visited exactly once, addressed by offset (see TiffIfdIndex for why not by number).
+            TiffIfdIndex.SetFrame(tiff, ifdOffsets, 0);
             bool isTiled = tiff.GetField(TiffTag.TILEWIDTH) != null;
 
             // Compute each frame's min/max right after it's read (cache-hot) via the same
@@ -831,6 +852,7 @@ namespace MxPlot.Extensions.Tiff
             for (int directory = 0; directory < actualFrames; directory++)
             {
                 ct.ThrowIfCancellationRequested();
+                TiffIfdIndex.SetFrame(tiff, ifdOffsets, directory);
                 var frameData = isTiled
                     ? ReadSingleFrameTiled(tiff, data.Width, data.Height)
                     : ReadSingleFrameStripped(tiff, data.Width, data.Height);
@@ -844,9 +866,6 @@ namespace MxPlot.Extensions.Tiff
                 }
 
                 progress?.Report(directory);
-
-                if (directory < actualFrames - 1 && !tiff.ReadDirectory())
-                    throw new InvalidDataException($"Could not advance to directory {directory + 1}");
             }
 
             data.MinValues = minValues;
@@ -856,10 +875,10 @@ namespace MxPlot.Extensions.Tiff
 
         /// <summary>
         /// Parallel variant of <see cref="ReadImageData"/>.
-        /// Opens one LibTiff handle per thread; each thread advances sequentially within its range.
+        /// Opens one LibTiff handle per thread; each thread jumps straight to its frames by IFD offset.
         /// Effective for compressed (e.g. LZW) files where decompression is CPU-bound.
         /// </summary>
-        private void ReadImageDataParallel(string filePath, HyperstackData<T> data, int parallelDegree, bool isTiled, IProgress<int>? progress, CancellationToken ct = default)
+        private void ReadImageDataParallel(string filePath, HyperstackData<T> data, long[] ifdOffsets, int parallelDegree, bool isTiled, IProgress<int>? progress, CancellationToken ct = default)
         {
             int actualFrames = data.TotalFrames;
             var imageStack   = new T[actualFrames][];
@@ -878,21 +897,15 @@ namespace MxPlot.Extensions.Tiff
 
                 using var localTiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
 
-                // Advance to this thread's starting IFD: O(start) hops, sequential ReadDirectory
-                localTiff.SetDirectory(0);
-                for (int i = 0; i < start; i++) localTiff.ReadDirectory();
-
                 for (int f = start; f < end; f++)
                 {
                     ct.ThrowIfCancellationRequested();
+                    TiffIfdIndex.SetFrame(localTiff, ifdOffsets, f);
                     imageStack[f] = isTiled
                         ? ReadSingleFrameTiled(localTiff, data.Width, data.Height)
                         : ReadSingleFrameStripped(localTiff, data.Width, data.Height);
 
                     progress?.Report(Interlocked.Increment(ref reported) - 1);
-
-                    if (f < end - 1 && !localTiff.ReadDirectory())
-                        throw new InvalidDataException($"Thread {t}: could not advance to frame {f + 1}");
                 }
             });
 
@@ -921,96 +934,38 @@ namespace MxPlot.Extensions.Tiff
 
         /// <summary>
         /// Reads one frame from a strip-organized TIFF using <c>ReadEncodedStrip</c>.
-        /// One API call per strip instead of one per row, reducing overhead by ×(rows/strip).
+        /// Delegates to <see cref="TiffFrameCodec.ReadStripped{T}"/> (shared with
+        /// <c>ImageJTiffHandler</c>); <c>flipY: false</c> preserves this class's existing
+        /// two-pass convention (raw read here, <see cref="HyperstackData{T}.FlipY"/> afterward).
         /// </summary>
         private T[] ReadSingleFrameStripped(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
-        {
-            var imageData    = new T[width * height];
-            int typeSize     = Marshal.SizeOf(typeof(T));
-
-            Span<byte> dest  = MemoryMarshal.AsBytes(imageData.AsSpan());
-
-            int rowsPerStrip = tiff.GetField(TiffTag.ROWSPERSTRIP)?[0].ToInt() ?? height;
-            int numStrips    = tiff.NumberOfStrips();
-            int maxStripBytes = tiff.StripSize();
-            var stripBuf     = new byte[maxStripBytes];
-
-            for (int strip = 0; strip < numStrips; strip++)
-            {
-                int bytesRead = tiff.ReadEncodedStrip(strip, stripBuf, 0, maxStripBytes);
-                if (bytesRead < 0)
-                    throw new InvalidOperationException($"ReadEncodedStrip failed: strip={strip}");
-
-                int startRow    = strip * rowsPerStrip;
-                int actualRows  = Math.Min(rowsPerStrip, height - startRow);
-                int bytesToCopy = actualRows * width * typeSize;
-                stripBuf.AsSpan(0, bytesToCopy)
-                        .CopyTo(dest.Slice(startRow * width * typeSize));
-            }
-            return imageData;
-        }
+            => TiffFrameCodec.ReadStripped<T>(tiff, width, height, flipY: false);
 
         /// <summary>
         /// Reads one frame from a tile-organized TIFF using <c>ReadEncodedTile</c>.
-        /// One API call per tile instead of one per row, reducing overhead significantly.
+        /// Delegates to <see cref="TiffFrameCodec.ReadTiled{T}"/> (shared with
+        /// <c>ImageJTiffHandler</c>); <c>flipY: false</c>, see <see cref="ReadSingleFrameStripped"/>.
         /// </summary>
         private T[] ReadSingleFrameTiled(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
-        {
-            var imageData  = new T[width * height];
-            int typeSize   = Marshal.SizeOf(typeof(T));
+            => TiffFrameCodec.ReadTiled<T>(tiff, width, height, flipY: false);
 
-            Span<byte> dest = MemoryMarshal.AsBytes(imageData.AsSpan());
 
-            int tileWidth  = tiff.GetField(TiffTag.TILEWIDTH)[0].ToInt();
-            int tileHeight = tiff.GetField(TiffTag.TILELENGTH)[0].ToInt();
-            int tilesAcross = (width  + tileWidth  - 1) / tileWidth;
-            int tilesDown   = (height + tileHeight - 1) / tileHeight;
-            int maxTileBytes = tiff.TileSize();
-            var tileBuf    = new byte[maxTileBytes];
-
-            for (int tileRow = 0; tileRow < tilesDown; tileRow++)
-            {
-                for (int tileCol = 0; tileCol < tilesAcross; tileCol++)
-                {
-                    int tileIndex = tileRow * tilesAcross + tileCol;
-                    int bytesRead = tiff.ReadEncodedTile(tileIndex, tileBuf, 0, maxTileBytes);
-                    if (bytesRead < 0)
-                        throw new InvalidOperationException($"ReadEncodedTile failed: tile={tileIndex}");
-
-                    int startX = tileCol * tileWidth;
-                    int startY = tileRow * tileHeight;
-                    int actualTileWidth  = Math.Min(tileWidth,  width  - startX);
-                    int actualTileHeight = Math.Min(tileHeight, height - startY);
-
-                    for (int row = 0; row < actualTileHeight; row++)
-                    {
-                        int srcOffset = row * tileWidth * typeSize;
-                        int dstOffset = ((startY + row) * width + startX) * typeSize;
-                        tileBuf.AsSpan(srcOffset, actualTileWidth * typeSize)
-                               .CopyTo(dest.Slice(dstOffset));
-                    }
-                }
-            }
-            return imageData;
-        }
-                
 
         #region Logic for VirtualList (OmeTiffLoadMode == Virtual)
 
 
-        internal (long[][] offsets, long[][] byteCounts) ScanStripInfo(BitMiracle.LibTiff.Classic.Tiff tiff, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
+        internal (long[][] offsets, long[][] byteCounts) ScanStripInfo(BitMiracle.LibTiff.Classic.Tiff tiff, long[] ifdOffsets, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
         {
+            RequireIfdCount(ifdOffsets, totalFrames);
             long[][] offsets = new long[totalFrames][];
             long[][] byteCounts = new long[totalFrames][];
 
             progress?.Report(-totalFrames); // Signal total frame count to the UI
 
-            // Always start from directory 0 before entering the loop
-            tiff.SetDirectory(0);
-
-            for (short i = 0; i < totalFrames; i++)
+            for (int i = 0; i < totalFrames; i++)
             {
                 ct.ThrowIfCancellationRequested();
+                TiffIfdIndex.SetFrame(tiff, ifdOffsets, i);
                 // 1. Verify that the frame is uncompressed (Virtual mode requires raw access)
                 FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
                 if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
@@ -1031,16 +986,15 @@ namespace MxPlot.Extensions.Tiff
                 offsets[i] = ExtractLongArray(offsetTag[0]);
                 byteCounts[i] = ExtractLongArray(byteCountTag[0]);
                 progress?.Report(i);
-
-                // Advance sequentially — never use SetDirectory(i) here!
-                if (i < totalFrames - 1)
-                {
-                    if (!tiff.ReadDirectory())
-                        throw new InvalidDataException($"Could not read directory for frame {i + 1}");
-                }
             }
 
             return (offsets, byteCounts);
+        }
+
+        private static void RequireIfdCount(long[] ifdOffsets, int totalFrames)
+        {
+            if (ifdOffsets.Length < totalFrames)
+                throw new InvalidDataException($"The file has {ifdOffsets.Length} IFDs, but the metadata declares {totalFrames} frames.");
         }
 
         /// <summary>
@@ -1052,7 +1006,7 @@ namespace MxPlot.Extensions.Tiff
             using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
             if (tiff == null)
                 throw new IOException($"Cannot open OME-TIFF for strip scanning: {filePath}");
-            return ScanStripInfo(tiff, totalFrames, progress, ct);
+            return ScanStripInfo(tiff, TiffIfdIndex.ReadOffsets(filePath, ct), totalFrames, progress, ct);
         }
 
         /// <summary>
@@ -1065,7 +1019,7 @@ namespace MxPlot.Extensions.Tiff
         /// </summary>
         /// <returns>
         /// Per-frame strip offset and byte-count arrays pointing into the pre-allocated file regions.
-        /// Pass these directly to <see cref="WritableVirtualStrippedFrames{T}"/>.
+        /// Pass these directly to <see cref="WritableStrippedMmfFrames{T}"/>.
         /// </returns>
         internal (long[][] offsets, long[][] byteCounts) BuildVesselFast(string filePath, HyperstackMetadata spec)
         {
@@ -1085,14 +1039,15 @@ namespace MxPlot.Extensions.Tiff
                 rowsPerStrip);
         }
 
-        private (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) ScanTileInfo(BitMiracle.LibTiff.Classic.Tiff tiff, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
+        private (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) ScanTileInfo(BitMiracle.LibTiff.Classic.Tiff tiff, long[] ifdOffsets, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
         {
+            RequireIfdCount(ifdOffsets, totalFrames);
             long[][] offsets = new long[totalFrames][];
             long[][] byteCounts = new long[totalFrames][];
 
             progress?.Report(-totalFrames);
 
-            tiff.SetDirectory(0);
+            TiffIfdIndex.SetFrame(tiff, ifdOffsets, 0);
 
             // Read tile dimensions (shared across all frames) from directory 0
             FieldValue[] twTag = tiff.GetField(TiffTag.TILEWIDTH);
@@ -1104,9 +1059,10 @@ namespace MxPlot.Extensions.Tiff
             int tileWidth = twTag[0].ToInt();
             int tileLength = tlTag[0].ToInt();
 
-            for (short i = 0; i < totalFrames; i++)
+            for (int i = 0; i < totalFrames; i++)
             {
                 ct.ThrowIfCancellationRequested();
+                TiffIfdIndex.SetFrame(tiff, ifdOffsets, i);
                 FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
                 if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
                 {
@@ -1130,12 +1086,6 @@ namespace MxPlot.Extensions.Tiff
                 byteCounts[i] = ExtractLongArray(byteCountTag[0]);
 
                 progress?.Report(i);
-
-                if (i < totalFrames - 1)
-                {
-                    if (!tiff.ReadDirectory())
-                        throw new InvalidDataException($"Could not read directory for frame {i + 1}");
-                }
             }
 
             return (tileWidth, tileLength, offsets, byteCounts);
@@ -1882,7 +1832,7 @@ namespace MxPlot.Extensions.Tiff
         /// <summary>
         /// Creates a <see cref="HyperstackData{T}"/> from a <see cref="HyperstackMetadata"/> instance.
         /// The <see cref="ImageStack"/> is left null; this is intended for vessel-creation scenarios
-        /// where pixel data will be written later via <see cref="WritableVirtualStrippedFrames{T}"/>.
+        /// where pixel data will be written later via <see cref="WritableStrippedMmfFrames{T}"/>.
         /// </summary>
         public static HyperstackData<T> FromMetadata(HyperstackMetadata meta)
         {

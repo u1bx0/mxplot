@@ -7,9 +7,8 @@ using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using MxPlot.Core;
-using MxPlot.Core.IO;
 using MxPlot.Core.Processing;
-using MxPlot.UI.Avalonia.Actions;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Plugins;
 using System;
@@ -19,6 +18,7 @@ using System.Reflection;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using MxPlot.Core.IO.Formats;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -450,103 +450,19 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
-        // ── Action lifecycle ──────────────────────────────────────────────────
-
-        /// <summary>
-        /// Starts an <see cref="IPlotterAction"/>, disposing any currently active action first.
-        /// Subscribes to <see cref="IPlotterAction.Completed"/> and <see cref="IPlotterAction.Cancelled"/>
-        /// to update <see cref="_activeAction"/> and apply result data when the action finishes.
-        /// </summary>
-        private void InvokeAction(IPlotterAction action)
+        private Task ConvertValueTypeAsync()
         {
-            _activeAction?.Dispose();
-            _activeAction = action;
-            action.Completed += OnActionCompleted;
-            action.Cancelled += OnActionCancelled;
-            action.Invoke(CreateActionContext());
-        }
-
-        private void OnActionCompleted(object? sender, IMatrixData? result)
-        {
-            if (sender is IPlotterAction a)
-            {
-                a.Completed -= OnActionCompleted;
-                a.Cancelled -= OnActionCancelled;
-            }
-            _activeAction = null;
-            if (result != null) SetMatrixData(result);
-        }
-
-        private void OnActionCancelled(object? sender, EventArgs e)
-        {
-            if (sender is IPlotterAction a)
-            {
-                a.Completed -= OnActionCompleted;
-                a.Cancelled -= OnActionCancelled;
-            }
-            _activeAction = null;
-        }
-
-        private PlotterActionContext CreateActionContext() => new()
-        {
-            MainView = _view,
-            HostVisual = this,
-            Data = _currentData,
-            OrthoPanel = _orthoPanel.ShowRight ? _orthoPanel : null,
-            DepthAxisName = _orthoController.ActiveAxisName,
-        };
-
-        private void ConvertValueTypeAsync()
-        {
-            if (_currentData is null) return;
+            if (_currentData is null) return Task.CompletedTask;
 
             // Complex data: show Convert Complex dialog
             if (_currentData.ValueType == typeof(System.Numerics.Complex))
             {
                 ConvertComplexValueAsync();
-                return;
+                return Task.CompletedTask;
             }
 
             // Primitive types: show Convert Value Type dialog
-            double lutMin = _rangeBar.DisplayedMinValue;
-            double lutMax = _rangeBar.DisplayedMaxValue;
-            if (double.IsNaN(lutMin) || double.IsNaN(lutMax))
-            {
-                var (min, max) = _view.ScanCurrentFrameRange();
-                lutMin = min;
-                lutMax = max;
-            }
-
-            var action = new ConvertValueTypeAction(lutMin, lutMax, IsReplaceDataBlocked);
-            _activeAction?.Dispose();
-            _activeAction = action;
-
-            action.ConvertingStarted += (_, _) =>
-            {
-                BeginProgress("Converting…", blockInput: true);
-            };
-            action.ConvertCompleted += (_, r) =>
-            {
-                EndProgress();
-                _activeAction = null;
-                string typeDesc = $"{_currentData?.ValueTypeName} \u2192 {r.Data.ValueTypeName}";
-                string histDesc = r.DoScale
-                    ? $"{typeDesc}; scale [{r.SrcMin:G6}, {r.SrcMax:G6}] \u2192 [{r.TgtMin:G6}, {r.TgtMax:G6}]"
-                    : $"{typeDesc}; direct cast";
-                if (r.ReplaceData)
-                {
-                    AppendHistory(r.Data, "Convert Type", Title, histDesc);
-                    SetMatrixData(r.Data, closeSyncFollowers: true);
-                }
-                else
-                {
-                    AppendHistory(r.Data, "Convert Type", Title, histDesc);
-                    MatrixPlotter.Create(r.Data, _view.Lut, $"Convert of {Title}").Show();
-                }
-            };
-            action.Cancelled += (_, _) => { EndProgress(); _activeAction = null; };
-
-            action.Invoke(CreateActionContext());
+            return new ConvertValueTypeCommand().RunAsync(this);
         }
 
         private async void ConvertComplexValueAsync()
@@ -573,7 +489,7 @@ namespace MxPlot.UI.Avalonia.Views
                         if (replaceData)
                         {
                             AppendHistory(converted, "Convert Complex", Title, histDesc);
-                            SetMatrixData(converted, closeSyncFollowers: true);
+                            SetMatrixData(converted, closeDerivedWindows: true);
                         }
                         else
                         {
@@ -841,15 +757,6 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Concrete <see cref="Plugins.IRenderHost"/> that wraps the <see cref="Controls.MxView"/>
-        /// held by this <see cref="MatrixPlotter"/>. Created per export invocation.
-        /// </summary>
-        /// <summary>
-        /// Axis names that must not be offered as an export animation axis, because the view
-        /// already consumes them: the Channel axis while Composite blends every channel into each
-        /// frame, plus <paramref name="orthoAxisName"/> for a side view's slice dimension.
-        /// </summary>
-        /// <summary>
         /// Whether any axis is left to animate once <paramref name="excludedAxisNames"/> is taken
         /// out. Frame-stepping exporters (AVI, image sequences) are pointless without one - e.g.
         /// Composite data whose only axis is Channel renders a single blended image.
@@ -868,6 +775,11 @@ namespace MxPlot.UI.Avalonia.Views
             return false;
         }
 
+        /// <summary>
+        /// Axis names that must not be offered as an export animation axis, because the view
+        /// already consumes them: the Channel axis while Composite blends every channel into each
+        /// frame, plus <paramref name="orthoAxisName"/> for a side view's slice dimension.
+        /// </summary>
         private IReadOnlyList<string>? BuildExcludedAxisNames(string? orthoAxisName = null)
         {
             var names = new List<string>(2);
@@ -881,6 +793,10 @@ namespace MxPlot.UI.Avalonia.Views
             return names.Count > 0 ? names : null;
         }
 
+        /// <summary>
+        /// Concrete <see cref="Plugins.IRenderHost"/> that wraps the <see cref="Controls.MxView"/>
+        /// held by this <see cref="MatrixPlotter"/>. Created per export invocation.
+        /// </summary>
         private sealed class RenderHostImpl : Plugins.IRenderHost
         {
             private readonly Controls.MxView _view;

@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Commands;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using System.Threading.Tasks;
@@ -11,18 +12,11 @@ namespace MxPlot.UI.Avalonia.Views
 {
     /// <summary>
     /// Modal dialog for configuring a Log Transform operation.
-    /// Returns a <see cref="LogTransformParameters"/> record on OK, or <c>null</c> on cancel.
+    /// Returns the <see cref="LogTransformParameters"/> and the dialog's checkboxes on OK, or <c>null</c> on cancel.
     /// </summary>
     internal sealed class LogTransformDialog : ProcessingDialogBase
     {
-        internal sealed record LogTransformParameters(
-            LogBase Base,
-            NegativeHandling Handling,
-            bool ThisFrameOnly,
-            bool SyncSource,
-            bool ReplaceData);
-
-        private LogTransformParameters? _result;
+        internal sealed record LogTransformParameters(LogBase Base, NegativeHandling Handling);
 
         // ── Factory ───────────────────────────────────────────────────────────
 
@@ -34,18 +28,18 @@ namespace MxPlot.UI.Avalonia.Views
         /// for why).
         /// </param>
         /// <param name="src">Source data, used only to decide whether to show the materialization warning.</param>
-        internal static Task<LogTransformParameters?> ShowAsync(
+        internal static Task<DialogAnswer<LogTransformParameters>?> ShowAsync(
             Window owner, bool isMultiFrame, bool hasNegOrZero, bool isLinkWindow = false, IMatrixData? src = null)
         {
             var dlg = new LogTransformDialog(isMultiFrame, hasNegOrZero, isLinkWindow, src);
-            return dlg.ShowDialog<LogTransformParameters?>(owner);
+            return dlg.ShowDialog<DialogAnswer<LogTransformParameters>?>(owner);
         }
 
         // ── Construction ──────────────────────────────────────────────────────
 
         private LogTransformDialog(bool isMultiFrame, bool hasNegOrZero, bool isLinkWindow, IMatrixData? src)
             : base("Log Transform", width: 290, isLinkWindow: isLinkWindow, canResize: false, src: src,
-                   thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null)
+                   thisFrameOnlyDefault: isMultiFrame ? false : (bool?)null, showSyncSource: true)
         {
             // ── Base selector ─────────────────────────────────────────────────
             var baseCombo = new ComboBox
@@ -135,38 +129,13 @@ namespace MxPlot.UI.Avalonia.Views
             warnInner.Children.Add(clampRadio);
             warnBorder.Child = warnInner;
 
-            // ── Sync source ───────────────────────────────────────────────────
-            var syncCheck = ControlFactory.MakeCheckBox(
-                "Sync source data",
-                hint: "Automatically re-apply the transform when the source frame changes");
-            syncCheck.Margin = new Thickness(0, 4, 0, -7);
-            syncCheck.IsVisible = !isMultiFrame; // single-frame: always show; multi: show when ThisFrameOnly
-
-            if (isMultiFrame && ThisFrameOnlyCheckBox != null)
-            {
-                ThisFrameOnlyCheckBox.Margin = new Thickness(0, 6, 0, -7);
-                ThisFrameOnlyCheckBox.IsCheckedChanged += (_, _) =>
-                {
-                    bool single = ThisFrameOnlyCheckBox.IsChecked == true;
-                    syncCheck.IsVisible = single;
-                    if (!single) syncCheck.IsChecked = false;
-                };
-            }
-
-            // sync and replace are mutually exclusive; a link window can never re-enable replace
-            syncCheck.IsCheckedChanged += (_, _) =>
-            {
-                if (syncCheck.IsChecked == true) ReplaceDataCheckBox.IsChecked = false;
-                ReplaceDataCheckBox.IsEnabled = !isLinkWindow && syncCheck.IsChecked != true;
-            };
-
             // ── Layout ────────────────────────────────────────────────────────
             var panel = new StackPanel { Spacing = 2 };
             panel.Children.Add(baseRow);
             panel.Children.Add(warnBorder);
-            if (ThisFrameOnlyCheckBox != null)
-                panel.Children.Add(ThisFrameOnlyCheckBox);
-            panel.Children.Add(syncCheck);
+            var frameOptions = BuildFrameOptions();
+            if (frameOptions != null)
+                panel.Children.Add(frameOptions);
 
             FinalizeContent(panel, onOk: () =>
             {
@@ -180,13 +149,7 @@ namespace MxPlot.UI.Avalonia.Views
                     ? NegativeHandling.Clamp
                     : NegativeHandling.Shift;
 
-                _result = new LogTransformParameters(
-                    Base: lb,
-                    Handling: nh,
-                    ThisFrameOnly: ThisFrameOnlyCheckBox?.IsChecked == true,
-                    SyncSource: syncCheck.IsChecked == true,
-                    ReplaceData: ReplaceDataCheckBox.IsChecked == true);
-                Close(_result);
+                Close(Answer(new LogTransformParameters(Base: lb, Handling: nh)));
             }, okLabel: "Apply");
         }
     }

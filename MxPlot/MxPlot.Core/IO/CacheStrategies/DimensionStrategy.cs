@@ -314,6 +314,38 @@ namespace MxPlot.Core.IO.CacheStrategies
             // All context axes match — this frame belongs to the current view and should be protected.
             return true;
         }
+
+        /// <summary>
+        /// A frame is pinned when it sits at the current position on every axis except
+        /// <see cref="CompositeAxis"/> -- unlike <see cref="IsHighPriority"/>, <see cref="Mode"/>
+        /// grants no exemption for <see cref="TargetAxis"/> here, so this never protects a whole
+        /// Volume-mode sweep, only the exact frame(s) actually on screen right now. With no
+        /// CompositeAxis this collapses to "is index the current frame". With one, every channel at
+        /// the current position is pinned together (Composite blends them all into one image at
+        /// once) -- except a channel the caller has explicitly filtered out via
+        /// <see cref="SetTargetChannels"/>, which isn't being rendered and so isn't protected.
+        /// </summary>
+        public bool IsPinned(int index)
+        {
+            if (_dim.Axes.Count == 0) return false;
+
+            Span<int> currentPos = stackalloc int[_dim.Axes.Count];
+            _dim.CopyAxisIndicesTo(currentPos, _lastCurrentIndex);
+
+            Span<int> evalPos = stackalloc int[_dim.Axes.Count];
+            _dim.CopyAxisIndicesTo(evalPos, index);
+
+            for (int i = 0; i < _dim.Axes.Count; i++)
+            {
+                if (i == _compositeAxisIndex) continue; // any channel at this position is pinned together
+                if (currentPos[i] != evalPos[i]) return false;
+            }
+
+            if (_compositeAxisIndex >= 0 && _targetChannels.Count > 0)
+                return _targetChannels.Contains(evalPos[_compositeAxisIndex]);
+
+            return true;
+        }
     }
 
 }

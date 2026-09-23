@@ -1,7 +1,8 @@
 ﻿using MxPlot.Core;
 using MxPlot.Core.Processing;
-using MxPlot.UI.Avalonia.Actions;
+using MxPlot.UI.Avalonia.Tools;
 using MxPlot.UI.Avalonia.Controls;
+using MxPlot.UI.Avalonia.Overlays;
 using System;
 using System.Linq;
 using System.Threading;
@@ -14,37 +15,36 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Processing operations ─────────────────────────────────────────────
 
         private CancellationTokenSource? _cropCts;
-        private CancellationTokenSource? _grayscaleCts;
         private static CropRoiBounds? _lastCropBounds;
 
         /// <summary>
         /// Entry point for the interactive crop action.
-        /// If a <see cref="CropAction"/> is already active, disposes it (toggle-off).
-        /// Otherwise creates a new <see cref="CropAction"/> with a custom Completed handler
+        /// If a <see cref="CropTool"/> is already active, disposes it (toggle-off).
+        /// Otherwise creates a new <see cref="CropTool"/> with a custom Completed handler
         /// that respects the user's output options (new window vs. replace, all frames vs. single).
         /// </summary>
-        private void InvokeCropAction()
+        private void InvokeCropTool()
         {
             // Toggle off: Leader crop active → cancel and notify follower windows
-            if (_activeAction is CropAction { Role: CropRole.Leader })
+            if (_activeTool is CropTool { Role: CropRole.Leader })
             {
-                _activeAction.Dispose();
-                _activeAction = null;
+                _activeTool.Dispose();
+                _activeTool = null;
                 SyncCropCancelled?.Invoke(this, EventArgs.Empty);
                 return;
             }
 
             // Follower mode: user cannot start a new crop manually while controlled by the leader
-            if (_activeAction is CropAction { Role: CropRole.Follower })
+            if (_activeTool is CropTool { Role: CropRole.Follower })
                 return;
 
-            var crop = new CropAction(CropRole.Leader) { IsReplaceDataBlocked = IsReplaceDataBlocked };
+            var crop = new CropTool(CropRole.Leader) { IsReplaceDataBlocked = IsReplaceDataBlocked };
             if (_lastCropBounds is { } lb)
                 crop.InitialLeaderBounds = lb;
             crop.RoiBoundsChanged += OnCropRoiBoundsChanged;
             crop.Completed += OnCropCompleted;
             crop.Cancelled += OnCropCancelled;
-            InvokeAction(crop);
+            InvokeTool(crop);
 
             // Notify synced windows with the initial ROI bounds (ROI is set up synchronously in Invoke)
             if (crop.CurrentBounds is { } b)
@@ -53,7 +53,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private async void OnCropCompleted(object? sender, IMatrixData? _)
         {
-            if (sender is not CropAction crop) return;
+            if (sender is not CropTool crop) return;
             crop.RoiBoundsChanged -= OnCropRoiBoundsChanged;
             crop.Completed -= OnCropCompleted;
             crop.Cancelled -= OnCropCancelled;
@@ -75,7 +75,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void OnCropCancelled(object? sender, EventArgs e)
         {
-            if (sender is not CropAction crop) return;
+            if (sender is not CropTool crop) return;
             crop.RoiBoundsChanged -= OnCropRoiBoundsChanged;
             crop.Completed -= OnCropCompleted;
             crop.Cancelled -= OnCropCancelled;
@@ -88,10 +88,10 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Executes the crop operation using the parameters collected by <see cref="CropAction"/>.
+        /// Executes the crop operation using the parameters collected by <see cref="CropTool"/>.
         /// Multi-frame crops run on a background thread with a progress overlay.
         /// </summary>
-        private async Task ExecuteCropAsync(CropAction.CropParameters p)
+        private async Task ExecuteCropAsync(CropTool.CropParameters p)
         {
             if (_currentData == null) return;
 
@@ -248,7 +248,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
-        private void ApplyCropResult(IMatrixData result, CropAction.CropParameters p)
+        private void ApplyCropResult(IMatrixData result, CropTool.CropParameters p)
         {
             // When replacing data the dimensions change, so the saved bounds would be invalid.
             if (!p.ReplaceData)
@@ -296,7 +296,7 @@ namespace MxPlot.UI.Avalonia.Views
                 var newTitle = $"Crop of {Title}";
                 // Replace-data crop discards the old instance, so live followers must be closed
                 // first - see CloseSyncFollowers.
-                SetMatrixData(result, closeSyncFollowers: true);
+                SetMatrixData(result, closeDerivedWindows: true);
                 Title = newTitle;
                 SetDirty(DirtyFlags.Data, true);
             }
@@ -338,9 +338,9 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         internal void SyncApplyCropStart(CropRoiBounds bounds)
         {
-            var crop = new CropAction(CropRole.Follower) { InitialBounds = bounds };
+            var crop = new CropTool(CropRole.Follower) { InitialBounds = bounds };
             crop.Completed += OnSyncedCropCompleted;
-            InvokeAction(crop);
+            InvokeTool(crop);
         }
 
         /// <summary>
@@ -349,7 +349,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         internal void SyncApplyCropRoiChanged(CropRoiBounds bounds)
         {
-            if (_activeAction is CropAction { Role: CropRole.Follower } crop)
+            if (_activeTool is CropTool { Role: CropRole.Follower } crop)
                 crop.SyncUpdateLeaderBounds(bounds);
         }
 
@@ -359,7 +359,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         internal void SyncApplyCropExecute(CropRoiBounds finalLeaderBounds)
         {
-            if (_activeAction is CropAction { Role: CropRole.Follower } crop)
+            if (_activeTool is CropTool { Role: CropRole.Follower } crop)
             {
                 crop.ReplaceData = finalLeaderBounds.ReplaceData;
                 crop.ThisFrameOnly = finalLeaderBounds.ThisFrameOnly;
@@ -372,29 +372,29 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>Cancels the follower crop action on this window.</summary>
         internal void SyncApplyCropCancel()
         {
-            if (_activeAction is CropAction { Role: CropRole.Follower } crop)
+            if (_activeTool is CropTool { Role: CropRole.Follower } crop)
                 crop.ForceCancel();
         }
 
         /// <summary>
-        /// Cancels any active <see cref="CropAction"/> regardless of role.
+        /// Cancels any active <see cref="CropTool"/> regardless of role.
         /// Used when the sync group is dissolved (Unsync or member window closed) while a
         /// Sync Crop is in progress, to avoid orphaned Leader or Follower ROI panels.
         /// </summary>
         internal void CancelActiveCropAction()
         {
-            if (_activeAction is CropAction crop)
+            if (_activeTool is CropTool crop)
                 crop.ForceCancel();
         }
 
-        /// <summary><c>true</c> when a <see cref="CropAction"/> (any role) is currently active.</summary>
-        internal bool HasActiveCropAction => _activeAction is CropAction;
+        /// <summary><c>true</c> when a <see cref="CropTool"/> (any role) is currently active.</summary>
+        internal bool HasActiveCropTool => _activeTool is CropTool;
 
         private async void OnSyncedCropCompleted(object? sender, IMatrixData? _)
         {
-            if (sender is not CropAction crop) return;
+            if (sender is not CropTool crop) return;
             crop.Completed -= OnSyncedCropCompleted;
-            _activeAction = null;
+            _activeTool = null;
 
             var p = crop.Parameters;
             if (p == null) return; // zero-dimension after clamping — skip crop for this window
@@ -419,7 +419,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// When <c>true</c>, appends the 0-based index suffix for scaled axes: "12.500 um (idx:22)".
         /// When <c>false</c>, returns the value only: "12.500 um". Index-based axes always use "i:N".
         /// </param>
-        private static string FormatAxisValue(Axis axis, int index, bool verbose = false)
+        internal static string FormatAxisValue(Axis axis, int index, bool verbose = false)
         {
             if (axis.IsIndexBased)
                 return $"i:{index}";
@@ -772,298 +772,5 @@ namespace MxPlot.UI.Avalonia.Views
             SyncCurrentDataFromView();
             ApplyCompositeFrameIndices();
         }
-
-        // ── Extract Dimension (Extract Along / Extract At) ────────────────────
-
-        private async Task InvokeExtractDimensionAsync()
-        {
-            if (_currentData == null) return;
-            HideMenuPanel();
-
-            var axes = _currentData.Axes;
-            var p = await ExtractDimensionDialog.ShowAsync(this, axes, IsReplaceDataBlocked);
-            if (p == null) return;
-
-            IMatrixData result;
-            string resultTitle;
-            string historyDetail;
-            try
-            {
-                if (p.Mode == ExtractDimensionDialog.ExtractMode.Along)
-                {
-                    // baseIndices must have length == axes.Count (all axes, including the target).
-                    // The target axis slot value is ignored internally, but the array length must match.
-                    int[] baseIndices = axes.Select(a => a.Index).ToArray();
-                    result = _currentData.Apply(new ExtractAlongOperation(p.AxisName, baseIndices));
-
-                    // History: record the fixed positions of all other axes
-                    var otherAxesParts = axes
-                        .Where(a => !string.Equals(a.Name, p.AxisName, StringComparison.OrdinalIgnoreCase))
-                        .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index, verbose: true)}");
-                    historyDetail = $"axis={p.AxisName}; fixed: {string.Join(", ", otherAxesParts)}";
-
-                    var otherTitleParts = axes
-                        .Where(a => !string.Equals(a.Name, p.AxisName, StringComparison.OrdinalIgnoreCase))
-                        .Select(a => $"{a.Name}={FormatAxisValue(a, a.Index)}");
-                    resultTitle = $"{Title} [Along {p.AxisName}, {string.Join(", ", otherTitleParts)}]";
-                }
-                else
-                {
-                    var targetAxis = axes.FindAxis(p.AxisName)!;
-                    result = _currentData.Apply(new SelectByOperation(p.AxisName, targetAxis.Index));
-
-                    historyDetail = $"{p.AxisName}={FormatAxisValue(targetAxis, targetAxis.Index, verbose: true)}";
-
-                    resultTitle = $"{Title} [At {p.AxisName}={FormatAxisValue(targetAxis, targetAxis.Index)}]";
-                }
-            }
-            catch (Exception ex)
-            {
-                await ShowMessageDialogAsync("Extract Failed", ex.Message);
-                return;
-            }
-
-            string modeLabel = p.Mode == ExtractDimensionDialog.ExtractMode.Along
-                ? $"Extract Along {p.AxisName}"
-                : $"Extract At {p.AxisName}";
-            AppendHistory(result, modeLabel, Title, historyDetail);
-
-            if (p.ReplaceData)
-            {
-                var newTitle = Title;
-                SetMatrixData(result, closeSyncFollowers: true);
-                Title = newTitle;
-                SetDirty(DirtyFlags.Data, true);
-            }
-            else
-            {
-                CreateLinked(result, _view.Lut, resultTitle).Show();
-            }
-        }
-
-        // ── Reverse Stack ─────────────────────────────────────────────────────
-
-        private async Task InvokeReverseStackAsync()
-        {
-            if (_currentData == null) return;
-            HideMenuPanel();
-
-            var axes = _currentData.Axes;
-            var p = await ReverseStackDialog.ShowAsync(this, axes, IsReplaceDataBlocked, _currentData);
-            if (p == null)
-                return;
-
-            IMatrixData result;
-            try
-            {
-                result = _currentData.Apply(new ReverseStackOperation(p.AxisName));
-            }
-            catch (OutOfMemoryException)
-            {
-                await ShowMessageDialogAsync("Out of Memory",
-                    "Not enough memory to process this dataset.\nOperation cancelled.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                await ShowMessageDialogAsync("Reverse Stack Failed", ex.Message);
-                return;
-            }
-
-            string detail = p.AxisName == null ? "all frames" : $"axis: {p.AxisName}";
-            AppendHistory(result, "Reverse Stack", Title, detail);
-
-            if (p.ReplaceData)
-            {
-                var newTitle = Title;
-                SetMatrixData(result, closeSyncFollowers: true);
-                Title = newTitle;
-                SetDirty(DirtyFlags.Data, true);
-            }
-            else
-            {
-                MatrixPlotter.Create(result, _view.Lut, $"Reversed {Title}").Show();
-            }
-        }
-
-        // ── Transpose ─────────────────────────────────────────────────────────
-        //
-        // Always opens a new window (never Replace) -- see TransposeDialog's constructor comment
-        // for why: overlays are in screen coordinates keyed to the old width/height, and swapping
-        // XY would misplace every one of them.
-
-        private CancellationTokenSource? _transposeCts;
-
-        private async Task InvokeTransposeAsync()
-        {
-            if (_currentData == null) return;
-            HideMenuPanel();
-
-            bool isMultiFrame = IsThisFrameOnlyAChoice(_currentData);
-            var p = await TransposeDialog.ShowAsync(this, isMultiFrame, _currentData);
-            if (p == null)
-                return;
-
-            // Forced on when Composite mode has no surviving axis besides the composited one --
-            // see IsThisFrameOnlyAChoice's remarks: the checkbox is hidden in that case, but the
-            // composite-cube extraction below must still run so the result re-enters Composite mode.
-            bool thisFrameOnly = p.ThisFrameOnly || (_isCompositeMode && !isMultiFrame);
-            bool singleFrame = thisFrameOnly || !isMultiFrame;
-            int frameIdx = _currentData.ActiveIndex;
-            // Composite + This Frame Only: transpose every channel at the current position
-            // instead of collapsing to whichever one ActiveIndex is pinned to (channel 0).
-            var compositeCube = thisFrameOnly ? TryExtractCompositeFrameCube(_currentData) : null;
-            string detailSuffix = compositeCube != null
-                ? $" ([{BuildCompositeCubeLabel(_currentData, compositeCube.Value.ChannelAxisName)}])"
-                : singleFrame ? $" (frame {frameIdx})" : "";
-
-            IMatrixData result;
-            _transposeCts?.Dispose();
-            _transposeCts = new CancellationTokenSource();
-            var ct = _transposeCts.Token;
-            var progress = BeginProgress("Transposing…", blockInput: true, _transposeCts);
-            try
-            {
-                result = await Task.Run(() =>
-                {
-                    IMatrixData source = compositeCube?.Cube
-                        ?? (singleFrame ? _currentData.Apply(new SliceAtOperation(frameIdx)) : _currentData);
-                    return source.Apply(new TransposeOperation(progress, ct));
-                }, ct);
-            }
-            catch (OperationCanceledException) { return; }
-            catch (OutOfMemoryException)
-            {
-                await ShowMessageDialogAsync("Out of Memory",
-                    "Not enough memory to transpose this dataset.\nOperation cancelled.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                await ShowMessageDialogAsync("Transpose Failed", ex.Message);
-                return;
-            }
-            finally
-            {
-                _transposeCts?.Dispose();
-                _transposeCts = null;
-                EndProgress();
-            }
-
-            AppendHistory(result, "Transpose", Title, detailSuffix.Trim(' ', '(', ')'));
-
-            string resultTitle = $"Transposed {Title}";
-            MatrixPlotter resultPlotter;
-            if (p.SyncSource && singleFrame)
-            {
-                resultPlotter = CreateLinked(result, _view.Lut, resultTitle, linkRefresh: false);
-                CopyRangeAndLutStateTo(resultPlotter);
-                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
-                resultPlotter.Show();
-                StartTransposeSync(resultPlotter, this);
-            }
-            else
-            {
-                resultPlotter = MatrixPlotter.Create(result, _view.Lut, resultTitle);
-                CopyRangeAndLutStateTo(resultPlotter);
-                if (compositeCube != null) SeedChildCompositeMode(resultPlotter, result, compositeCube.Value.ChannelAxisName);
-                resultPlotter.Show();
-            }
-        }
-
-        /// <summary>
-        /// Keeps <paramref name="follower"/> showing the transpose of whatever <paramref name="source"/>
-        /// currently displays. Mirrors <see cref="StartFilterSync"/>.
-        /// </summary>
-        private static void StartTransposeSync(MatrixPlotter follower, MatrixPlotter source)
-        {
-            _ = new LinkedView(follower, source, (src, ct) =>
-            {
-                var sourceData = src.MatrixData;
-                if (sourceData == null) return Task.FromResult<LinkedViewUpdate?>(null);
-
-                var compositeCube = src.TryExtractCompositeFrameCube(sourceData);
-                IMatrixData opSource = compositeCube?.Cube
-                    ?? sourceData.Apply(new SliceAtOperation(sourceData.ActiveIndex));
-
-                return Task.Run<LinkedViewUpdate?>(() =>
-                {
-                    var updated = opSource.Apply(new TransposeOperation(CancellationToken: ct));
-                    return new LinkedViewUpdate(updated, compositeCube?.ChannelAxisName);
-                }, ct);
-            });
-        }
-
-        /// <summary>
-        /// Collapses the Channel axis into a single grayscale channel.
-        /// </summary>
-        /// <remarks>
-        /// Shows the standard processing dialog so the user can choose whether to replace the
-        /// current window or open the result in a new one. The grayscale weights are still
-        /// determined automatically from the channel tags (Rec.709 luma for an R/G/B triplet,
-        /// mean otherwise).
-        /// </remarks>
-        private async Task InvokeConvertToGrayscaleAsync()
-        {
-            if (_currentData == null) return;
-            HideMenuPanel();
-
-            var channelAxis = _currentData.Axes.FindAxis("Channel");
-            if (channelAxis == null) return;
-
-            var dlg = await GrayscaleDialog.ShowAsync(this, IsReplaceDataBlocked, _currentData);
-            if (dlg == null)
-                return;
-
-            bool luma = ColorAxis.IsRgbTriplet(channelAxis);
-            int channelCount = channelAxis.Count;
-
-            IMatrixData result;
-            _grayscaleCts?.Dispose();
-            _grayscaleCts = new CancellationTokenSource();
-            var ct = _grayscaleCts.Token;
-            var progress = BeginProgress("Converting to grayscale…", blockInput: true, _grayscaleCts);
-            try
-            {
-                result = await Task.Run(() => _currentData.Apply(
-                    new GrayscaleOperation(channelAxis.Name, GrayscaleMethod.Auto, progress, ct)), ct);
-            }
-            catch (OperationCanceledException) { return; }
-            catch (OutOfMemoryException)
-            {
-                await ShowMessageDialogAsync("Out of Memory",
-                    "Not enough memory to process this dataset.\nOperation cancelled.");
-                return;
-            }
-            catch (Exception ex)
-            {
-                await ShowMessageDialogAsync("Convert to Grayscale Failed", ex.Message);
-                return;
-            }
-            finally
-            {
-                _grayscaleCts?.Dispose();
-                _grayscaleCts = null;
-                EndProgress();
-            }
-
-            string detail = luma
-                ? $"{channelCount} channels, Rec.709 luma"
-                : $"{channelCount} channels, mean";
-            AppendHistory(result, "Convert to Grayscale", Title, detail);
-
-            if (dlg.ReplaceData)
-            {
-                var newTitle = Title;
-                SetMatrixData(result, closeSyncFollowers: true);
-                Title = newTitle;
-                SetDirty(DirtyFlags.Data, true);
-            }
-            else
-            {
-                MatrixPlotter.Create(result, _view.Lut, $"Grayscale of {Title}").Show();
-            }
-        }
-
     }
 }
