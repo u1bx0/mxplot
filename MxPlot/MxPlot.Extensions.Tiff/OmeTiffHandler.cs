@@ -170,12 +170,12 @@ namespace MxPlot.Extensions.Tiff
             }
             else
             {
-                throw new NotSupportedException($"{data.ValueType} is not supported for OMETiffHanlder.");
+                throw new NotSupportedException($"{data.ElementType.Type} is not supported for OMETiffHanlder.");
             }
 
         }
 
-        public static IMatrixData Load(string filename, LoadingMode mode = LoadingMode.Auto, IProgress<int>? progress = null, int maxParallelDegree = 0, CancellationToken ct = default)
+        public static IMatrixData Load(string filename, LoadingMode mode = LoadingMode.Auto, IProgress<int>? progress = null, int maxParallelDegree = -1, CancellationToken ct = default)
         {
             // Measure load time
             Stopwatch sw = new Stopwatch();

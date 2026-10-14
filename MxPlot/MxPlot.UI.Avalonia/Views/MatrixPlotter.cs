@@ -304,6 +304,8 @@ namespace MxPlot.UI.Avalonia.Views
         // so alpha transparency correctly shows the underlying view content)
         private Border? _menuPanel;
         private Border? _zoomFlyout;
+        private Border? _groupsFlyout;
+        private Func<IEnumerable<Action<bool>>>? _groupsFlyoutExpanders;
         private Button? _hamburgerBtn;
         private StackPanel? _scaleTabBody;  // info tab content, rebuilt on SetMatrixData()
         private ListBox? _metaKeyList;
@@ -417,6 +419,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         // ── Scale/Axis revert state ─────────────────────────────────────────
         private Button? _scaleRevertBtn;
+        private CheckBox? _squarePixelsCheck;
 
         /// <summary>
         /// Snapshot of X/Y scale and per-axis scale/unit captured when data is loaded or last saved.
@@ -625,6 +628,19 @@ namespace MxPlot.UI.Avalonia.Views
         /// to trigger downstream re-computation.
         /// </summary>
         public event EventHandler? Refreshed;
+
+        /// <summary>
+        /// Raised on the UI thread after the value mode the data is shown in (the view's
+        /// <see cref="ComplexValueMode"/>) changes. Sync windows that reduced a multi-mode source to single
+        /// values recompute on it.
+        /// </summary>
+        internal event EventHandler? ComplexValueModeChanged;
+
+        /// <summary>
+        /// The value mode the data is shown in, as an index into <see cref="ElementType.ValueModes"/>: the
+        /// selected <see cref="ComplexValueMode"/> for Complex data, and 0 for anything else.
+        /// </summary>
+        internal int DisplayedValueMode => _currentData is { } data ? _view.ShownValueMode(data) : 0;
 
         /// <summary>
         /// Fired on the UI thread whenever the display bitmap is updated —
@@ -865,7 +881,10 @@ namespace MxPlot.UI.Avalonia.Views
         {
             SetDirty(DirtyFlags.Scale, dirty);
             if (!_reentrancy.IsActive(GuardContext.Initializing))
+            {
                 UpdateScaleRevertButton();
+                UpdateSquarePixelsCheck();
+            }
         }
 
         private void UpdateScaleRevertButton()
@@ -2159,8 +2178,7 @@ namespace MxPlot.UI.Avalonia.Views
                 return;
             }
 
-            int valueMode = data.ValueType == typeof(System.Numerics.Complex)
-                ? (int)_view.ComplexValueMode : 0;
+            int valueMode = data.ElementType.ClampMode((int)_view.ComplexValueMode);
 
             int invalidCount;
             if (valueMode == 0)
@@ -2200,9 +2218,9 @@ namespace MxPlot.UI.Avalonia.Views
             double min, max;
             bool imperfect;
 
-            // For Complex data: use the current display mode; for primitives: always mode 0
-            int valueMode = data.ValueType == typeof(System.Numerics.Complex)
-                ? (int)_view.ComplexValueMode : 0;
+            // For a multi-mode element type: use the current display mode; for a single-mode type
+            // (the common case): always mode 0.
+            int valueMode = data.ElementType.ClampMode((int)_view.ComplexValueMode);
 
             int invalidCount = 0;
             // Non-Virtual data with many unscanned frames (e.g. a fully cached Lazy decode) scans in
@@ -2476,8 +2494,7 @@ namespace MxPlot.UI.Avalonia.Views
 
                 int frameIndex = _currentData.ActiveIndex;
                 var data = _currentData;  // Capture for background thread
-                var complexValueMode = _view.ComplexValueMode;
-                int valueMode = (int)complexValueMode;
+                int valueMode = DisplayedValueMode;
 
                 // Calculate bin count parameters on UI thread
                 double viewRange = Math.Max(1e-9, viewMax - viewMin);
@@ -2487,7 +2504,7 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     // Determine the histogram calculation range (actual data range)
                     double vMin, vMax;
-                    if (data.ValueType == typeof(System.Numerics.Complex))
+                    if (data.ElementType.ValueModeCount > 1)
                         (vMin, vMax) = data.GetValueRange(frameIndex, valueMode);
                     else
                         (vMin, vMax) = data.GetValueRange(frameIndex);
@@ -2499,12 +2516,9 @@ namespace MxPlot.UI.Avalonia.Views
 
                     // Create histogram
                     int[] hist;
-                    if (data.ValueType == typeof(System.Numerics.Complex))
+                    if (data is MatrixData<System.Numerics.Complex> complexData)
                     {
-                        var complexData = (MatrixData<System.Numerics.Complex>)data;
-                        var converter = ComplexValueModeConverter.GetConverter(complexValueMode);
-
-                        hist = complexData.CreateHistogram(frameIndex, bins, valueMode, converter, vMin, vMax);
+                        hist = complexData.CreateHistogram(frameIndex, bins, valueMode, null, vMin, vMax);
                     }
                     else
                     {
@@ -2529,7 +2543,7 @@ namespace MxPlot.UI.Avalonia.Views
             catch (Exception ex)
             {
                 Debug.WriteLine($"[UpdateHistogram] Error: {ex.Message}");
-                Debug.WriteLine($"  LutDepth={level}, FrameIndex={_currentData.ActiveIndex}, DataType={_currentData.ValueType.Name}");
+                Debug.WriteLine($"  LutDepth={level}, FrameIndex={_currentData.ActiveIndex}, DataType={_currentData.ElementType.Type.Name}");
             }
         }
 
@@ -2687,27 +2701,32 @@ namespace MxPlot.UI.Avalonia.Views
                 _ => $"{totalBytes} B"
             };
 
-            string typeLabel = data.ValueTypeName;
-            if (data.ValueType == typeof(System.Numerics.Complex))
+            // A multi-mode type shows the mode it is displayed in, e.g. "Complex (Mag)" or "Vector3 (Length)".
+            var elementType = data.ElementType;
+            string typeLabel = elementType.Name;
+            string? modeName = null;
+            if (elementType.ValueModeCount > 1)
             {
-                string modeLabel = _view.ComplexValueMode switch
-                {
-                    ComplexValueMode.Magnitude => "Mag",
-                    ComplexValueMode.Real => "Real",
-                    ComplexValueMode.Imaginary => "Imag",
-                    ComplexValueMode.Phase => "Phase",
-                    ComplexValueMode.Power => "Power",
-                    _ => _view.ComplexValueMode.ToString(),
-                };
-                typeLabel = $"Complex ({modeLabel})";
+                int mode = _view.ShownValueMode(data);
+                modeName = elementType.ValueModes[mode].Name;
+                // Complex's two long mode names are shortened to keep the status bar compact.
+                string shortName = data is MatrixData<System.Numerics.Complex>
+                    ? (ComplexValueMode)mode switch
+                    {
+                        ComplexValueMode.Magnitude => "Mag",
+                        ComplexValueMode.Imaginary => "Imag",
+                        _ => modeName,
+                    }
+                    : modeName;
+                typeLabel = $"{elementType.Name} ({shortName})";
             }
 
             _infoText.Text = $"[{typeLabel}]  {sizeStr}";
             string tooltip = $"{data.XCount}×{data.YCount}";
             if (data.FrameCount > 1) tooltip += $"  |  {data.FrameCount} frames";
-            tooltip += $"  |  {data.ValueTypeName}";
-            if (data.ValueType == typeof(System.Numerics.Complex))
-                tooltip += $"  |  Mode: {_view.ComplexValueMode}";
+            tooltip += $"  |  {elementType.Name}";
+            if (modeName != null)
+                tooltip += $"  |  Mode: {modeName}";
             ToolTip.SetTip(_infoText, tooltip);
             UpdateVirtualBadge(data);
             _zoomText.Text = $"  {zoomStr}";

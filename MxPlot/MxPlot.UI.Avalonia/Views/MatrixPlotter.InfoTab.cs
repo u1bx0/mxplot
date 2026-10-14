@@ -89,7 +89,73 @@ namespace MxPlot.UI.Avalonia.Views
             }
             //Debug.WriteLine("Rebuild Axis Info");
             _scaleTabBody.Children.Add(BuildAxisInfoGrid(data));
+
+            // The check is created once, but the menu panel (and with it _scaleTabBody) is rebuilt
+            // by InvalidateMenuPanel, which leaves the check inside the discarded body.
+            var squarePixelsCheck = EnsureSquarePixelsCheck();
+            (squarePixelsCheck.Parent as Panel)?.Children.Remove(squarePixelsCheck);
+            _scaleTabBody.Children.Add(squarePixelsCheck);
+            UpdateSquarePixelsCheck();
             UpdateScaleRevertButton();
+        }
+
+        private CheckBox EnsureSquarePixelsCheck()
+        {
+            if (_squarePixelsCheck != null)
+                return _squarePixelsCheck;
+
+            var chk = ControlFactory.MakeCheckBox("Display as square pixels");
+            // Half a row of air below the axis table; the bottom margin stays negative to cancel
+            // the layout space the 75% render transform leaves unused.
+            chk.Margin = new Thickness(4, 6, 4, -7);
+            chk.HorizontalAlignment = HorizontalAlignment.Left;
+            ToolTip.SetShowOnDisabled(chk, true);
+            chk.IsCheckedChanged += (_, _) =>
+            {
+                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
+                _orthoController.SetAspectCorrection(chk.IsChecked != true);
+            };
+            _squarePixelsCheck = chk;
+            return chk;
+        }
+
+        private void OnViewAspectCorrectionChanged(object? sender, EventArgs e)
+        {
+            if (_orthoController.IsSettingAspectCorrection || sender is not MxView view) return;
+            _orthoController.SetAspectCorrection(view.IsAspectCorrectionEnabled);
+            UpdateSquarePixelsCheck();
+        }
+
+        // One switch for the XY view and, when shown, the orthogonal side views. Data with more
+        // than one frame is treated as a volume: its label and tooltip speak of voxels.
+        private void UpdateSquarePixelsCheck()
+        {
+            var chk = _squarePixelsCheck;
+            if (chk == null) return;
+
+            var data = _currentData;
+            bool multiFrame = data != null && data.FrameCount > 1;
+            bool stepsDiffer = false;
+            if (data != null && data.XStep > 0)
+            {
+                bool Differs(double step) => step > 0 && Math.Abs(data.XStep - step) > 1e-6 * Math.Max(data.XStep, step);
+                stepsDiffer = Differs(data.YStep);
+                if (multiFrame)
+                    foreach (var axis in data.Axes)
+                        stepsDiffer |= axis.Count > 1 && Differs(axis.Step);
+            }
+            bool isOn = !_view.IsAspectCorrectionEnabled;
+
+            using var _ = _reentrancy.Begin(GuardContext.UiSync);
+            chk.IsChecked = isOn;
+            // A checked box stays operable so it can always be unchecked.
+            chk.IsEnabled = stepsDiffer || isOn;
+            chk.Content = multiFrame ? "Display as cubic voxels" : "Display as square pixels";
+            ToolTip.SetTip(chk, !stepsDiffer && !isOn
+                ? "The step sizes are identical, so there is nothing to correct."
+                : multiFrame
+                    ? "Ignore the step sizes and draw every voxel as a cube, in the XY view and the orthogonal views."
+                    : "Ignore the XY step sizes and draw every data pixel as a square.");
         }
 
         /// <summary>

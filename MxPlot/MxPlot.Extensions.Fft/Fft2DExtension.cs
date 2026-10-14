@@ -8,10 +8,12 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Transactions;
@@ -30,6 +32,9 @@ namespace MxPlot.Extensions.Fft
     /// - MathNet.Numerics.MKL.Win-x64
     /// - MathNet.Numerics.Providers.MKL
     /// For managed-only usage, MathNet.Numerics is sufficient.
+    /// Instead of referencing those two native packages, an application may also have the three
+    /// files they contain copied next to its executable after it was built; see
+    /// <see cref="MklProviderAssemblyPath"/> and <see cref="FindMklNativeLibrary"/>.
     /// </summary>
     public static class Fft2DExtension
     {
@@ -85,7 +90,7 @@ namespace MxPlot.Extensions.Fft
                 UseManaged();
             }
 
-            Debug.WriteLine("[FFTExtensionMkl] Provider: " + GetMathNetLinearAlgebraProvider());
+            Debug.WriteLine("[FFTExtensionMkl] Provider: " + FourierProviderDescription);
         }
 
 
@@ -96,6 +101,8 @@ namespace MxPlot.Extensions.Fft
         {
             if (RuntimeInformation.ProcessArchitecture == Architecture.X64)
             {
+                TryLoadMklProviderAssembly();
+
                 try
                 {
                     if (MathNet.Numerics.Control.TryUseNativeMKL())
@@ -107,6 +114,111 @@ namespace MxPlot.Extensions.Fft
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Simple name of the managed assembly that carries the Math.NET MKL providers.
+        /// </summary>
+        public const string MklProviderAssemblyName = "MathNet.Numerics.Providers.MKL";
+
+        /// <summary>
+        /// The path the MKL provider assembly is loaded from when the application does not
+        /// reference its NuGet package: the file of that name next to the running executable.
+        /// </summary>
+        public static string MklProviderAssemblyPath { get; } =
+            Path.Combine(AppContext.BaseDirectory, MklProviderAssemblyName + ".dll");
+
+        /// <summary>
+        /// Description of the Fourier transform provider Math.NET Numerics is currently using,
+        /// for example "Intel MKL (x64; revision 15; MKL 2022.0)" or "Managed".
+        /// </summary>
+        public static string FourierProviderDescription =>
+            MathNet.Numerics.Providers.FourierTransform.FourierTransformControl.Provider?.ToString() ?? "Managed";
+
+        /// <summary>
+        /// Whether the MKL provider assembly is loaded into the process, either because the
+        /// application references its package or because it was loaded from
+        /// <see cref="MklProviderAssemblyPath"/>.
+        /// </summary>
+        public static bool IsMklProviderAssemblyLoaded()
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                if (string.Equals(assembly.GetName().Name, MklProviderAssemblyName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Full path of the Intel MKL native library, or <see langword="null"/> when it is not
+        /// present. The directories searched are the ones Math.NET Numerics itself probes, so a
+        /// non-null result means the library is where the loader would find it. Intel ships MKL
+        /// for Windows and Linux only, so any other platform always yields <see langword="null"/>.
+        /// </summary>
+        public static string? FindMklNativeLibrary()
+        {
+            string fileName;
+            string rid;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                fileName = "libMathNetNumericsMKL.dll";
+                rid = "win-x64";
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            {
+                fileName = "libMathNetNumericsMKL.so";
+                rid = "linux-x64";
+            }
+            else
+            {
+                return null;
+            }
+
+            string baseDirectory = AppContext.BaseDirectory;
+            string[] candidates =
+            {
+                Path.Combine(baseDirectory, fileName),
+                Path.Combine(baseDirectory, "x64", fileName),
+                Path.Combine(baseDirectory, "runtimes", rid, "native", fileName),
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (File.Exists(candidate))
+                    return candidate;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Makes the MKL provider assembly resolvable by <see cref="MathNet.Numerics.Control.TryUseNativeMKL"/>,
+        /// which looks the provider up by assembly-qualified type name.
+        /// An application that does not reference the MathNet.Numerics.Providers.MKL package has no
+        /// entry for it in its deps.json, and the default load context builds its assembly list from
+        /// that file rather than by scanning the application directory, so a DLL merely copied next
+        /// to the executable stays invisible to Assembly.Load. Loading it by path puts it into the
+        /// default context, after which resolution by name succeeds.
+        /// Runs from the static constructor, so it must never let an exception escape: a failure
+        /// here would make the whole type permanently unusable for the lifetime of the process.
+        /// </summary>
+        private static void TryLoadMklProviderAssembly()
+        {
+            if (IsMklProviderAssemblyLoaded())
+                return;
+
+            if (!File.Exists(MklProviderAssemblyPath))
+                return;
+
+            try
+            {
+                AssemblyLoadContext.Default.LoadFromAssemblyPath(MklProviderAssemblyPath);
+            }
+            catch (Exception ex)
+            {
+                // A damaged file, or one built for another architecture.
+                Debug.WriteLine($"[FFTExtensionMkl] MKL provider assembly load failed: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -153,11 +265,6 @@ namespace MxPlot.Extensions.Fft
             {
                 Trace.WriteLine("[FFTExtensionMkl] MKL is not available. Cannot switch to MKL provider.");
             }
-        }
-
-        public static string GetMathNetLinearAlgebraProvider()
-        {
-            return MathNet.Numerics.Control.NativeProviderPath;
         }
 
         #endregion

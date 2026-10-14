@@ -45,6 +45,8 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly ViewRow _xyRow;
         private readonly ViewRow _xzRow;
         private readonly ViewRow _yzRow;
+        private readonly StackPanel _rowsPanel;
+        private readonly TextBlock _unavailableLabel;
 
         private bool _suppressEvents;
         private bool _compositeActive;
@@ -276,16 +278,39 @@ namespace MxPlot.UI.Avalonia.Controls
             _xzRow = CreateViewRow("X-Z (Y Projection)", ProjectionPlane.XZ);
             _yzRow = CreateViewRow("Z-Y (X Projection)", ProjectionPlane.YZ);
 
-            var stack = new StackPanel
+            _rowsPanel = new StackPanel
             {
                 Spacing = 4,
                 Margin = new Thickness(6, 4),
             };
-            stack.Children.Add(_xyRow.Panel);
-            stack.Children.Add(_xzRow.Panel);
-            stack.Children.Add(_yzRow.Panel);
+            _rowsPanel.Children.Add(_xyRow.Panel);
+            _rowsPanel.Children.Add(_xzRow.Panel);
+            _rowsPanel.Children.Add(_yzRow.Panel);
 
-            Content = stack;
+            _unavailableLabel = new TextBlock
+            {
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.8,
+                Margin = new Thickness(6, 4),
+                IsVisible = false,
+            };
+
+            var host = new StackPanel();
+            host.Children.Add(_rowsPanel);
+            host.Children.Add(_unavailableLabel);
+            Content = host;
+        }
+
+        /// <summary>
+        /// Replaces the projection controls with <paramref name="message"/> for data that cannot be
+        /// projected; <c>null</c> brings the controls back.
+        /// </summary>
+        public void SetUnavailable(string? message)
+        {
+            _unavailableLabel.Text = message;
+            _unavailableLabel.IsVisible = message != null;
+            _rowsPanel.IsVisible = message == null;
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────

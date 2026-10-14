@@ -211,6 +211,21 @@ namespace MxPlot.UI.Avalonia.Helpers
             double itemHeight = 20,
             bool initiallyExpanded = true, double indent = 0,
             FontWeight headerFontWeight = default)
+            => MakeMenuGroup(header, items, out _, icon, headerFontSize, arrowFontSize,
+                itemHeight, initiallyExpanded, indent, headerFontWeight);
+
+        /// <summary>
+        /// Same as <see cref="MakeMenuGroup(string, Control[], Geometry?, double, double, double, bool, double, FontWeight)"/>,
+        /// plus <paramref name="setExpanded"/> -- a delegate that opens/closes the group from
+        /// outside, for callers that need to drive several groups at once (e.g. a tab's
+        /// "Expand All" / "Collapse All" context menu).
+        /// </summary>
+        internal static Control MakeMenuGroup(string header, Control[] items,
+            out Action<bool> setExpanded,
+            Geometry? icon = null, double headerFontSize = 12, double arrowFontSize = 10,
+            double itemHeight = 20,
+            bool initiallyExpanded = true, double indent = 0,
+            FontWeight headerFontWeight = default)
         {
             var arrow = new TextBlock
             {
@@ -268,11 +283,13 @@ namespace MxPlot.UI.Avalonia.Helpers
             hdrBtn.Classes.Add("menuitem");
             var childStack = new StackPanel { Spacing = 1, IsVisible = initiallyExpanded };
             foreach (var item in items) childStack.Children.Add(item);
-            hdrBtn.Click += (_, _) =>
+            void SetExpanded(bool expanded)
             {
-                childStack.IsVisible = !childStack.IsVisible;
-                arrow.Text = childStack.IsVisible ? "∧" : "∨";
-            };
+                childStack.IsVisible = expanded;
+                arrow.Text = expanded ? "∧" : "∨";
+            }
+            hdrBtn.Click += (_, _) => SetExpanded(!childStack.IsVisible);
+            setExpanded = SetExpanded;
             var group = new StackPanel();
             group.Children.Add(hdrBtn);
             group.Children.Add(childStack);

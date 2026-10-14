@@ -25,6 +25,7 @@ namespace MxPlot.UI.Avalonia.Commands
         {
             Choices = choices,
             FailureTitle = "Filter Failed",
+            WorksOnScalars = true,
             Progress = ProgressMode.WholeStackOnly,
             ProgressLabel = $"Applying {KernelLabel(p.Kernel)}…",
             CreateOperation = run => new SpatialFilterOperation(p.Kernel, run.Progress, run.Token),

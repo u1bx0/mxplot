@@ -241,6 +241,39 @@ namespace MxPlot.Core.Processing
         }
     }
 
+    /// <summary>
+    /// Returns the mean pixel value of every slice along the axis, i.e. how the signal is
+    /// distributed along it (an axial intensity profile).<br/>
+    /// <c>e.g. double[] profile = src.Apply(new AxisProfileOperation("Z"));</c>
+    /// </summary>
+    /// <remarks>
+    /// The whole axis is read, whatever sub-range a caller is interested in; the other axes are held
+    /// at <paramref name="BaseIndices"/> (the current active indices when <c>null</c>). NaN pixels are
+    /// ignored. Restricted to numeric element types (<c>INumber&lt;T&gt;</c>).
+    /// </remarks>
+    /// <param name="AxisName">The axis to profile; empty selects the first axis.</param>
+    /// <param name="BaseIndices">Optional indices to hold the other axes at.</param>
+    public record AxisProfileOperation(string AxisName = "", int[]? BaseIndices = null)
+       : IVolumeOperation<double[]>
+    {
+        /// <exception cref="NotSupportedException">Thrown if T is not a numeric type.</exception>
+        public double[] Execute<T>(VolumeAccessor<T> accessor) where T : unmanaged
+        {
+            dynamic vol = accessor;
+
+            try
+            {
+                return VolumeAccessorExtensions.CreateAxisProfile(vol);
+            }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+            {
+                throw new NotSupportedException(
+                    $"Type '{typeof(T).Name}' does not support AxisProfile operations. " +
+                    "AxisProfile requires numeric types (INumber<T>).");
+            }
+        }
+    }
+
     public record OrthogonalProjectionsOperation(ProjectionMode Mode, string AxisName = "", int[]? BaseIndices = null,
         int numThreads = -1, IMatrixData? dstXZ = null, int dstXZIndex = 0, IMatrixData? dstYZ = null, int dstYZIndex = 0)
        : IVolumeOperation<(IMatrixData XZ, IMatrixData YZ)>

@@ -83,6 +83,7 @@ namespace MxPlot.UI.Avalonia.Views
             private readonly EventHandler _refreshedHandler;
             private readonly EventHandler? _activeIndexHandler;
             private readonly EventHandler<IMatrixData?>? _dataReplacedHandler;
+            private readonly EventHandler _valueModeHandler;
 
             // The instance subscribed to, not source.MatrixData as it stands at teardown time: if
             // the source swapped its data in the meantime, unsubscribing from the current instance
@@ -144,6 +145,17 @@ namespace MxPlot.UI.Avalonia.Views
                     _dataReplacedHandler = (_, _) => _follower.Close();
                     source.MatrixDataChanged += _dataReplacedHandler;
                 }
+
+                // A follower that reduced a multi-mode source to single values read them in the source's
+                // value mode, so it is recomputed when that mode changes. A follower that kept the element
+                // type (Transpose, ROI, ...) does not depend on the mode.
+                _valueModeHandler = (_, _) =>
+                {
+                    if (_source.MatrixData?.ElementType.ValueModeCount > 1
+                        && _follower.MatrixData?.ElementType.ValueModeCount == 1)
+                        Fire();
+                };
+                source.ComplexValueModeChanged += _valueModeHandler;
 
                 source.Closed += OnSourceClosed;
                 follower.Closed += OnFollowerClosed;
@@ -227,6 +239,7 @@ namespace MxPlot.UI.Avalonia.Views
                 _cts = null;
 
                 _source.Refreshed -= _refreshedHandler;
+                _source.ComplexValueModeChanged -= _valueModeHandler;
                 if (_activeIndexHandler != null && _subscribedData != null)
                     _subscribedData.ActiveIndexChanged -= _activeIndexHandler;
                 if (_dataReplacedHandler != null)

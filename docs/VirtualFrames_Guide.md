@@ -35,7 +35,7 @@ materialized depends on the backend:
 
 | Backend | How a frame is read | Typical source |
 |---|---|---|
-| **MMF** (`MmfFrames<T>` family) | Raw bytes copied from a memory-mapped file | Uncompressed `.mxd`, uncompressed OME-TIFF / ImageJ packed TIFF |
+| **MMF** (`MmfFrames<T>` family) | Raw bytes copied from a memory-mapped file | Uncompressed `.mxd`, uncompressed OME-TIFF / ImageJ TIFF |
 | **Lazy decode** (`TiffDecodedFrames<T>`) | Real per-frame decode through LibTiff | Compressed multi-IFD TIFF (OME-TIFF / ImageJ) |
 
 Key properties compared to InMemory:
@@ -181,6 +181,14 @@ difference between them is the `flipY` constructor argument.
   faster than the parallel InMemory loader (0.47 s).
 - **Frame addressing:** frames are located through `TiffIfdIndex` (IFD offsets collected once)
   rather than LibTiff.NET's directory numbers, which are `Int16` and break past 32,767 frames.
+- **Resident state:** when the dataset fits the capacity computed at construction, the instance
+  becomes *resident* as soon as every frame is cached. It closes the main handle, so the file is
+  no longer held open (it can be moved, deleted or overwritten), and vetoes all further eviction
+  (`CanEvict`), so `IsVirtual` stays `false` even through a later `TrimCacheTo`. From then on the
+  data behaves exactly like an InMemory load. A dataset that fits only a temporarily raised
+  capacity (Volume mode) never becomes resident, because that capacity is trimmed back when the
+  orthogonal view closes. Nothing is added to `MatrixData` or `IMatrixData` for this: residency is
+  observed as `IsVirtual == false`, as before.
 
 ---
 
@@ -315,6 +323,35 @@ var format = new OmeTiffFormat { LoadingMode = LoadingMode.Auto };
 var md = format.Read("large.ome.tif");   // Virtual if file > 2 GB or frames > 1000
 ```
 
+### Asking a reader before loading: `ProbeVirtualLoad`
+
+`IVirtualLoadable.ProbeVirtualLoad(path)` reports, without reading pixel data, which backend a
+Virtual load would use (`VirtualBackendKind`: `None`, `Mapped`, `Decoded`, or `Unknown`) and the
+frame count. The TIFF readers implement it with the same decision code as their `Read`; the
+default implementation returns `Unknown`. It does not change what `LoadingMode.Auto` resolves to.
+
+The reference app (`MxPlot.App`) uses it in `LoadingModePolicy`, with one size threshold,
+`LargeFileThresholdBytes` (500 MB):
+
+| Probe result | Below the threshold | From the threshold up |
+|---|---|---|
+| `Decoded` | InMemory | Virtual without asking; becomes resident when it fits the memory budget |
+| `Mapped` / `Unknown` | InMemory | Asks the user |
+| `None` | InMemory | InMemory |
+
+Shift held on drop always asks. Below the threshold the app passes `LoadingMode.InMemory`
+explicitly, so `VirtualPolicy`'s thresholds do not apply there.
+
+Small files load InMemory because a parallel InMemory load is fast enough and leaves no
+intermediate state. Measured on a 32-core machine with real LZW files of about 250 MB and about
+1,000 frames: a parallel InMemory load took 0.18–0.32 s, while Lazy decode opened in 10–50 ms and
+was fully resident after 0.2–0.3 s. Load time grows with the decoded size, so large compressed
+files open as Lazy decode instead.
+
+Both TIFF readers' `MaxParallelDegree` defaults to `-1` (all logical cores) for InMemory loading.
+Only compressed data is decoded in parallel; uncompressed data is I/O-bound and always reads
+sequentially (`TiffFrameCodec.ResolveLoadThreads`).
+
 ### Which backend the TIFF readers choose
 
 | Reader | File layout | Virtual backend |
@@ -324,7 +361,8 @@ var md = format.Read("large.ome.tif");   // Virtual if file > 2 GB or frames > 1
 | OME-TIFF | Compressed | `TiffDecodedFrames<T>` (Lazy decode) |
 | ImageJ TIFF | Uncompressed single-IFD "packed" stack | `StrippedMmfFrames<T>` (fixed-stride offsets) |
 | ImageJ TIFF | Compressed multi-IFD | `TiffDecodedFrames<T>` (Lazy decode) |
-| ImageJ TIFF | Uncompressed multi-IFD (not packed) | Always InMemory (no IFD offset scan implemented) |
+| ImageJ TIFF | Uncompressed multi-IFD, strips, one sample per pixel | `StrippedMmfFrames<T>` (same strip scan as OME-TIFF) |
+| ImageJ TIFF | Other multi-IFD (tiled, multi-sample) | `TiffDecodedFrames<T>` (Lazy decode) |
 
 ---
 
@@ -515,6 +553,5 @@ restores the saved strategy first, then the capacity via `TrimCacheTo`. This wor
 | Lazy decode throughput | ✅ Parallel | One LibTiff handle per background worker; `MaxConcurrentPreloads` defaults to half the cores. |
 | TIFF with more than 32,767 frames | ✅ Supported | Frames addressed by IFD offset (`TiffIfdIndex`). |
 | Background preloads racing `WriteDirectly` | ⚠ Open | A frame read before a direct write can land in the cache after it; needs per-frame versioning. |
-| Uncompressed non-packed ImageJ TIFF | ⚠ InMemory only | No IFD offset scan for the MMF route in `ImageJTiffHandler`. |
 | Cache Monitor window | ⚠ MMF only | Lazy-decode data shows the `(Cached NN%)` badge but has no monitor window. |
 | Cross-volume `SaveAs` fast-path | ⚠ Falls back to copy | `File.Move` fails across volumes; `SaveAs` falls back to `MatrixDataSerializer.Save`. |

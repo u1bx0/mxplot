@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net10.0 only, matching MxPlot.App: a plugin DLL runs inside MxPlot.App's own process
+         (loaded via Assembly.LoadFrom), so it must target the same framework MxPlot.App does. -->
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>AnyCPU</Platforms>
+    <Description>Plugin contract (IMxPlotAppPlugin/IMxPlotAppContext) for extending MxPlot.App's Tools menu.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\MxPlot.UI.Avalonia\MxPlot.UI.Avalonia.csproj" />
+  </ItemGroup>
+
+</Project>

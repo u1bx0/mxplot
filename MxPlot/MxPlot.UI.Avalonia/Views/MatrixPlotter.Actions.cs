@@ -455,7 +455,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (_currentData is null) return Task.CompletedTask;
 
             // Complex data: show Convert Complex dialog
-            if (_currentData.ValueType == typeof(System.Numerics.Complex))
+            if (_currentData is MatrixData<System.Numerics.Complex>)
             {
                 ConvertComplexValueAsync();
                 return Task.CompletedTask;

@@ -56,7 +56,8 @@ namespace MxPlot.Core
         private readonly Dictionary<T[], ValueRange> _valueRangeMap = new Dictionary<T[], ValueRange>();
         
         /// <summary>
-        /// MinMaxFinder for this type. May be null for custom structs until registered.
+        /// The MinMaxFinder this instance uses. Starts as the registered default for T; see
+        /// <see cref="SetMinMaxFinder"/>.
         /// </summary>
         private MinMaxFinder? _minMaxFinder = _registeredDefaultFinder;
 
@@ -74,12 +75,16 @@ namespace MxPlot.Core
         private int _activeIndex = 0;
 
         /// <summary>
-        /// Initializes static members of the MatrixData class and registers the default MinMaxFinder for common types.
+        /// Registers T if it is a built-in element type (a primitive numeric type or <see cref="Complex"/>):
+        /// its element type, value provider, MinMaxFinder and, for <see cref="Complex"/>, interpolator.
+        /// A custom struct stays unregistered until <see cref="Register"/> is called.
         /// </summary>
         static MatrixData()
         {
             _registeredDefaultFinder = CreateBuiltInMinMaxFinder();
             _registeredDefaultInterpolator = CreateBuiltInInterpolator();
+            _valueProvider = CreateBuiltInValueProvider();
+            _elementType = CreateBuiltInElementType();
         }
 
         /// <summary>
@@ -100,34 +105,44 @@ namespace MxPlot.Core
         /// </summary>
         private static IBilinearInterpolator<T>? _registeredDefaultInterpolator;
 
-        private static readonly Type _valueType = typeof(T);
+        /// <summary>
+        /// The <see cref="MxPlot.Core.ElementType"/> for T, one shared instance per T: set by the static
+        /// constructor for a built-in type, or by <see cref="Register"/> for a custom struct. It stays null
+        /// for an unregistered type, which is what makes the constructors refuse to create an instance.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not a readonly field initializer: calling <see cref="Register"/> is itself the
+        /// first access to the type, so an initializer would run -- and fix the value -- before the body
+        /// of <see cref="Register"/> could supply it.
+        /// </remarks>
+        private static ElementType? _elementType;
 
         /// <summary>
-        /// Gets the name of the value type T.
+        /// Reads each value mode of an element as a scalar. Set together with <see cref="_elementType"/>
+        /// and, like it, never replaced afterwards.
         /// </summary>
-        private static readonly string _valueTypeName = default(T) switch
-        {
-            byte => "byte",
-            sbyte => "sbyte",
-            short => "short",
-            ushort => "ushort",
-            int => "int",
-            uint => "uint",
-            long => "long",
-            ulong => "ulong",
-            float => "float",
-            double => "double",
-            decimal => "decimal",
-            Complex => "Complex",
-            _ => typeof(T).Name
-        };
+        private static ValueProvider<T>? _valueProvider;
+
+        /// <summary>
+        /// The <see cref="ElementTypeRegistration{T}.ToScalar"/> of a registered custom struct, held directly so that
+        /// a single-element read calls it without going through <see cref="_valueProvider"/>. Null for a built-in
+        /// type, whose reads never need it.
+        /// </summary>
+        private static Func<T, int, double>? _toScalar;
+
+        private static readonly object _registrationLock = new();
 
         private static readonly int _elementSize = Unsafe.SizeOf<T>();
 
         /// <summary>
-        /// Provider delegate for min and max arrays for the specified array
+        /// Finds the minimum and maximum of a frame for each value mode of T, as the values this finder defines.
         /// </summary>
-        /// <param name="array">The array for which to find the minimum and maximum values.</param>
+        /// <remarks>
+        /// Returns one minimum and one maximum per entry of <see cref="ElementType.ValueModes"/>, in the same
+        /// order. Note: since the finder defines the range, it can also report something other than the exact
+        /// extremes, such as a percentile-clipped range.
+        /// </remarks>
+        /// <param name="array">The frame for which to find the minimum and maximum values.</param>
         /// <returns>A tuple containing two arrays: the minimum values and the maximum values.</returns>
         public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
 
@@ -212,12 +227,9 @@ namespace MxPlot.Core
 
         public IReadOnlyList<Axis> Axes => Dimensions.Axes;
 
-        /// <summary>
-        /// Gets the type of the value represented by this instance.
-        /// </summary>
-        public Type ValueType => _valueType;
-
-        public string ValueTypeName => _valueTypeName;
+        /// <inheritdoc/>
+        // Non-null for any instance: the constructors refuse to run for an unregistered T.
+        public ElementType ElementType => _elementType!;
 
         public int ElementSize => _elementSize;
 
@@ -264,24 +276,31 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// Registers the specified MinMaxFinder instance as the default implementation to use for min/max operations.
+        /// Replaces the default <see cref="MinMaxFinder"/> for T -- the one each new instance starts with --
+        /// for example with a faster implementation.
         /// </summary>
-        /// <remarks>Registering a new default MinMaxFinder will replace any previously registered
-        /// instance. This method is typically called during application initialization to configure custom min/max
-        /// logic for a type unsupported by the built-in implementation (e.g. a custom struct).
+        /// <remarks>
         /// <para>
-        /// Not allowed for the built-in primitive numeric types (<see cref="byte"/>, <see cref="sbyte"/>,
-        /// <see cref="short"/>, <see cref="ushort"/>, <see cref="int"/>, <see cref="uint"/>, <see cref="long"/>,
-        /// <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/>) -- their min/max has one unambiguous
-        /// definition, so overriding it would silently corrupt behavior application-wide. <see cref="Complex"/>
-        /// remains overridable: which of its Magnitude/Real/Imaginary/Phase/Power modes to report is a domain
-        /// choice, not a single correct answer. To restore the built-in <see cref="Complex"/> behavior after
-        /// overriding it, register <see cref="Utils.FastMinMaxFinder.FindComplex"/> again -- its signature already
-        /// matches <see cref="MinMaxFinder"/>.
+        /// Only instances created afterwards use the new finder; existing instances keep theirs (use
+        /// <see cref="SetMinMaxFinder"/> to change one of them). The finder must return one entry per
+        /// value mode, which is checked by calling it once on a single <c>default(T)</c> element.
+        /// </para>
+        /// <para>
+        /// A custom struct must be registered first with <see cref="Register"/>, which takes its initial
+        /// MinMaxFinder together with its <see cref="ElementTypeRegistration{T}.ToScalar"/>. Not allowed for the built-in
+        /// primitive numeric types (<see cref="byte"/>, <see cref="sbyte"/>, <see cref="short"/>,
+        /// <see cref="ushort"/>, <see cref="int"/>, <see cref="uint"/>, <see cref="long"/>, <see cref="ulong"/>,
+        /// <see cref="float"/>, <see cref="double"/>) -- their min/max has one unambiguous definition, so
+        /// overriding it would silently corrupt behavior application-wide. <see cref="Complex"/> remains
+        /// overridable; its finder must return its five modes in <see cref="ComplexValueMode"/> order. To
+        /// restore the built-in <see cref="Complex"/> behavior, register <c>FastMinMaxFinder.FindComplex</c>
+        /// again -- its signature already matches <see cref="MinMaxFinder"/>.
         /// </para>
         /// </remarks>
         /// <param name="finder">The MinMaxFinder instance to register as the default. Cannot be null.</param>
+        /// <exception cref="ArgumentException">Thrown when <paramref name="finder"/> does not return one entry per value mode.</exception>
         /// <exception cref="NotSupportedException">Thrown when <typeparamref name="T"/> is one of the built-in primitive numeric types.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when <typeparamref name="T"/> is a custom struct that has not been registered.</exception>
         public static void RegisterDefaultMinMaxFinder(MinMaxFinder finder)
         {
             if(finder == null)
@@ -291,8 +310,13 @@ namespace MxPlot.Core
                 throw new NotSupportedException(
                     $"Cannot override the default MinMaxFinder for built-in numeric type {typeof(T).Name}; " +
                     "its min/max has one unambiguous definition. RegisterDefaultMinMaxFinder is for types " +
-                    "the built-in implementation does not cover (custom structs, or Complex's mode selection).");
+                    "the built-in implementation does not cover (custom structs, or Complex).");
 
+            var elementType = Volatile.Read(ref _elementType) ?? throw new InvalidOperationException(
+                $"{typeof(T).Name} is not a registered element type. Register it with " +
+                $"MatrixData<{typeof(T).Name}>.Register(...), which takes its MinMaxFinder together with its ToScalar function.");
+
+            EnsureFinderMatchesModeCount(finder, elementType.ValueModeCount, nameof(finder));
             _registeredDefaultFinder = finder;
         }
 
@@ -301,7 +325,7 @@ namespace MxPlot.Core
         /// freshly-constructed <see cref="MatrixData{T}"/> would use. Useful for computing per-frame min/max ahead
         /// of constructing an instance (e.g. while streaming frames into a <c>List&lt;T[]&gt;</c> during file
         /// loading), so the precomputed values are guaranteed consistent with what the instance would compute itself.
-        /// Null for a custom struct type that has not called <see cref="RegisterDefaultMinMaxFinder"/>.
+        /// Null for a type that is not registered.
         /// </summary>
         public static MinMaxFinder? DefaultMinMaxFinder => _registeredDefaultFinder;
 
@@ -315,20 +339,164 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Registers the specified <see cref="IBilinearInterpolator{T}"/> instance as the default implementation
-        /// used for bilinear interpolation.
-        /// This is necessary only for types that are not natively supported by the library.
-        /// For primitive numeric types (e.g., int, float, double) and <see cref="System.Numerics.Complex"/>,
-        /// the library provides built-in interpolation logic.
-        /// If no interpolator is provided for a custom type, <c>GetValue(..., interpolate: true)</c>
-        /// falls back to nearest-neighbor behavior.
+        /// Replaces the default <see cref="IBilinearInterpolator{T}"/> for T -- the one each new instance starts with.
         /// </summary>
-        /// <param name="interpolator">The IBilinearInterpolator instance to register as the default. Cannot be null.</param>
+        /// <remarks>
+        /// <para>
+        /// Only instances created afterwards use the new interpolator; existing instances keep theirs. A custom struct
+        /// must be registered first with <see cref="Register"/>, which can take its initial interpolator. Without one,
+        /// interpolated reads (<c>GetValue(..., interpolate: true)</c>) and bilinear resampling fall back to
+        /// nearest-neighbor.
+        /// </para>
+        /// <para>
+        /// Not allowed for the built-in primitive numeric types: their values are interpolated numerically, and an
+        /// interpolator would never be used. <see cref="Complex"/> remains replaceable; its built-in interpolator
+        /// blends the real and imaginary parts separately. The interpolator is shared and called concurrently, so it
+        /// must not keep state.
+        /// </para>
+        /// </remarks>
+        /// <param name="interpolator">The interpolator new instances start with. Cannot be null.</param>
+        /// <exception cref="NotSupportedException">Thrown when <typeparamref name="T"/> is one of the built-in primitive numeric types.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when <typeparamref name="T"/> is a custom struct that has not been registered.</exception>
         public static void RegisterDefaultInterpolator(IBilinearInterpolator<T> interpolator)
         {
-            if (interpolator == null) 
+            if (interpolator == null)
                 throw new ArgumentNullException(nameof(interpolator));
+
+            if (IsBuiltInPrimitiveNumericType())
+                throw new NotSupportedException(
+                    $"{typeof(T).Name} is a built-in numeric type: its values are interpolated numerically, " +
+                    "so it does not use an interpolator.");
+
+            if (Volatile.Read(ref _elementType) is null)
+                throw new InvalidOperationException(
+                    $"{typeof(T).Name} is not a registered element type. Register it with " +
+                    $"MatrixData<{typeof(T).Name}>.Register(...), which can take its interpolator.");
+
             _registeredDefaultInterpolator = interpolator;
+        }
+
+        /// <summary>
+        /// Registers a custom struct as an element type, which is what makes <see cref="MatrixData{T}"/>
+        /// constructible for it.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A <see cref="MatrixData{T}"/> has to be able to read each element as a scalar (for display,
+        /// histograms, line profiles and interpolation) and to find a frame's range. For a custom struct both
+        /// are supplied here, together, before the first instance is created; constructing an instance of an
+        /// unregistered type throws <see cref="InvalidOperationException"/>. The built-in types -- the primitive
+        /// numeric types and <see cref="Complex"/> -- are registered by the library.
+        /// </para>
+        /// <para>
+        /// A type is registered once and the registration cannot be replaced, since its value modes must not
+        /// change once instances exist. Its MinMaxFinder can still be replaced later, by
+        /// <see cref="RegisterDefaultMinMaxFinder"/> or, per instance, by <see cref="SetMinMaxFinder"/>.
+        /// </para>
+        /// </remarks>
+        /// <param name="registration">The value modes, ToScalar, MinMaxFinder and persistent identifier of T.</param>
+        /// <exception cref="ArgumentException">
+        /// Thrown when <paramref name="registration"/> is incomplete, or its MinMaxFinder does not return one
+        /// entry per value mode (checked by calling it once on a single <c>default(T)</c> element).
+        /// </exception>
+        /// <exception cref="NotSupportedException">Thrown when <typeparamref name="T"/> is a built-in element type.</exception>
+        /// <exception cref="InvalidOperationException">Thrown when <typeparamref name="T"/> is already registered.</exception>
+        public static void Register(ElementTypeRegistration<T> registration)
+        {
+            ArgumentNullException.ThrowIfNull(registration);
+
+            if (IsBuiltInElementType)
+                throw new NotSupportedException(
+                    $"{typeof(T).Name} is a built-in element type and is registered by the library.");
+
+            if (string.IsNullOrWhiteSpace(registration.TypeId))
+                throw new ArgumentException("TypeId must not be empty.", nameof(registration));
+            if (registration.ValueModes is null || registration.ValueModes.Count == 0)
+                throw new ArgumentException("At least one value mode is required.", nameof(registration));
+            if (registration.ToScalar is null)
+                throw new ArgumentException("ToScalar is required.", nameof(registration));
+            if (registration.MinMaxFinder is null)
+                throw new ArgumentException("A MinMaxFinder is required.", nameof(registration));
+
+            // Copied so that later changes to the caller's list cannot alter the modes.
+            var valueModes = registration.ValueModes.ToArray();
+            EnsureFinderMatchesModeCount(registration.MinMaxFinder, valueModes.Length, nameof(registration));
+
+            // The display name is not part of the registration: a custom struct is shown by its type name,
+            // the same name MatrixData.GetElementTypeName returns for it.
+            var elementType = new ElementType(typeof(T), MatrixData.GetElementTypeName(typeof(T)),
+                valueModes, registration.TypeId);
+
+            lock (_registrationLock)
+            {
+                // No separate "instances already exist" check is needed: an instance can only exist
+                // once the type is registered.
+                if (_elementType is not null)
+                    throw new InvalidOperationException(
+                        $"{typeof(T).Name} is already registered. An element type is registered once; " +
+                        "to replace only its MinMaxFinder, use RegisterDefaultMinMaxFinder.");
+
+                // Shared, non-generic lookup for .mxd dynamic loading (LoadDynamic/LoadDynamicVirtual)
+                // and GetElementTypeAlias: TypeId -> ElementType, since Type.GetType cannot see types
+                // outside MxPlot.Core and mscorlib. Done first: if the TypeId collides with a different
+                // T, this throws before any of T's own static fields are touched.
+                MatrixData.RegisterElementType(elementType);
+
+                _valueProvider = new DelegateValueProvider<T>(registration.ToScalar, registration.ToScalars);
+                _toScalar = registration.ToScalar;
+                _registeredDefaultFinder = registration.MinMaxFinder;
+                if (registration.Interpolator is not null)
+                    _registeredDefaultInterpolator = registration.Interpolator;
+
+                // Published last: a non-null element type is what lets the constructors proceed.
+                Volatile.Write(ref _elementType, elementType);
+            }
+        }
+
+        /// <summary>
+        /// Whether T can be used as the element type of a <see cref="MatrixData{T}"/>: always true for the
+        /// built-in types, and true for a custom struct once <see cref="Register"/> has been called.
+        /// </summary>
+        public static bool IsRegistered => Volatile.Read(ref _elementType) is not null;
+
+        /// <summary>The registered element type of T, or null if T is not registered.</summary>
+        internal static ElementType? RegisteredElementType => Volatile.Read(ref _elementType);
+
+        /// <summary>The registered value provider of T, or null if T is not registered.</summary>
+        internal static ValueProvider<T>? RegisteredValueProvider => Volatile.Read(ref _valueProvider);
+
+        /// <summary>The registered ToScalar of a custom struct T, or null for a built-in or unregistered type.</summary>
+        internal static Func<T, int, double>? RegisteredToScalar => Volatile.Read(ref _toScalar);
+
+        private static bool IsBuiltInElementType => _isSupportedPrimitive || typeof(T) == typeof(Complex);
+
+        /// <summary>
+        /// Returns the element type of T, or throws if T is not registered. Called by every constructor.
+        /// </summary>
+        private static ElementType EnsureRegistered()
+        {
+            return Volatile.Read(ref _elementType) ?? throw new InvalidOperationException(
+                $"MatrixData<{typeof(T).Name}> cannot be created because {typeof(T).Name} is not a registered " +
+                $"element type. Call MatrixData<{typeof(T).Name}>.Register(...) with its value modes, " +
+                "ToScalar and MinMaxFinder first.");
+        }
+
+        /// <summary>
+        /// Calls <paramref name="finder"/> once on a single <c>default(T)</c> element -- the value every new
+        /// frame starts with -- and checks that it returns one entry per value mode. A finder of the wrong
+        /// length would fill the range cache with lists that cannot be indexed by value mode.
+        /// </summary>
+        private static void EnsureFinderMatchesModeCount(MinMaxFinder finder, int modeCount, string paramName)
+        {
+            var (minValues, maxValues) = finder(new T[1]);
+            if (minValues is null || maxValues is null
+                || minValues.Length != modeCount || maxValues.Length != modeCount)
+            {
+                throw new ArgumentException(
+                    $"The MinMaxFinder must return {modeCount} minimum and maximum value(s), one per value mode " +
+                    $"of {typeof(T).Name}, but returned {minValues?.Length ?? 0} and {maxValues?.Length ?? 0}.",
+                    paramName);
+            }
         }
 
         /// <summary>
@@ -849,28 +1017,36 @@ namespace MxPlot.Core
         }
 
         /// <summary>
-        /// Sets the custom implementation used to determine minimum and maximum values.
+        /// Replaces the <see cref="MinMaxFinder"/> this instance uses, for example to use a faster or
+        /// context-specific algorithm for a while. <see cref="ResetMinMaxFinder"/> restores the default.
         /// </summary>
-        /// <remarks>Use this method to override the default min/max finding behavior with a custom
-        /// implementation. This can be useful for specialized comparison logic or domain-specific
-        /// requirements.</remarks>
+        /// <remarks>
+        /// All cached value ranges of this instance are invalidated, and recomputed with the new finder when
+        /// next requested. The finder must return one entry per value mode, which is checked by calling it
+        /// once on a single <c>default(T)</c> element.
+        /// </remarks>
         /// <param name="customFinder">The MinMaxFinder instance that provides custom logic for finding minimum and maximum values. Cannot be null.</param>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="customFinder"/> is null.</exception>
+        /// <exception cref="ArgumentException">Thrown when <paramref name="customFinder"/> does not return one entry per value mode.</exception>
         public void SetMinMaxFinder(MinMaxFinder customFinder)
         {
             if (customFinder == null) throw new ArgumentNullException(nameof(customFinder));
+            EnsureFinderMatchesModeCount(customFinder, ElementType.ValueModeCount, nameof(customFinder));
             _minMaxFinder = customFinder;
+            InvalidateAllFrames();
         }
 
         /// <summary>
         /// Undoes a prior <see cref="SetMinMaxFinder"/> override on this instance, reverting it to the
         /// currently registered default (<see cref="DefaultMinMaxFinder"/>) -- the same finder a freshly
         /// constructed <see cref="MatrixData{T}"/> would use. There is no other way to undo
-        /// <see cref="SetMinMaxFinder"/> in place short of constructing a new instance.
+        /// <see cref="SetMinMaxFinder"/> in place short of constructing a new instance. As with
+        /// <see cref="SetMinMaxFinder"/>, all cached value ranges of this instance are invalidated.
         /// </summary>
         public void ResetMinMaxFinder()
         {
             _minMaxFinder = _registeredDefaultFinder;
+            InvalidateAllFrames();
         }
 
         private static MinMaxFinder? CreateBuiltInMinMaxFinder()
@@ -959,7 +1135,52 @@ namespace MxPlot.Core
             return null;
         }
 
+        /// <summary>
+        /// Builds the built-in <see cref="MxPlot.Core.ElementType"/> for T: a single "Value" mode for a
+        /// primitive numeric type, or the five modes of <see cref="ComplexValueMode"/> for
+        /// <see cref="Complex"/>. Null for any other type, which has to be registered with <see cref="Register"/>.
+        /// </summary>
+        private static ElementType? CreateBuiltInElementType()
+        {
+            string name = MatrixData.GetElementTypeName(typeof(T));
 
+            if (typeof(T) == typeof(Complex))
+                return new ElementType(typeof(T), name, BuildComplexValueModes());
+
+            if (_isSupportedPrimitive)
+                return new ElementType(typeof(T), name, new[] { new ValueMode("Value") });
+            return null;
+        }
+
+        private static ValueProvider<T>? CreateBuiltInValueProvider()
+        {
+            if (typeof(T) == typeof(Complex))
+                return (ValueProvider<T>)(object)new ComplexValueProvider();
+            if (_isSupportedPrimitive)
+                return new PrimitiveValueProvider<T>();
+            return null;
+        }
+
+        /// <summary>
+        /// Builds the value-mode list for <see cref="Complex"/> from <see cref="ComplexValueMode"/>,
+        /// which is also the array order <c>FastMinMaxFinder.FindComplex</c> uses.
+        /// Verifies the enum is contiguous from 0 so the two stay in lockstep by construction,
+        /// rather than by two people remembering to keep separately-written orderings in sync.
+        /// </summary>
+        private static IReadOnlyList<ValueMode> BuildComplexValueModes()
+        {
+            var modes = (ComplexValueMode[])Enum.GetValues(typeof(ComplexValueMode));
+            Array.Sort(modes, (a, b) => ((int)a).CompareTo((int)b));
+
+            for (int i = 0; i < modes.Length; i++)
+            {
+                if ((int)modes[i] != i)
+                    throw new InvalidOperationException(
+                        $"ComplexValueMode must be contiguous from 0 (found {(int)modes[i]} at index {i}).");
+            }
+
+            return Array.ConvertAll(modes, m => new ValueMode(m.ToString()));
+        }
     }
 
 }

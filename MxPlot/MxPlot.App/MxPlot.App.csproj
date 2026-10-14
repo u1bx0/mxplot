@@ -55,6 +55,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<ProjectReference Include="..\MxPlot.App.Plugins\MxPlot.App.Plugins.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Hdf5\MxPlot.Extensions.Hdf5.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Images\MxPlot.Extensions.Images.csproj" />
 		<ProjectReference Include="..\MxPlot.Extensions.Tiff\MxPlot.Extensions.Tiff.csproj" />

@@ -75,6 +75,37 @@ namespace MxPlot.Core.Processing
             return ExtremumIndexScan(vol, mode, start, end);
         }
 
+        /// <summary>
+        /// The mean pixel value of every slice along the volume's axis: element <c>z</c> is the mean of
+        /// slice <c>z</c>, so the result shows how the signal is distributed along that axis. NaN
+        /// pixels are left out of both the sum and the count; a slice with no valid pixel gives 0.
+        /// </summary>
+        /// <remarks>
+        /// Slices are summed in <see cref="double"/>, so integer data cannot overflow. Reads every
+        /// slice once, in parallel across slices. See <see cref="AxisProfileOperation"/>.
+        /// </remarks>
+        public static double[] CreateAxisProfile<T>(this VolumeAccessor<T> vol)
+            where T : unmanaged, INumber<T>
+        {
+            var frames = vol._frames;
+            var profile = new double[vol._depth];
+            Parallel.For(0, profile.Length, z => profile[z] = MeanOfValidPixels(frames[z]));
+            return profile;
+        }
+
+        private static double MeanOfValidPixels<T>(T[] frame) where T : unmanaged, INumber<T>
+        {
+            double sum = 0;
+            long count = 0;
+            foreach (var v in frame)
+            {
+                if (T.IsNaN(v)) continue;
+                sum += double.CreateChecked(v);
+                count++;
+            }
+            return count == 0 ? 0 : sum / count;
+        }
+
         // Kept unsafe (pointer scan) separate from the public extension method above: dynamic
         // dispatch (Microsoft.CSharp.RuntimeBinder), used by ExtremumIndexOperation.Execute to
         // resolve T at runtime, fails to bind an `unsafe`-marked method directly -- confirmed by

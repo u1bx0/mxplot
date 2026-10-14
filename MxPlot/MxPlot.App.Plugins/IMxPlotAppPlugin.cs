@@ -12,6 +12,13 @@
         string Description { get; }
 
         /// <summary>
+        /// Optional group label. Plugins with the same non-null group name are collected
+        /// under a shared submenu in the Tools menu. Return <c>null</c> (default) to place
+        /// the item at the top level.
+        /// </summary>
+        string? GroupName => null;
+
+        /// <summary>
         /// Called when the user invokes the command.
         /// Runs on the UI thread; do heavy work on a background thread if needed.
         /// </summary>

@@ -2,6 +2,7 @@
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
 using Avalonia.Media;
+using Avalonia.Styling;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -27,8 +28,8 @@ namespace MxPlot.UI.Avalonia.Views
     /// cells into blocks, which turns counting along a row into counting blocks of ten.
     /// </para>
     /// <para>
-    /// Colours follow the theme: cached cells use the accent colour, uncached cells a faint tint of
-    /// the foreground, and the labels the foreground itself.
+    /// Colours follow the theme: cached cells use a fixed green with one shade per theme, uncached
+    /// cells a faint tint of the foreground, and the labels the foreground itself.
     /// </para>
     /// </remarks>
     internal sealed class CacheGridControl : Control
@@ -59,6 +60,11 @@ namespace MxPlot.UI.Avalonia.Views
         private const int LegendHeadingChars = 15;
 
         private static readonly Typeface Mono = new(new FontFamily("Consolas,Courier New,monospace"));
+
+        // Fixed rather than the system accent colour, which can be pale or dark enough to vanish
+        // against the window background or the uncached tint. Each is tuned for its theme's background.
+        private static readonly Color CachedColorDark = Color.FromRgb(0x4C, 0xC3, 0x8A);
+        private static readonly Color CachedColorLight = Color.FromRgb(0x1F, 0x8A, 0x4C);
 
         private int _total;
         private int _columns = 1;
@@ -164,11 +170,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             double scale = TopLevel.GetTopLevel(this)?.RenderScaling ?? 1.0;
             var fg = TextElement.GetForeground(this) is ISolidColorBrush solid ? solid.Color : Colors.Gray;
-            var accent = this.TryFindResource("SystemAccentColor", ActualThemeVariant, out var found) && found is Color c
-                ? c
-                : Colors.DodgerBlue;
-
-            var cachedBrush = new SolidColorBrush(accent);
+            var cachedBrush = new SolidColorBrush(ActualThemeVariant == ThemeVariant.Dark ? CachedColorDark : CachedColorLight);
             var uncachedBrush = new SolidColorBrush(fg, 0.12);
             var labelBrush = new SolidColorBrush(fg, 0.75);
             var tickBrush = new SolidColorBrush(fg, 0.4);

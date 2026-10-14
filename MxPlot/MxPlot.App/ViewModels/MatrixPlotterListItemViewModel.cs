@@ -156,7 +156,7 @@ namespace MxPlot.App.ViewModels
             {
                 var parts = new List<string> { $"{md.XCount}×{md.YCount}" };
                 if (md.FrameCount > 1) parts.Add($"{md.FrameCount} frames");
-                parts.Add(md.ValueTypeName);
+                parts.Add(md.ElementType.Name);
                 MetaData = string.Join("  |  ", parts);
             }
             else

@@ -44,7 +44,7 @@ namespace MxPlot.UI.Avalonia.Controls
             IMatrixData source, int channelAxisDimIndex, IReadOnlyList<IMatrixData> perChannel)
         {
             int channelCount = perChannel.Count;
-            var merged = MergeChannelFrames(source.ValueType, perChannel);
+            var merged = MergeChannelFrames(source.ElementType.Type, perChannel);
 
             // The extracted slices/projections already carry the correct physical scale for their
             // plane (see VolumeAccessor.SliceY / CreateProjection). The merged wrapper is a fresh

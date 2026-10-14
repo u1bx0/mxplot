@@ -20,7 +20,7 @@ namespace MxPlot.UI.Avalonia.Rendering
     ///     <description>License / Source</description>
     ///   </listheader>
     ///   <item>
-    ///     <term>Grayscale, Hot, OrangeHot, GreenHot, Cold, BSMod, Spectrum, HiLo</term>
+    ///     <term>Grayscale, Hot, OrangeHot, GreenHot, Cold, Profiler, Spectrum, HiLo</term>
     ///     <description>Original implementation (Public Domain)</description>
     ///   </item>
     ///   <item>
@@ -83,7 +83,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         public static LookupTable Hot { get; }
         public static LookupTable OrangeHot { get; }
         public static LookupTable GreenHot { get; }
-        public static LookupTable BSMod { get; }
+        public static LookupTable Profiler { get; }
         public static LookupTable Spectrum { get; }
         public static LookupTable Cold { get; }
         public static LookupTable Jet { get; }
@@ -116,7 +116,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             Hot = new LookupTable("Hot", CreateHot(DefaultLevels), blue);
             OrangeHot = new LookupTable("OrangeHot", CreateOrangeHot(DefaultLevels), blue);
             GreenHot = new LookupTable("GreenHot", CreateGreenHot(DefaultLevels), red);
-            BSMod = new LookupTable("BSMod", CreateBSMod(DefaultLevels), red);
+            Profiler = new LookupTable("Profiler", CreateProfiler(DefaultLevels), red);
             Spectrum = new LookupTable("Spectrum", CreateSpectrum(DefaultLevels), brawn);
             Cold = new LookupTable("Cold", CreateCold(DefaultLevels), red);
             Jet = new LookupTable("Jet", CreateJet(DefaultLevels), magenta);
@@ -135,7 +135,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             Register(GreenHot);
             Register(Cold);
             Register(Spectrum);
-            Register(BSMod);
+            Register(Profiler);
             Register(Jet);
             Register(Turbo);
             Register(Viridis);
@@ -396,7 +396,6 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private static int[] CreateOrangeHot(int levels)
         {
-            // LSColorPalette.createOrangeHotColorPalette
             var colors = new int[levels];
             int div = levels / 3;
             const int cMax = 255;
@@ -445,7 +444,6 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private static int[] CreateGreenHot(int levels)
         {
-            // LSColorPalette.createGreenColorPalette
             var colors = new int[levels];
             int div = levels / 3;
             const int cMax = 255;
@@ -492,9 +490,10 @@ namespace MxPlot.UI.Avalonia.Rendering
             return colors;
         }
 
-        private static int[] CreateBSMod(int levels)
+        private static int[] CreateProfiler(int levels)
         {
-            // LSColorPalette.createBeamStarModColorPalette
+            // Seven equal segments: black -> dark blue -> blue -> cyan -> green -> yellow -> red -> white.
+            // Any remainder at the top end is filled with white.
             int[] colors = new int[levels];
             int div = levels / 7;
             int remain = levels - div * 7;
@@ -576,7 +575,6 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private static int[] CreateSpectrum(int levels)
         {
-            // LSColorPalette.createSpectrumColorPalette
             int[] colors = new int[levels];
             int divNum = 4;
             int div = levels / divNum;
@@ -638,7 +636,6 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private static int[] CreateCold(int levels)
         {
-            // LSColorPalette.createColdColorPalette
             int[] colors = new int[levels];
             int div = levels / 3;
             const int cMax = 255;
@@ -812,14 +809,12 @@ namespace MxPlot.UI.Avalonia.Rendering
 
 
         // ------------------------------------------------------------
-        // CoolWarm (Moreland, Public Domain) — 端点線形補間版
-        // Blue → White → Red の Moreland 典型値
+        // CoolWarm (Moreland, Public Domain) 
         // ------------------------------------------------------------
         private static int[] CreateCoolWarm(int levels)
         {
             int[] colors = new int[levels];
 
-            // Moreland の代表端点
             (int r, int g, int b) low = (59, 76, 192);
             (int r, int g, int b) mid = (221, 221, 221);
             (int r, int g, int b) high = (180, 4, 38);
@@ -856,7 +851,7 @@ namespace MxPlot.UI.Avalonia.Rendering
 
 
         // ------------------------------------------------------------
-        //  Blue → White → Red のシンプル diverging
+        //  Blue → White → Red 
         // ------------------------------------------------------------
         private static int[] CreatePhase(int levels)
         {

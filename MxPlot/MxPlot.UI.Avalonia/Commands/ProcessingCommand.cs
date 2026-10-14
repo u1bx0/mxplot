@@ -27,7 +27,12 @@ namespace MxPlot.UI.Avalonia.Commands
     /// <param name="Progress">Reports progress, or <see langword="null"/> when the run shows none.</param>
     /// <param name="Token">Cancelled by the Cancel button; <see cref="CancellationToken.None"/> when the run cannot be cancelled.</param>
     /// <param name="State">What <see cref="CommandPlan.Prepare"/> produced, or <see langword="null"/>.</param>
-    internal readonly record struct RunContext(IProgress<int>? Progress, CancellationToken Token, object? State = null);
+    /// <param name="ValueMode">
+    /// The value mode the source is shown in (see <see cref="ICommandHost.ValueMode"/>). An operation that reduces
+    /// a structured element to one value reads it in this mode.
+    /// </param>
+    internal readonly record struct RunContext(IProgress<int>? Progress, CancellationToken Token, object? State = null,
+        int ValueMode = 0);
 
     /// <summary>What a command may look at before its operation runs.</summary>
     /// <param name="Data">The source window's data.</param>
@@ -113,6 +118,13 @@ namespace MxPlot.UI.Avalonia.Commands
         /// <summary>Whether a new window is refreshed together with the source (an extract) instead of standing alone.</summary>
         public bool ResultIsLinked { get; init; }
 
+        /// <summary>
+        /// Whether the operation works on scalar values: structured data (Complex, or a registered custom struct)
+        /// is first read as double in the value mode the source is shown in, and the result is double. A window
+        /// that follows the source then also follows its value mode.
+        /// </summary>
+        public bool WorksOnScalars { get; init; }
+
         /// <summary>The message shown when the operation runs out of memory.</summary>
         public string OutOfMemoryMessage { get; init; } = "Not enough memory to process this dataset.\nOperation cancelled.";
 
@@ -185,12 +197,13 @@ namespace MxPlot.UI.Avalonia.Commands
                 using var session = plan.Progress != ProgressMode.None
                     ? host.BeginProgress(plan.ProgressLabel, cancellable: tracked)
                     : null;
-                var run = new RunContext(tracked ? session?.Progress : null, tracked ? session?.Token ?? default : default, state);
+                var run = new RunContext(tracked ? session?.Progress : null, tracked ? session?.Token ?? default : default, state,
+                    host.ValueMode);
                 var operation = plan.CreateOperation(run);
                 result = await Task.Run(() =>
                 {
                     var operand = cube?.Cube ?? (sliceFirst ? data.Apply(new SliceAtOperation(frameIndex)) : data);
-                    return operand.Apply(operation);
+                    return ReadOperand(plan, operand, run.ValueMode).Apply(operation);
                 }, run.Token);
             }
             catch (OperationCanceledException) { return; }
@@ -210,9 +223,20 @@ namespace MxPlot.UI.Avalonia.Commands
                 singleFrame, frameIndex);
             PrepareResult(plan, result, ctx);
             plan.OnResultReady?.Invoke(host, result, ctx);
-            MatrixPlotter.AppendHistory(result, plan.HistoryLabel, host.Title, plan.HistoryDetail(ctx));
+
+            // When structured data was read as scalars, record which value mode was processed. A window that
+            // follows the source follows its value mode too, so only a standalone result names it in its title.
+            string? modeName = ReadsScalarsOf(plan, data)
+                ? data.ElementType.ValueModes[data.ElementType.ClampMode(host.ValueMode)].Name
+                : null;
+            string historyDetail = plan.HistoryDetail(ctx);
+            if (modeName != null)
+                historyDetail = historyDetail.Length > 0 ? $"{historyDetail}, mode={modeName}" : $"mode={modeName}";
+            MatrixPlotter.AppendHistory(result, plan.HistoryLabel, host.Title, historyDetail);
 
             string title = plan.ResultTitle(host.Title);
+            if (modeName != null && !(choices.SyncSource && singleFrame))
+                title = $"{title} ({modeName})";
             string? compositeAxis = plan.KeepsCompositeMode ? cube?.ChannelAxisName : null;
             if (choices.ReplaceData)
                 host.ReplaceData(result, compositeAxis);
@@ -232,11 +256,21 @@ namespace MxPlot.UI.Avalonia.Commands
                 result.CopyPropertiesFrom(ctx.Source, copyScale: true, copyDimensions: false);
         }
 
+        /// <summary>
+        /// The operand as the operation takes it: for a plan that works on scalars, structured data read as double
+        /// in <paramref name="valueMode"/>; otherwise the operand itself.
+        /// </summary>
+        private static IMatrixData ReadOperand(CommandPlan plan, IMatrixData operand, int valueMode)
+            => ReadsScalarsOf(plan, operand) ? operand.Apply(new ToScalarsOperation(valueMode)) : operand;
+
+        private static bool ReadsScalarsOf(CommandPlan plan, IMatrixData data)
+            => plan.WorksOnScalars && !MatrixData.SupportedPrimitiveTypes.Contains(data.ElementType.Type);
+
         private static SyncOutput Recompute(CommandPlan plan, SyncInput input, CancellationToken ct)
         {
             // The operand is a single frame or a channel cube: process all of it.
-            var operation = plan.CreateOperation(new RunContext(null, ct));
-            var updated = input.Operand.Apply(operation);
+            var operation = plan.CreateOperation(new RunContext(null, ct, ValueMode: input.ValueMode));
+            var updated = ReadOperand(plan, input.Operand, input.ValueMode).Apply(operation);
             var ctx = new ResultContext(input.Source,
                 input.CompositeAxisName != null ? input.Operand : null, null,
                 true, input.Source.ActiveIndex);

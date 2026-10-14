@@ -105,6 +105,74 @@ public static class ImageJTiffHandler
 
     #region Load Implementation
 
+    /// <summary>
+    /// Reports the Virtual backend and frame count of <paramref name="filename"/> without reading
+    /// pixel data. Uses the same decisions as <see cref="Load{T}"/>. Returns
+    /// <see cref="VirtualLoadProbe.Unknown"/> for a file that cannot be opened as TIFF.
+    /// </summary>
+    internal static VirtualLoadProbe ProbeVirtualLoad(string filename)
+    {
+        try
+        {
+            using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "r");
+            if (tiff == null)
+                return VirtualLoadProbe.Unknown;
+
+            var widthTag = tiff.GetField(TiffTag.IMAGEWIDTH);
+            if (widthTag == null)
+                return VirtualLoadProbe.Unknown;
+
+            int width = widthTag[0].ToInt();
+            int directoryCount = TiffIfdIndex.ReadOffsets(filename).Length;
+            var (isPacked, frameCount) = ResolveFrameLayout(ReadImageJMetadata(tiff), directoryCount);
+            return new VirtualLoadProbe(ResolveVirtualBackend(tiff, width, isPacked), frameCount);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            return VirtualLoadProbe.Unknown;
+        }
+    }
+
+    /// <summary>
+    /// ImageJ "packed" hyperstack quirk: ImageJ itself writes large uncompressed stacks as a single
+    /// IFD (with a single strip) whose ImageDescription declares channels*slices*frames planes, and
+    /// simply appends the remaining planes as raw, contiguous, fixed-stride pixel data right after
+    /// that IFD's strip -- with no per-plane IFD/strip metadata at all. Detected whenever the
+    /// declared plane count exceeds the actual IFD count.
+    /// </summary>
+    private static (bool isPacked, int frameCount) ResolveFrameLayout(ImageJMetadata? ijMetadata, int directoryCount)
+    {
+        int declaredFrameCount = ijMetadata != null ? ijMetadata.Channels * ijMetadata.Slices * ijMetadata.Frames : 0;
+        bool isPacked = directoryCount == 1 && declaredFrameCount > 1;
+        return (isPacked, isPacked ? declaredFrameCount : directoryCount);
+    }
+
+    /// <summary>
+    /// Which backend a Virtual load uses, judged from the current (first) directory. "Packed" and
+    /// "compressed" cannot co-occur, since the packed layout requires fixed-stride raw pixel data:
+    /// <list type="bullet">
+    ///   <item>Packed layout: <see cref="VirtualBackendKind.Mapped"/> (StrippedMmfFrames via
+    ///   <see cref="LoadPackedFramesVirtual{T}"/>, offsets computed from the fixed stride), or
+    ///   <see cref="VirtualBackendKind.None"/> when compressed.</item>
+    ///   <item>Multi-IFD layout whose strips can be mapped verbatim (uncompressed, strip-organized,
+    ///   one sample per pixel): <see cref="VirtualBackendKind.Mapped"/> via
+    ///   <see cref="LoadStrippedFramesVirtual{T}"/>, from a per-IFD strip-offset table -- the same
+    ///   route OME-TIFF takes.</item>
+    ///   <item>Any other multi-IFD layout (compressed, tiled, multi-sample):
+    ///   <see cref="VirtualBackendKind.Decoded"/> via <see cref="LoadDecodedFramesVirtual{T}"/>,
+    ///   which decodes each frame through LibTiff and so has no layout restriction.</item>
+    /// </list>
+    /// </summary>
+    private static VirtualBackendKind ResolveVirtualBackend(BitMiracle.LibTiff.Classic.Tiff tiff, int width, bool isPacked)
+    {
+        if (isPacked)
+        {
+            int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
+            return compression == (int)Compression.NONE ? VirtualBackendKind.Mapped : VirtualBackendKind.None;
+        }
+        return TiffStorageLayout.IsStripMappable(tiff, width) ? VirtualBackendKind.Mapped : VirtualBackendKind.Decoded;
+    }
+
     private static MatrixData<T> LoadInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int maxParallelDegree, IProgress<int>? progress, LoadingMode mode, CancellationToken ct = default)
         where T : unmanaged
     {
@@ -121,47 +189,28 @@ public static class ImageJTiffHandler
         long[] ifdOffsets  = TiffIfdIndex.ReadOffsets(filename, ct);
         int directoryCount = ifdOffsets.Length;
 
-        // 3. ImageJ metadata (from frame 0)
+        // 3. ImageJ metadata (from frame 0), and the frame layout it implies
         var ijMetadata = ReadImageJMetadata(tiff);
-
-        // 3b. ImageJ "packed" hyperstack quirk: ImageJ itself writes large uncompressed
-        // stacks as a single IFD (with a single strip) whose ImageDescription declares
-        // channels*slices*frames planes, and simply appends the remaining planes as raw,
-        // contiguous, fixed-stride pixel data right after that IFD's strip -- with no
-        // per-plane IFD/strip metadata at all. Detected whenever the declared plane count
-        // exceeds the actual IFD count.
-        int declaredFrameCount = ijMetadata != null ? ijMetadata.Channels * ijMetadata.Slices * ijMetadata.Frames : 0;
-        bool isPacked = directoryCount == 1 && declaredFrameCount > 1;
-        int frameCount = isPacked ? declaredFrameCount : directoryCount;
+        var (isPacked, frameCount) = ResolveFrameLayout(ijMetadata, directoryCount);
 
         // 4. Resolution (from frame 0)
         var (xResolution, yResolution) = ReadResolution(tiff);
 
-        // 5. Create MatrixData. Two independent routes to Virtual, mutually exclusive since
-        // "packed" and "compressed" cannot co-occur (the packed layout requires fixed-stride raw
-        // pixel data, which compression breaks):
-        // - Packed layout: MMF-backed (StrippedMmfFrames<T> via LoadPackedFramesVirtual), since
-        //   the fixed-stride offset formula is already known up front with no IFD walk needed.
-        //   Only possible when uncompressed.
-        // - General multi-IFD layout: Lazy decode-on-access (TiffDecodedFrames<T> via
-        //   LoadDecodedFramesVirtual) when compressed -- MMF can't map compressed pixel data, but
-        //   a real per-frame decode has no such restriction. Uncompressed non-packed data still
-        //   always loads InMemory (unchanged): building an MMF offset table for that case would
-        //   need the same per-IFD strip-offset walk OmeTiffHandlerInstance's own Virtual path
-        //   does, which this handler doesn't implement.
+        // 5. Create MatrixData (see ResolveVirtualBackend for the Virtual routes)
         int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
-        bool isCompressed = compression != (int)Compression.NONE;
-        LoadingMode resolvedMode = isPacked
-            ? VirtualPolicy.Resolve(mode, new FileInfo(filename).Length, frameCount, canVirtual: !isCompressed)
-            : isCompressed
-                ? VirtualPolicy.Resolve(mode, new FileInfo(filename).Length, frameCount, canVirtual: true)
-                : LoadingMode.InMemory;
+        var backend = ResolveVirtualBackend(tiff, width, isPacked);
+        LoadingMode resolvedMode = VirtualPolicy.Resolve(mode, new FileInfo(filename).Length, frameCount,
+            canVirtual: backend != VirtualBackendKind.None);
 
-        MatrixData<T> data = resolvedMode == LoadingMode.Virtual
-            ? (isPacked
-                ? LoadPackedFramesVirtual<T>(tiff, filename, width, height, frameCount)
-                : LoadDecodedFramesVirtual<T>(filename, width, height, ifdOffsets, frameCount))
-            : new MatrixData<T>(width, height, frameCount);
+        MatrixData<T> data;
+        if (resolvedMode != LoadingMode.Virtual)
+            data = new MatrixData<T>(width, height, frameCount);
+        else if (isPacked)
+            data = LoadPackedFramesVirtual<T>(tiff, filename, width, height, frameCount);
+        else if (backend == VirtualBackendKind.Mapped)
+            data = LoadStrippedFramesVirtual<T>(tiff, filename, width, height, ifdOffsets, frameCount, progress, ct);
+        else
+            data = LoadDecodedFramesVirtual<T>(filename, width, height, ifdOffsets, frameCount);
 
         // 6. Scale
         if (ijMetadata != null)
@@ -190,7 +239,9 @@ public static class ImageJTiffHandler
         {
             Debug.WriteLine(isPacked
                 ? $"Using ImageJ packed single-IFD Virtual (MMF) loading for {frameCount} frames."
-                : $"Using ImageJ compressed multi-IFD Virtual (Lazy decode) loading for {frameCount} frames.");
+                : data.GetDiagnosticCacheableList() is IMmfFrameList
+                    ? $"Using multi-IFD Virtual (MMF) loading for {frameCount} frames."
+                    : $"Using multi-IFD Virtual (Lazy decode) loading for {frameCount} frames.");
         }
         else if (isPacked)
         {
@@ -199,17 +250,13 @@ public static class ImageJTiffHandler
         }
         else
         {
-            // parallel is effective only for CPU-bound codecs
-            bool isCpuBound = compression == (int)Compression.LZW
-                           || compression == (int)Compression.DEFLATE
-                           || compression == (int)Compression.ADOBE_DEFLATE;
-            bool useParallel = isCpuBound && (maxParallelDegree < 0 || maxParallelDegree > 1) && directoryCount > 1;
+            int threads = TiffFrameCodec.ResolveLoadThreads(maxParallelDegree, compression != (int)Compression.NONE, directoryCount);
 
-            if (useParallel)
+            if (threads > 1)
             {
-                Debug.WriteLine($"Using parallel loading with {maxParallelDegree} threads for {directoryCount} frames (compression={compression}).");
+                Debug.WriteLine($"Using parallel loading with {threads} threads for {directoryCount} frames (compression={compression}).");
                 // Parallel: ReadFrameDataStripped concurrently, then SetArray sequentially
-                LoadFramesParallel<T>(filename, data, width, height, ifdOffsets, maxParallelDegree, progress, ct);
+                LoadFramesParallel<T>(filename, data, width, height, ifdOffsets, threads, progress, ct);
             }
             else
             {
@@ -362,11 +409,28 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// Virtual (Lazy decode) counterpart for the general (non-packed) multi-IFD layout: each
-    /// logical frame is decoded from its own TIFF directory on access, via
-    /// <see cref="TiffDecodedFrames{T}"/>. Unlike <see cref="LoadPackedFramesVirtual{T}"/>, this
-    /// works regardless of compression -- it's the route offered when the data <em>is</em>
-    /// compressed and therefore ineligible for the MMF-backed path.
+    /// Virtual (MMF-backed) route for the general multi-IFD layout when every frame's strips can be
+    /// mapped verbatim (see <see cref="TiffStorageLayout.IsStripMappable{T}"/>). Walks every IFD once
+    /// to collect its strip offsets; no pixel data is read here.
+    /// </summary>
+    private static MatrixData<T> LoadStrippedFramesVirtual<T>(
+        BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int width, int height, long[] ifdOffsets, int frameCount,
+        IProgress<int>? progress, CancellationToken ct)
+        where T : unmanaged
+    {
+        var (offsets, byteCounts) = TiffStorageLayout.ScanStrips(tiff, ifdOffsets, frameCount, progress, ct);
+        // Steps 6-7 read frame-0 tags from the current directory
+        TiffIfdIndex.SetFrame(tiff, ifdOffsets, 0);
+
+        var vsf = new StrippedMmfFrames<T>(
+            filename, width, height, offsets, byteCounts, isYFlipped: true, isBigEndian: tiff.IsBigEndian());
+        return MatrixData<T>.CreateAsVirtualFrames(width, height, vsf);
+    }
+
+    /// <summary>
+    /// Virtual (Lazy decode) route for the general multi-IFD layout: each logical frame is decoded
+    /// from its own TIFF directory on access, via <see cref="TiffDecodedFrames{T}"/>. Unlike the
+    /// MMF routes, this works for any compression, tiling or samples-per-pixel layout.
     /// </summary>
     private static MatrixData<T> LoadDecodedFramesVirtual<T>(string filename, int width, int height, long[] ifdOffsets, int frameCount)
         where T : unmanaged
@@ -544,17 +608,16 @@ public static class ImageJTiffHandler
     /// Parallel frame loader. Opens one <c>Tiff</c> handle per thread and jumps each straight to
     /// its frames by IFD offset (<see cref="TiffIfdIndex.SetFrame"/>) -- no hops to reach a
     /// thread's starting frame.
-    /// Only called for LZW/Deflate-compressed files where decompression is CPU-bound.
+    /// Only called for compressed files, where decompression is CPU-bound
+    /// (see <see cref="TiffFrameCodec.ResolveLoadThreads"/>).
     /// Frames are decoded concurrently into a staging array, then written via <c>SetArray</c> sequentially.
     /// </summary>
     private static void LoadFramesParallel<T>(
         string filePath, MatrixData<T> data, int width, int height, long[] ifdOffsets,
-        int maxParallelDegree, IProgress<int>? progress, CancellationToken ct)
+        int threads, IProgress<int>? progress, CancellationToken ct)
         where T : unmanaged
     {
         int frameCount = ifdOffsets.Length;
-        int degree  = maxParallelDegree <= 0 ? Environment.ProcessorCount : maxParallelDegree;
-        int threads = Math.Min(degree, frameCount);
         int chunk   = (frameCount + threads - 1) / threads;
 
         var frames   = new T[frameCount][];

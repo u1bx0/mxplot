@@ -1,6 +1,7 @@
 ﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Platform.Storage;
+using MxPlot.App.Services;
 using MxPlot.Core.IO.Formats;
 using System.Collections.Generic;
 using System.IO;
@@ -106,11 +107,10 @@ namespace MxPlot.App.Views
         }
 
         /// <summary>
-        /// Asks the user to choose between InMemory and Virtual loading for large files
-        /// (at/above <see cref="LargeFileThresholdBytes"/>), or for any file when
-        /// <paramref name="forcePrompt"/> is set (Shift held during drag-drop).
-        /// Formats that don't implement <see cref="IVirtualLoadable"/> always load InMemory —
-        /// there is nothing to choose, so the prompt is skipped even when forced.
+        /// Chooses the loading mode through <see cref="LoadingModePolicy"/>, asking the user when the
+        /// policy leaves the choice open, or for any file when <paramref name="forcePrompt"/> is set
+        /// (Shift held during drag-drop). Formats that don't implement <see cref="IVirtualLoadable"/>
+        /// always load InMemory — there is nothing to choose, so the prompt is skipped even when forced.
         /// Returns null if the user cancels.
         /// </summary>
         internal async Task<LoadingMode?> ResolveLoadingModeAsync(string path, bool forcePrompt = false)
@@ -120,11 +120,14 @@ namespace MxPlot.App.Views
                 return LoadingMode.Auto;
 
             var reader = FormatRegistry.CreateReader(path);
-            if (reader is not IVirtualLoadable)
+            if (reader is not IVirtualLoadable loadable)
                 return LoadingMode.InMemory;
 
-            if (!forcePrompt && fileInfo.Length < LargeFileThresholdBytes)
-                return LoadingMode.Auto;
+            // Reads only the file's structure (IFD chain for TIFF), but that is still I/O.
+            var probe = await Task.Run(() => loadable.ProbeVirtualLoad(path));
+            var decided = LoadingModePolicy.Decide(probe, fileInfo.Length, forcePrompt);
+            if (decided != null)
+                return decided;
 
             return await WithTopmostSuspended(() =>
                 LoadingModeDialog.ShowAsync(this, Path.GetFileName(path), fileInfo.Length));

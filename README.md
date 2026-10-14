@@ -9,7 +9,7 @@
 **High-Performance Multi-Axis Matrix Visualization Ecosystem**
 
 [![.NET](https://img.shields.io/badge/.NET-10.0%20%7C%208.0-blue)](https://dotnet.microsoft.com/)
-[![Package](https://img.shields.io/badge/version-0.5.0-orange)](https://github.com/u1bx0/mxplot/releases)
+[![Package](https://img.shields.io/badge/version-0.6.0-orange)](https://github.com/u1bx0/mxplot/releases)
 [![NuGet Version](https://img.shields.io/nuget/v/MxPlot?style=flat-square&color=blue)](https://www.nuget.org/packages/MxPlot)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -135,7 +135,7 @@ The visualization layer (**MxPlot.UI.Avalonia**) is deliberately separated from 
 - ✂️ **Substack / 3D Crop**: Extract a Z-range substack or crop a full 3D volume region — with sync-group support across linked windows
 - 💾 **File Session Management**: Unsaved-change tracking (`DirtyFlags`), close confirmation dialog, and `SaveAsAsync` / `DuplicateAsync` APIs for programmatic control
 - 🎨 **Composite Rendering**: Multi-channel display with per-channel color, contrast, gain and gamma — as commonly used in fluorescence microscopy. RGB color images open composited automatically, and can be converted back to grayscale. See the [Composite Rendering Guide](./docs/MatrixPlotter_Composite_Guide.md)
-- 🌈 **Color-Coded Rendering**: Live depth/time colour-coded projection in a linked child window, with a drag-to-narrow depth histogram and adjustable palette
+- 🌈 **Color-Coded Rendering**: Live depth/time color-coded projection in a linked child window, with a drag-to-narrow depth profile (mean intensity per slice) and adjustable palette
 - 🎛️ **External Control**: Drive the displayed LUT and value range from host code through Facade properties (`plotter.Lut`, `plotter.RangeMode`, `plotter.FixedRange`) — see the [MatrixPlotter Usage Guide](./docs/MatrixPlotter_Usage_Guide.md)
 - 📜 **Scripting (`MxPlotScriptHost`)**: Open MatrixPlotter windows from .NET 10 file-based apps (`dotnet run app.cs`), console tools, or notebook cells — no host application required. `Run(script)` starts the message loop, runs your script off the UI thread, and returns when every window it opened has closed. See [MatrixPlotter Usage Guide § Scripting with MxPlotScriptHost](./docs/MatrixPlotter_Usage_Guide.md)
 
@@ -279,7 +279,7 @@ For **scripts, console tools, and notebook cells** — anything without a pre-ex
 
 ```csharp
 // app.cs — a .NET 10 file-based app (dotnet run app.cs)
-#:package MxPlot@0.5.0
+#:package MxPlot@0.6.0
 
 using MxPlot.Core;
 using MxPlot.UI.Avalonia;
@@ -298,6 +298,14 @@ For advanced usage of `MatrixPlotter`, see the **[MatrixPlotter Usage Guide](./d
 
 ## 📊 Version History
 
+**v0.6.0** (Core value-type rework driven by Complex, faster TIFF loading)
+- 🧬 **`ElementType` (New)**: `IMatrixData.ElementType` replaces `ValueType` / `ValueTypeName`; Complex's value modes (Magnitude, Phase, Real, Imaginary…) are defined once in Core and used by rendering, histograms, line profiles and processing.
+- 🌀 **Complex in Processing**: Processing commands and Sync windows read a Complex source in the value mode the window shows, instead of always Magnitude.
+- 🧩 **Custom Structs**: A custom struct must be registered with `MatrixData<T>.Register()` before use (see the [guide](./docs/CustomValueTypes_Guide.md)).
+- 🔗 **Open Synced View (New)**: A second window following the current frame with its own display settings (e.g. Complex phase beside magnitude).
+- 🗂️ **TIFF Loading**: Compressed TIFF decodes in parallel by default; uncompressed multi-IFD TIFF opens as MMF Virtual.
+- ⚠️ **Breaking Changes**: `ValueType` / `ValueTypeName` → `ElementType`; `.mxd` header version 3 (no compatibility path for earlier files); custom structs require registration. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
+
 **v0.5.0** (Lazy-decode Virtual backends, Processing command unification, FFT, Resample)
 - 🗂️ **Lazy-Decode Virtual Backends**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand — TIFFs beyond 32,767 frames now load, and large LZW-compressed stacks open dramatically faster than before.
 - 🧩 **Processing Commands**: Every one-shot Processing/Conversion menu operation shares one implementation, offering "This frame only" / "Sync source data" / "Replace data" consistently. Menu regrouped into Data / Scale / Processing / Info tabs.
@@ -306,18 +314,7 @@ For advanced usage of `MatrixPlotter`, see the **[MatrixPlotter Usage Guide](./d
 - 🐛 **Bug Fixes**: Composite/LUT-mode sync and header glitches; Sync-follower windows not redrawing or going stale on update; linked windows left pointing at dropped data.
 - ⚠️ **Breaking Changes**: File-format layer moved to `MxPlot.Core.IO.Formats`; several Virtual-frame type renames; `IPlotterAction` → `IPlotterTool`; `Normalize`/`LogTransform` dropped their single-frame-index parameter. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
 
-**v0.4.0** (ROI View, Transpose, Composite/side-view consistency, and rendering performance)
-- 🔍 **ROI View (New)**: "Open ROI View" opens a Rectangle/Oval overlay's enclosed region in its own synced window.
-- 🔄 **Transpose**: Now a `MatrixPlotter` operation, streaming Virtual sources in RAM-bounded bands.
-- 🎨 **Composite Consistency**: Auto/All ranges survive `Refresh()`, line profiles take channel colours, side views stay in sync.
-- ⚡ **Composite RGB Fast Path**: `CompositeBitmapWriter` bypasses the general per-pixel path for byte/3-channel pure-RGB Fixed(0,255) recipes — a raw byte-interleave-speed render instead. New `CompositeRecipes` Facade property lets a host (e.g. a live camera) opt in explicitly.
-- ⚡ **Rendering Performance**: Parallel LUT rendering (previously single-threaded), a redundant full-frame re-render on unchanged Composite recipes, and a histogram recompute that could livelock under a fast live feed — all fixed. New `Parallelism` control caps render threads per host.
-- 🔌 **External Control**: `AllowDataReplace`/`AutoUpdateWindowIcon` host opt-outs; `ControlFactory` is now public.
-- 📁 **LUTs Folder**: External palettes are now found by file-based apps (`dotnet run app.cs`) and macOS `.app` bundles.
-- 🐛 **Bug Fixes**: Composite→LUT→Composite value-range loss, ColorThemes red/blue swap, region rounding/orientation, custom LUT levels, and more.
-- ⚠️ **Breaking Changes**: `LookupTable`/`ColorThemes` moved to `MxPlot.UI.Avalonia.Rendering`; `IBitmapWriter` gained `ParallelPolicy`; plugin API renames. See [CHANGELOG.md](./CHANGELOG.md) for the full list.
-
-**v0.3.0 and earlier** — Composite workflow completion, ColorCoded rendering, the `LinkedView` follower model, `MxPlotScriptHost`, MP4 export, and more. See [CHANGELOG.md](./CHANGELOG.md) for the full history.
+**v0.4.0 and earlier** — ROI View, Transpose, Composite workflow completion, ColorCoded rendering, the `LinkedView` follower model, `MxPlotScriptHost`, MP4 export, and more. See [CHANGELOG.md](./CHANGELOG.md) for the full history.
 
 ---
 > **⚠️ Note**

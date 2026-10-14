@@ -104,14 +104,16 @@ namespace MxPlot.Core
 
 
         /// <summary>
-        /// Gets the type of the value represented by the current instance.
+        /// Gets the element type descriptor for T: its CLR type (<see cref="MxPlot.Core.ElementType.Type"/>),
+        /// display/persistent names, and the scalar value modes it exposes. Two or more value modes
+        /// mean T is a structured type (e.g. <see cref="System.Numerics.Complex"/>) whose values can
+        /// be reduced to a scalar in more than one way.
         /// </summary>
-        Type ValueType { get; }
-
-        /// <summary>
-        /// Gets the name of T used in this instance, which may be a primitive type name (e.g., "double", "int") or the actual type name for custom structs.
-        /// </summary>
-        string ValueTypeName { get; }
+        /// <remarks>
+        /// <c>a.ElementType == b.ElementType</c> tells whether two datasets share an element type; it
+        /// compares <see cref="MxPlot.Core.ElementType.Type"/>, not the instances.
+        /// </remarks>
+        ElementType ElementType { get; }
 
         /// <summary>
         /// Gets the size, in bytes, of each element in the frame;
@@ -458,6 +460,17 @@ namespace MxPlot.Core
         /// <param name="frameIndex">The zero-based frame index. Pass <c>-1</c> to use the current <see cref="ActiveIndex"/>.</param>
         /// <returns>The element value cast to <c>double</c>.</returns>
         double GetValueAt(int ix, int iy, int frameIndex = -1);
+
+        /// <summary>
+        /// Returns value mode <paramref name="valueMode"/> of the element at the specified pixel coordinates --
+        /// e.g. the imaginary part of a <see cref="System.Numerics.Complex"/> element. For a single-mode element
+        /// type every mode reads the value itself.
+        /// </summary>
+        /// <param name="ix">The zero-based X index.</param>
+        /// <param name="iy">The zero-based Y index.</param>
+        /// <param name="frameIndex">The zero-based frame index. Pass <c>-1</c> to use the current <see cref="ActiveIndex"/>.</param>
+        /// <param name="valueMode">An index into <see cref="ElementType.ValueModes"/>.</param>
+        double GetValueAt(int ix, int iy, int frameIndex, int valueMode);
 
         /// <summary>
         /// Returns the value at the specified coordinates (x, y) as a double. 

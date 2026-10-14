@@ -32,7 +32,7 @@
             IMatrixData raw = Read(filePath);
             if (raw is MatrixData<T> typed) return typed;
             throw new InvalidOperationException(
-                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+                $"File contains '{raw.ElementType.Name}' data, but '{typeof(T).Name}' was requested.");
         }
 
         public IMatrixData Read(string path)

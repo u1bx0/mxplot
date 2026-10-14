@@ -22,6 +22,8 @@ namespace MxPlot.UI.Avalonia.Views
 
         bool ICommandHost.IsReplaceBlocked => IsReplaceDataBlocked;
 
+        int ICommandHost.ValueMode => DisplayedValueMode;
+
         (double Min, double Max) ICommandHost.DisplayedRange
         {
             get
@@ -69,6 +71,15 @@ namespace MxPlot.UI.Avalonia.Views
 
         void ICommandHost.ShowSyncedResult(IMatrixData result, string title, string? compositeAxisName, bool copyDisplayState,
             Func<SyncInput, CancellationToken, SyncOutput> transform)
+            => OpenSyncedWindow(result, title, compositeAxisName, copyDisplayState, transform);
+
+        /// <summary>
+        /// Opens a window showing <paramref name="result"/> that follows this one: whenever this window's active
+        /// frame changes or its data is refreshed, the window's data is recomputed by <paramref name="transform"/>.
+        /// Returns the new window, for a caller that sets it up further.
+        /// </summary>
+        private MatrixPlotter OpenSyncedWindow(IMatrixData result, string title, string? compositeAxisName,
+            bool copyDisplayState, Func<SyncInput, CancellationToken, SyncOutput> transform)
         {
             // CreateLinked marks the child as secondary, which suppresses the unsaved-changes
             // confirmation on close: a window that follows its source is fully derived and recomputed
@@ -89,13 +100,37 @@ namespace MxPlot.UI.Avalonia.Views
                 var cube = source.TryExtractCompositeFrameCube(sourceData);
                 IMatrixData operand = cube?.Cube
                     ?? sourceData.Apply(new SliceAtOperation(sourceData.ActiveIndex));
+                // Read on the UI thread, before the recompute moves off it.
+                int valueMode = source.DisplayedValueMode;
 
                 return Task.Run<LinkedViewUpdate?>(() =>
                 {
-                    var output = transform(new SyncInput(sourceData, operand, cube?.ChannelAxisName), ct);
+                    var output = transform(new SyncInput(sourceData, operand, cube?.ChannelAxisName, valueMode), ct);
                     return new LinkedViewUpdate(output.Data, output.CompositeAxisName);
                 }, ct);
             });
+            return follower;
+        }
+
+        /// <summary>
+        /// Opens a second view of the current frame that stays in sync with this window: it moves to the frame
+        /// this window moves to and refreshes with its data. It starts with this window's display settings,
+        /// value mode included, and keeps its own from then on - so a Complex image can be shown in another
+        /// value mode (its phase next to its magnitude, say).
+        /// </summary>
+        internal void OpenSyncedView()
+        {
+            var data = _currentData;
+            if (data == null) return;
+
+            // The same part of the data every refresh takes: the channel cube in Composite mode, otherwise the
+            // active frame.
+            var cube = TryExtractCompositeFrameCube(data);
+            IMatrixData current = cube?.Cube ?? data.Apply(new SliceAtOperation(data.ActiveIndex));
+
+            var follower = OpenSyncedWindow(current, $"Synced View of {Title}", cube?.ChannelAxisName,
+                copyDisplayState: true, (input, _) => new SyncOutput(input.Operand, input.CompositeAxisName));
+            follower.SetComplexValueMode(_view.ComplexValueMode);
         }
 
         /// <summary>

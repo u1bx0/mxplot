@@ -28,13 +28,13 @@ namespace MxPlot.Extensions.Tiff
     public class OmeTiffHandlerInstance<T> where T : unmanaged
     {
         /// <summary>
-        /// Maximum degree of parallelism for InMemory loading.
-        /// <c>0</c> or <c>1</c> = sequential (default).
+        /// Maximum degree of parallelism for InMemory loading of compressed data.
+        /// <c>-1</c> = all logical cores (default).
+        /// <c>0</c> or <c>1</c> = sequential.
         /// <c>N &gt; 1</c> = open N LibTiff handles and decompress frames in parallel.
-        /// Most effective for LZW/Deflate-compressed files where decompression is CPU-bound.
-        /// Uncompressed files are already fast after the O(N) IFD traversal fix.
+        /// Uncompressed data always reads sequentially (see <see cref="TiffFrameCodec.ResolveLoadThreads"/>).
         /// </summary>
-        public int MaxParallelDegree { get; set; } = 0;
+        public int MaxParallelDegree { get; set; } = -1;
 
         #region Write Methods
 
@@ -331,10 +331,11 @@ namespace MxPlot.Extensions.Tiff
                     data.IsVirtualMode = false;
 
                     bool isTiledInMemory = tiff.GetField(TiffTag.TILEWIDTH) != null;
-                    if (MaxParallelDegree > 1)
+                    int threads = TiffFrameCodec.ResolveLoadThreads(MaxParallelDegree, isCompressed, data.TotalFrames);
+                    if (threads > 1)
                     {
-                        Debug.WriteLine($"[ReadHyperstack] Parallel loading (degree={MaxParallelDegree})");
-                        ReadImageDataParallel(filename, data, ifdOffsets, MaxParallelDegree, isTiledInMemory, progress, ct);
+                        Debug.WriteLine($"[ReadHyperstack] Parallel loading ({threads} threads)");
+                        ReadImageDataParallel(filename, data, ifdOffsets, threads, isTiledInMemory, progress, ct);
                     }
                     else
                     {
@@ -955,47 +956,7 @@ namespace MxPlot.Extensions.Tiff
 
 
         internal (long[][] offsets, long[][] byteCounts) ScanStripInfo(BitMiracle.LibTiff.Classic.Tiff tiff, long[] ifdOffsets, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
-        {
-            RequireIfdCount(ifdOffsets, totalFrames);
-            long[][] offsets = new long[totalFrames][];
-            long[][] byteCounts = new long[totalFrames][];
-
-            progress?.Report(-totalFrames); // Signal total frame count to the UI
-
-            for (int i = 0; i < totalFrames; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                TiffIfdIndex.SetFrame(tiff, ifdOffsets, i);
-                // 1. Verify that the frame is uncompressed (Virtual mode requires raw access)
-                FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
-                if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
-                {
-                    throw new NotSupportedException($"Virtual mode requires uncompressed TIFF. Frame {i} is compressed.");
-                }
-
-                // 2. Read strip offsets
-                FieldValue[] offsetTag = tiff.GetField(TiffTag.STRIPOFFSETS);
-                if (offsetTag == null || offsetTag.Length == 0)
-                    throw new InvalidDataException($"Missing StripOffsets tag at frame {i}.");
-
-                // 3. Read strip byte counts
-                FieldValue[] byteCountTag = tiff.GetField(TiffTag.STRIPBYTECOUNTS);
-                if (byteCountTag == null || byteCountTag.Length == 0)
-                    throw new InvalidDataException($"Missing StripByteCounts tag at frame {i}.");
-
-                offsets[i] = ExtractLongArray(offsetTag[0]);
-                byteCounts[i] = ExtractLongArray(byteCountTag[0]);
-                progress?.Report(i);
-            }
-
-            return (offsets, byteCounts);
-        }
-
-        private static void RequireIfdCount(long[] ifdOffsets, int totalFrames)
-        {
-            if (ifdOffsets.Length < totalFrames)
-                throw new InvalidDataException($"The file has {ifdOffsets.Length} IFDs, but the metadata declares {totalFrames} frames.");
-        }
+            => TiffStorageLayout.ScanStrips(tiff, ifdOffsets, totalFrames, progress, ct);
 
         /// <summary>
         /// Opens <paramref name="filePath"/> read-only, scans all IFDs and returns strip offset/bytecount arrays.
@@ -1040,84 +1001,7 @@ namespace MxPlot.Extensions.Tiff
         }
 
         private (int tileWidth, int tileLength, long[][] offsets, long[][] byteCounts) ScanTileInfo(BitMiracle.LibTiff.Classic.Tiff tiff, long[] ifdOffsets, int totalFrames, IProgress<int>? progress, CancellationToken ct = default)
-        {
-            RequireIfdCount(ifdOffsets, totalFrames);
-            long[][] offsets = new long[totalFrames][];
-            long[][] byteCounts = new long[totalFrames][];
-
-            progress?.Report(-totalFrames);
-
-            TiffIfdIndex.SetFrame(tiff, ifdOffsets, 0);
-
-            // Read tile dimensions (shared across all frames) from directory 0
-            FieldValue[] twTag = tiff.GetField(TiffTag.TILEWIDTH);
-            FieldValue[] tlTag = tiff.GetField(TiffTag.TILELENGTH);
-
-            if (twTag == null || tlTag == null)
-                throw new InvalidDataException("TileWidth or TileLength tag is missing in a tiled TIFF.");
-
-            int tileWidth = twTag[0].ToInt();
-            int tileLength = tlTag[0].ToInt();
-
-            for (int i = 0; i < totalFrames; i++)
-            {
-                ct.ThrowIfCancellationRequested();
-                TiffIfdIndex.SetFrame(tiff, ifdOffsets, i);
-                FieldValue[] compTag = tiff.GetField(TiffTag.COMPRESSION);
-                if (compTag != null && compTag[0].ToInt() != (int)Compression.NONE)
-                {
-                    throw new NotSupportedException($"Virtual mode requires uncompressed TIFF. Frame {i} is compressed.");
-                }
-
-                // Tiled TIFFs use TILEOFFSETS / TILEBYTECOUNTS instead of STRIPOFFSETS / STRIPBYTECOUNTS
-                FieldValue[] offsetTag = tiff.GetField(TiffTag.TILEOFFSETS);
-                if (offsetTag == null || offsetTag.Length == 0)
-                    throw new InvalidDataException($"Missing TileOffsets tag at frame {i}.");
-
-                FieldValue[] byteCountTag = tiff.GetField(TiffTag.TILEBYTECOUNTS);
-                if (byteCountTag == null || byteCountTag.Length == 0)
-                    throw new InvalidDataException($"Missing TileByteCounts tag at frame {i}.");
-
-                // Each frame contains multiple tiles; array length equals the total tile count
-                //offsets[i] = offsetTag[0].ToIntArray().Select(v => (long)v).ToArray();
-                //byteCounts[i] = byteCountTag[0].ToIntArray().Select(v => (long)v).ToArray();
-
-                offsets[i] = ExtractLongArray(offsetTag[0]);
-                byteCounts[i] = ExtractLongArray(byteCountTag[0]);
-
-                progress?.Report(i);
-            }
-
-            return (tileWidth, tileLength, offsets, byteCounts);
-        }
-
-        private long[] ExtractLongArray(BitMiracle.LibTiff.Classic.FieldValue fieldValue)
-        {
-            //if (fieldValue == null) return Array.Empty<long>();
-
-            // 1. For BigTIFF (>16 GB), LibTiff may hold long[] internally; try direct cast first
-            if (fieldValue.Value is long[] longArray)
-            {
-                return longArray;
-            }
-
-            // 2. ulong[] case
-            if (fieldValue.Value is ulong[] ulongArray)
-            {
-                return ulongArray.Select(v => (long)v).ToArray();
-            }
-
-            // 3. Standard TIFF (or 32-bit downcast) case
-            int[] intArray = fieldValue.ToIntArray();
-            if (intArray != null)
-            {
-                // Cast int to uint before widening to long to correctly recover
-                // 2 GB – 4 GB offsets that appeared negative as signed int
-                return intArray.Select(v => (long)(uint)v).ToArray();
-            }
-
-            return Array.Empty<long>();
-        }
+            => TiffStorageLayout.ScanTiles(tiff, ifdOffsets, totalFrames, progress, ct);
 
         #endregion
         #endregion
@@ -1989,7 +1873,7 @@ namespace MxPlot.Extensions.Tiff
         /// <summary>
         /// Reads the full hyperstack with automatic pixel type detection.
         /// </summary>
-        public static object ReadHyperstackAuto(string filename, LoadingMode mode, IProgress<int>? progress = null, int maxParallelDegree = 0, CancellationToken ct = default)
+        public static object ReadHyperstackAuto(string filename, LoadingMode mode, IProgress<int>? progress = null, int maxParallelDegree = -1, CancellationToken ct = default)
         {
             var pixelType = DetectPixelType(filename);
 

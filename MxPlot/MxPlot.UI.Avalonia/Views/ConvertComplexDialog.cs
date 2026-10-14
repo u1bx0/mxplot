@@ -26,6 +26,10 @@ namespace MxPlot.UI.Avalonia.Views
         private static ComplexValueMode _lastMode = ComplexValueMode.Magnitude;
         private static bool _lastApplyLog10 = false;
 
+        // What the user chose for log10, kept while the checkbox is disabled for a signed mode so that it
+        // comes back when they return to Magnitude or Power.
+        private bool _log10Preference;
+
         /// <param name="isLinkWindow">
         /// Whether the owning window is itself being kept live by a Log Transform / Spatial
         /// Filter sync — if so, "Replace current data" is disabled, since that window's content
@@ -59,8 +63,16 @@ namespace MxPlot.UI.Avalonia.Views
             _modeCombo.SelectedIndex = (int)_lastMode;
 
             _log10Check = ControlFactory.MakeCheckBox("Apply log₁₀ transformation", fontSize: 11);
+            _log10Preference = _lastApplyLog10;
             _log10Check.IsChecked = _lastApplyLog10;
-            ToolTip.SetTip(_log10Check, "Applies log₁₀ to each output value (with epsilon floor to avoid log(0)).");
+            _log10Check.IsCheckedChanged += (_, _) =>
+            {
+                if (_log10Check.IsEnabled) _log10Preference = _log10Check.IsChecked == true;
+            };
+            ToolTip.SetTip(_log10Check,
+                "Applies log₁₀ to each output value, with the same floor for zero as Log Transform.\n" +
+                "Available for Magnitude and Power, which are never negative.");
+            ToolTip.SetShowOnDisabled(_log10Check, true);
 
             _sizeText = new TextBlock
             {
@@ -78,8 +90,13 @@ namespace MxPlot.UI.Avalonia.Views
             };
 
             Content = BuildContent();
-            _modeCombo.SelectionChanged += (_, _) => UpdateInfoText();
+            _modeCombo.SelectionChanged += (_, _) =>
+            {
+                UpdateInfoText();
+                UpdateLog10Availability();
+            };
             UpdateInfoText();
+            UpdateLog10Availability();
         }
 
         // ── Layout ────────────────────────────────────────────────────────────
@@ -189,17 +206,31 @@ namespace MxPlot.UI.Avalonia.Views
             };
         }
 
+        /// <summary>
+        /// Offers log10 only for Magnitude and Power. Real, Imaginary and Phase take negative values, which
+        /// log10 would silently flatten onto its floor.
+        /// </summary>
+        private void UpdateLog10Availability()
+        {
+            int idx = _modeCombo.SelectedIndex;
+            var mode = idx >= 0 && idx < 5 ? (ComplexValueMode)idx : ComplexValueMode.Magnitude;
+            bool nonNegative = mode is ComplexValueMode.Magnitude or ComplexValueMode.Power;
+
+            _log10Check.IsEnabled = nonNegative;
+            _log10Check.IsChecked = nonNegative && _log10Preference;
+        }
+
         // ── OK ────────────────────────────────────────────────────────────────
 
         private void OnOk()
         {
             int idx = _modeCombo.SelectedIndex;
             var mode = idx >= 0 && idx < 5 ? (ComplexValueMode)idx : ComplexValueMode.Magnitude;
-            bool applyLog10 = _log10Check.IsChecked == true;
+            bool applyLog10 = _log10Check.IsEnabled && _log10Check.IsChecked == true;
             bool replaceData = ReplaceDataCheckBox.IsChecked == true;
 
             _lastMode = mode;
-            _lastApplyLog10 = applyLog10;
+            _lastApplyLog10 = _log10Preference;
 
             Close(((ComplexValueMode, bool, bool)?)(mode, applyLog10, replaceData));
         }

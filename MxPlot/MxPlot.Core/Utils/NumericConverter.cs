@@ -35,7 +35,27 @@ namespace MxPlot.Core.Utils
         private const double ULongMaxAsDouble = 1.8446744073709550E+19;  // ulong.MaxValue rounded down to nearest representable double
 
         /// <summary>
-        /// Converts a value of type T to double.
+        /// Converts a value of type T to double, reading value mode <paramref name="mode"/> of a structured type.
+        /// </summary>
+        /// <typeparam name="T">The type of the value to convert.</typeparam>
+        /// <param name="value">The value to convert.</param>
+        /// <param name="mode">The value mode to read; a single-mode type has only its value.</param>
+        /// <returns>The converted double value.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static double ToDouble<T>(T value, int mode) where T : unmanaged
+        {
+            // Complex keeps a JIT-folded path of its own; a primitive has only mode 0.
+            if (typeof(T) == typeof(Complex))
+                return Unsafe.As<T, Complex>(ref value).ToScalar((ComplexValueMode)mode);
+            if (mode == 0)
+                return ToDouble(value);
+            // A registered custom struct: its ToScalar, called directly. Otherwise a primitive, whose only mode
+            // is its value.
+            return MatrixData<T>.RegisteredToScalar is { } toScalar ? toScalar(value, mode) : ToDouble(value);
+        }
+
+        /// <summary>
+        /// Converts a value of type T to double, reading value mode 0 of a structured type.
         /// </summary>
         /// <typeparam name="T">The type of the value to convert.</typeparam>
         /// <param name="value">The value to convert.</param>
@@ -54,7 +74,13 @@ namespace MxPlot.Core.Utils
             if (typeof(T) == typeof(byte)) return Unsafe.As<T, byte>(ref value);
             if (typeof(T) == typeof(sbyte)) return Unsafe.As<T, sbyte>(ref value);
             if (typeof(T) == typeof(decimal)) return (double)Unsafe.As<T, decimal>(ref value);
-            if (typeof(T) == typeof(Complex)) return Unsafe.As<T, Complex>(ref value).Magnitude;
+            if (typeof(T) == typeof(Complex)) return Unsafe.As<T, Complex>(ref value).ToScalar(ComplexValueMode.Magnitude);
+
+            // A registered custom struct reads its primary mode through its ToScalar, called directly (one
+            // indirect call). The built-in branches above are folded away by the JIT per T, so this lookup
+            // costs nothing for them.
+            if (MatrixData<T>.RegisteredToScalar is { } toScalar)
+                return toScalar(value, 0);
 
             return Convert.ToDouble(value);
         }

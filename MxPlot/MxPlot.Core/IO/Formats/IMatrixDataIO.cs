@@ -157,6 +157,54 @@ namespace MxPlot.Core.IO.Formats
         /// Gets or sets the loading strategy for this reader.
         /// </summary>
         LoadingMode LoadingMode { get; set; }
+
+        /// <summary>
+        /// Reports, without reading pixel data, which backend a <see cref="LoadingMode.Virtual"/>
+        /// load of <paramref name="filePath"/> would use and how many frames it holds, so a caller
+        /// can decide the loading mode (or whether to ask the user) before reading.
+        /// </summary>
+        /// <remarks>
+        /// The default implementation returns <see cref="VirtualLoadProbe.Unknown"/>. It must not
+        /// throw for a file the reader cannot handle; return <see cref="VirtualLoadProbe.Unknown"/>
+        /// instead and let <see cref="IMatrixDataReader.Read"/> report the error.
+        /// </remarks>
+        VirtualLoadProbe ProbeVirtualLoad(string filePath) => VirtualLoadProbe.Unknown;
+    }
+
+    /// <summary>
+    /// The backend a <see cref="LoadingMode.Virtual"/> load would use for a particular file.
+    /// </summary>
+    public enum VirtualBackendKind
+    {
+        /// <summary>The reader did not say.</summary>
+        Unknown,
+
+        /// <summary>This file cannot be loaded virtually; every mode loads it in memory.</summary>
+        None,
+
+        /// <summary>
+        /// Raw pixel data mapped from the file (memory-mapped file). Frames are copied out on access
+        /// and the cache stays bounded, so the data never becomes fully resident in memory.
+        /// </summary>
+        Mapped,
+
+        /// <summary>
+        /// Frames decoded on access (e.g. compressed TIFF), filling the cache in the background. When
+        /// the dataset fits the memory budget it ends up fully resident, equivalent to an in-memory
+        /// load; otherwise it stays on demand.
+        /// </summary>
+        Decoded,
+    }
+
+    /// <summary>
+    /// Result of <see cref="IVirtualLoadable.ProbeVirtualLoad"/>.
+    /// </summary>
+    /// <param name="Backend">The backend a virtual load would use.</param>
+    /// <param name="FrameCount">Number of frames in the file, or 0 when unknown.</param>
+    public readonly record struct VirtualLoadProbe(VirtualBackendKind Backend, int FrameCount)
+    {
+        /// <summary>Nothing is known about the file.</summary>
+        public static VirtualLoadProbe Unknown => new(VirtualBackendKind.Unknown, 0);
     }
 
     /// <summary>

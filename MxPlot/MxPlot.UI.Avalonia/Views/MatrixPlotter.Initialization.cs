@@ -64,6 +64,11 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel = new OrthogonalPanel();
             _view = _orthoPanel.MainView;
             _orthoController = new OrthogonalViewController(_orthoPanel);
+            // A direct change on any of the three views (plotter.MainView.IsAspectCorrectionEnabled = ...)
+            // is carried to the other two and to the Scale tab, like the Scale tab's own checkbox does.
+            _orthoPanel.MainView.AspectCorrectionChanged += OnViewAspectCorrectionChanged;
+            _orthoPanel.BottomView.AspectCorrectionChanged += OnViewAspectCorrectionChanged;
+            _orthoPanel.RightView.AspectCorrectionChanged += OnViewAspectCorrectionChanged;
             _orthoController.XYProjectionChanged += OnXYProjectionChanged;
             _orthoController.ColorCodedComputeFailed += () => _xyProjectionWindow?.SetColorCodedBusy(false);
             _orthoPanel.ProjectionSelector.CreateProjectedDataRequested +=
@@ -621,11 +626,7 @@ namespace MxPlot.UI.Avalonia.Views
             _view.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_view);
             _view.ExtractDimensionRequested += (_, _) => _ = CommandCatalog.ExtractDimension.RunAsync(this);
             _view.ScrollStateChanged += (_, _) => UpdateStatusBar();
-            _view.SyncComplexValueModeRequested += (_, mode) =>
-            {
-                _view.ComplexValueMode = mode;
-                SyncComplexValueModeChanged();
-            };
+            _view.SyncComplexValueModeRequested += (_, mode) => SetComplexValueMode(mode);
 
             // ── Bottom orthogonal view ────────────────────────────────────────
             _orthoPanel.BottomView.OverlayManager.ObjectAdded += OnOverlayObjectAdded;
@@ -637,11 +638,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.BottomView.CopiedToClipboard += (_, msg) => ShowToast(msg);
             _orthoPanel.BottomView.CropRequested += (_, _) => InvokeCropTool();
             _orthoPanel.BottomView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.BottomView);
-            _orthoPanel.BottomView.SyncComplexValueModeRequested += (_, mode) =>
-            {
-                _view.ComplexValueMode = mode;
-                SyncComplexValueModeChanged();
-            };
+            _orthoPanel.BottomView.SyncComplexValueModeRequested += (_, mode) => SetComplexValueMode(mode);
             _orthoPanel.BottomView.MatrixDataChanged += (_, _) => OnSideViewMatrixDataChanged(_orthoPanel.BottomView);
 
             // ── Right orthogonal view ─────────────────────────────────────────
@@ -654,11 +651,7 @@ namespace MxPlot.UI.Avalonia.Views
             _orthoPanel.RightView.CopiedToClipboard += (_, msg) => ShowToast(msg);
             _orthoPanel.RightView.CropRequested += (_, _) => InvokeCropTool();
             _orthoPanel.RightView.ExtractFrameRequested += (_, _) => InvokeExtractFrame(_orthoPanel.RightView);
-            _orthoPanel.RightView.SyncComplexValueModeRequested += (_, mode) =>
-            {
-                _view.ComplexValueMode = mode;
-                SyncComplexValueModeChanged();
-            };
+            _orthoPanel.RightView.SyncComplexValueModeRequested += (_, mode) => SetComplexValueMode(mode);
             _orthoPanel.RightView.MatrixDataChanged += (_, _) => OnSideViewMatrixDataChanged(_orthoPanel.RightView);
 
             // ── Dirty badge ───────────────────────────────────────────────────
@@ -701,7 +694,7 @@ namespace MxPlot.UI.Avalonia.Views
                 // If the selected LUT matches the snapshot the state is clean — not dirty.
                 // This also suppresses Avalonia's deferred SelectionChanged re-fire on
                 // TemplateApplied, which would otherwise produce a false-positive revert
-                // button for non-default LUTs like BSMod.
+                // button for non-default LUTs like Profiler.
                 bool lutMatchesSnapshot = _renderSnapshot != null
                     && string.Equals(lut.Name, _renderSnapshot.LutName, StringComparison.OrdinalIgnoreCase)
                     && _view.LutDepth == _renderSnapshot.LutLevel

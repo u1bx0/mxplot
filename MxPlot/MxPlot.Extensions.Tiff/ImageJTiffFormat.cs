@@ -66,13 +66,13 @@ namespace MxPlot.Extensions.Tiff
         bool IMatrixDataReader.IsCancellable => true;
 
         /// <summary>
-        /// Maximum degree of parallelism for loading compressed files.
-        /// <c>1</c> = sequential.
-        /// <c>-1</c> = auto (use all available cores, default).
+        /// Maximum degree of parallelism for InMemory loading of compressed data.
+        /// <c>-1</c> = all logical cores (default).
+        /// <c>0</c> or <c>1</c> = sequential.
         /// <c>N &gt; 1</c> = use N threads.
-        /// Effective only for LZW/Deflate-compressed files; uncompressed files are I/O-bound and gain nothing.
+        /// Uncompressed data always reads sequentially: it is I/O-bound.
         /// </summary>
-        public int MaxParallelDegree { get; set; } = 1;
+        public int MaxParallelDegree { get; set; } = -1;
 
         public MatrixData<T> Read<T>(string filePath) where T : unmanaged
         {
@@ -102,6 +102,8 @@ namespace MxPlot.Extensions.Tiff
                 throw new NotSupportedException($"Unsupported pixel type detected: {typeName}. Only uint8 and uint16 are supported.");
             }
         }
+
+        public VirtualLoadProbe ProbeVirtualLoad(string filePath) => ImageJTiffHandler.ProbeVirtualLoad(filePath);
 
         public void Write<T>(string filePath, MatrixData<T> data, IBackendAccessor accessor) where T : unmanaged
         {

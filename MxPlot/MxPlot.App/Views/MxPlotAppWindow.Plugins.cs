@@ -32,7 +32,7 @@ namespace MxPlot.App.Views
             var plugins = MxPlotAppPluginRegistry.Plugins;
             if (plugins.Count == 0) return;
 
-            foreach (var plugin in plugins)
+            MenuItem MakeItem(IMxPlotAppPlugin plugin)
             {
                 var captured = plugin;
                 var item = new MenuItem { Header = plugin.CommandName };
@@ -42,7 +42,18 @@ namespace MxPlot.App.Views
                     try { captured.Run(CreateMxPlotAppContext()); }
                     catch { /* silently absorb plugin errors */ }
                 };
-                toolsItem.Items.Add(item);
+                return item;
+            }
+
+            foreach (var plugin in plugins.Where(p => string.IsNullOrEmpty(p.GroupName)))
+                toolsItem.Items.Add(MakeItem(plugin));
+
+            foreach (var grp in plugins.Where(p => !string.IsNullOrEmpty(p.GroupName)).GroupBy(p => p.GroupName!))
+            {
+                var groupItem = new MenuItem { Header = grp.Key };
+                foreach (var plugin in grp)
+                    groupItem.Items.Add(MakeItem(plugin));
+                toolsItem.Items.Add(groupItem);
             }
         }
 
@@ -159,7 +170,7 @@ namespace MxPlot.App.Views
         private void ToolsGenerateJulia_Click(object? sender, RoutedEventArgs e)
         {
             var md = Services.TestDataGenerator.GenerateJuliaSet();
-            MatrixPlotter.Create(md, title: "Julia Set  1024×1024  ×8 frames (float)", lut: ColorThemes.BSMod).Show();
+            MatrixPlotter.Create(md, title: "Julia Set  1024×1024  ×8 frames (float)", lut: ColorThemes.Profiler).Show();
         }
     }
 }

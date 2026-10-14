@@ -43,23 +43,22 @@ namespace MxPlot.UI.Avalonia.Rendering
     /// <see cref="MxPlot.Core.Axis.Index"/>, so holding this reference after the source data's axis
     /// is later swapped or its index changes elsewhere is safe.
     /// </param>
-    /// <param name="Histogram">
-    /// One bin per axis index across the whole axis ([0, Axis.Count-1]), counting how many pixels'
-    /// <paramref name="WinnerIndex"/> landed on each -- precomputed alongside the scan itself
-    /// (<c>OrthogonalViewController.ComputeXYProjectionAsync</c>'s background <c>Task.Run</c>) so
-    /// the details panel's depth histogram (<c>MatrixPlotter.UpdateColorCodedHistogram</c>) only
-    /// has to hand this array to <c>HistogramPlotControl</c>, never scan <see cref="WinnerIndex"/>
-    /// itself on the UI thread. <see langword="null"/> only if <see cref="Axis"/> was somehow
-    /// unresolvable at compute time.
+    /// <param name="DepthProfile">
+    /// The mean pixel value of every slice across the whole axis ([0, Axis.Count-1]) -- how the
+    /// signal is distributed along the scanned axis, whatever Start/End currently select. Computed
+    /// on the background thread that produced this record
+    /// (<c>OrthogonalViewController.ComputeXYProjectionAsync</c>), so the details panel's profile plot
+    /// (<c>MatrixPlotter.UpdateColorCodedHistogram</c>) only hands it to <c>HistogramPlotControl</c>.
+    /// <see langword="null"/> only if <see cref="Axis"/> could not be resolved at compute time.
     /// </param>
     /// <param name="BlendedArgb">
     /// Color (RGB-Max) / (RGB-Add) only (and the RGB-Avg blend, which has no ComboBox item): the already-blended packed-ARGB image (one frame, row-major, the
     /// window's XY size) from <see cref="ColorCodedRgbBlender"/>. When non-<see langword="null"/>,
     /// <see cref="ColorCodedBitmapWriter"/> just copies it to the bitmap and ignores the
     /// winner-index/depth-color path; <see cref="WinnerIndex"/> still carries the peak depth for the
-    /// depth histogram and pointer read-out. <see langword="null"/> for Color(Max)/(Min).
+    /// pointer read-out. <see langword="null"/> for Color(Max)/(Min).
     /// </param>
     public sealed record ColorCodedRenderInfo(
         IMatrixData WinnerIndex, int Start, IReadOnlyList<int> DepthColors,
-        double ValueMin, double ValueMax, Axis Axis, int[]? Histogram = null, int[]? BlendedArgb = null);
+        double ValueMin, double ValueMax, Axis Axis, double[]? DepthProfile = null, int[]? BlendedArgb = null);
 }

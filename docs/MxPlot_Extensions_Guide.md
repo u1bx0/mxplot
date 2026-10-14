@@ -79,7 +79,7 @@ namespace MxPlot.Extensions.Zarr
             IMatrixData raw = Read(filePath);
             if (raw is MatrixData<T> typed) return typed;
             throw new InvalidOperationException(
-                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+                $"File contains '{raw.ElementType.Name}' data, but '{typeof(T).Name}' was requested.");
         }
 
         // Type-agnostic overload: caller doesn't know (or care) which element type the file holds.
@@ -416,15 +416,9 @@ Has access to all currently open datasets; suited for cross-window processing or
 
 ### 5.2 Project Setup
 
-`MxPlot.App` is the reference application, not a library, and is not published as a NuGet package
-(a future version is planned to split `IMxPlotAppPlugin`/`IMxPlotAppContext` into a small
-`MxPlot.App.Plugins` package for a plain `PackageReference`). Until then, reference the two interface
-types either of two ways:
-
-- **Clone the source and add a `ProjectReference`** to `MxPlot.App\MxPlot.App.csproj`.
-- **Reference the built `MxPlot.App.dll` directly**, pointing `HintPath` at wherever MxPlot.App is
-  installed locally (the folder containing `MxPlot.exe`) — works from just the released app, no
-  source clone needed:
+`MxPlot.App` is the reference application, not a library, and is not published as a NuGet package.
+`IMxPlotAppPlugin`/`IMxPlotAppContext` instead live in `MxPlot.App.Plugins`, a small package with no
+other dependency, published just for this purpose:
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -436,16 +430,7 @@ types either of two ways:
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MxPlot" Version="x.x.x" />
-
-    <!-- MxPlot.App itself isn't a NuGet package -- reference the local install's DLL directly, just
-         for IMxPlotAppPlugin/IMxPlotAppContext. Private=false (CopyLocal=false) keeps it out of this
-         plugin's own build output: MxPlot.App.exe already has its own copy, and MxPlotAppPluginRegistry
-         .LoadFromDirectory() tries to load every DLL in the plugins folder, so a redundant copy of
-         MxPlot.App.dll sitting there is at best wasted work. -->
-    <Reference Include="MxPlot.App">
-      <HintPath>C:\Path\To\Installed\MxPlot.App\MxPlot.App.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <PackageReference Include="MxPlot.App.Plugins" Version="x.x.x" />
   </ItemGroup>
 </Project>
 ```
@@ -480,6 +465,10 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
     }
 }
 ```
+
+`IMxPlotAppPlugin` also has an optional `GroupName`: plugins sharing the same non-null group name are
+collected under a shared submenu in the Tools menu instead of sitting at the top level, the same
+pattern `IMatrixPlotterPlugin` uses for its Plugins-tab grouping (§4.3).
 
 #### File Dialog Example (async)
 

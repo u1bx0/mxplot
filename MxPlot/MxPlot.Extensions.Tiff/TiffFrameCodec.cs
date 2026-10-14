@@ -22,6 +22,25 @@ namespace MxPlot.Extensions.Tiff;
 internal static class TiffFrameCodec
 {
     /// <summary>
+    /// Number of threads an InMemory load decodes frames with, from a reader's
+    /// <c>MaxParallelDegree</c>: <c>-1</c> (or any negative value) = all logical cores, <c>0</c> or
+    /// <c>1</c> = sequential, <c>N &gt; 1</c> = N threads, never more than the frame count.
+    /// </summary>
+    /// <remarks>
+    /// Uncompressed data always reads sequentially whatever the degree: it is I/O-bound, and
+    /// concurrent reads through several handles gain little even from an SSD's cache and only add
+    /// seeks on a spinning disk or a network share. Decoding compressed data is CPU-bound and scales
+    /// with the core count.
+    /// </remarks>
+    public static int ResolveLoadThreads(int maxParallelDegree, bool isCompressed, int frameCount)
+    {
+        if (!isCompressed || frameCount <= 1)
+            return 1;
+        int degree = maxParallelDegree < 0 ? Environment.ProcessorCount : Math.Max(1, maxParallelDegree);
+        return Math.Min(degree, frameCount);
+    }
+
+    /// <summary>
     /// Reads one frame from a strip-organized TIFF using <c>ReadEncodedStrip</c> --
     /// one API call per strip instead of one per row.
     /// </summary>

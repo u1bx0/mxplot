@@ -1,6 +1,25 @@
 ﻿## 📊 Version History
 
 
+**v0.6.0** (Core value-type rework driven by Complex, faster TIFF loading)
+- 🧬 **`ElementType` (New)**: `IMatrixData.ElementType` describes the element type (CLR type, display name, persistent name, value modes), replacing `ValueType` / `ValueTypeName`. Complex's value modes (Magnitude, Phase, Real, Imaginary…) are now defined once in Core and used by rendering, histograms, line profiles, `GetValueAt(…, valueMode)` and `LogTransform`.
+- 🌀 **Complex in Processing**: Processing commands and Sync windows read a Complex source in the value mode the window shows. Previously they were fixed to Magnitude, and e.g. Normalize followed by Imaginary display could crash or lose the phase.
+- 🧩 **Custom Structs**: A custom struct is a `MatrixData<T>` element only after `MatrixData<T>.Register()` (see `docs/CustomValueTypes_Guide.md`); unregistered types throw on construction.
+- 🔗 **Open Synced View (New)**: Data > View > Open Synced View — a second window following the current frame with its own display settings (e.g. Complex phase beside magnitude).
+- 🗃️ **`.mxd`**: Header version 3 (`ElementType` vocabulary, `ElementSize`). Complex `.mxd` opens Virtual; registered custom structs now load dynamically.
+- 🗂️ **TIFF Loading**: Compressed TIFF decodes in parallel by default; uncompressed multi-IFD TIFF opens as MMF Virtual; fully cached Lazy-decode data releases its file handle. MxPlot.App picks the loading mode through `LoadingModePolicy`.
+- 🧮 **Native Intel MKL**: FFT can use native MKL by copying its files next to the executable; the FFT dialog reports its state.
+- 🔌 **App Plugins**: Plugin contract split into `MxPlot.App.Plugins`; `GroupName` folds plugins into a Tools submenu.
+- 💅 **UI**: Expand All / Collapse All on the Data/Processing tab headers.
+- 📐 **Square Pixels / Cubic Voxels**: A Scale-tab option turns off the step-size aspect correction of the XY and orthogonal side views together.
+- 🌈 **Color-Coded Depth Profile**: The depth plot in the Color-coded details panel now shows each slice's mean intensity along the axis instead of per-depth pixel counts, with the part outside Start/End grayed. Data that cannot be projected (e.g. Complex) gets a short message in place of the projection controls.
+- ⚠️ **Breaking Changes**:
+  - `IMatrixData.ValueType` / `ValueTypeName` → `ElementType`; `MatrixDataConfig.ValueTypeName` / `ValueTypeAlias` and `MatrixData.GetValueTypeName` renamed accordingly.
+  - Custom structs must be registered; `ValueProvider<T>` is internal (register `ToScalar` functions instead).
+  - `.mxd` header version 3, with no compatibility path for earlier files.
+  - Bitmap writers take a `ComplexValueMode` instead of a converter delegate; the UI's `ComplexValueModeConverter` is removed.
+
+
 **v0.5.0** (Lazy-decode Virtual backends, unified Processing commands, FFT, and Resample)
 - 🗂️ **Lazy-Decode Virtual Backends (New)**: Compressed multi-frame OME/ImageJ TIFF can now be opened Virtual, decoded frame by frame on demand (`TiffDecodedFrames<T>`), where memory mapping cannot work. TIFFs beyond 32,767 frames now load. A priority-queue preload scheduler with per-worker readers follows the cursor, filling a large LZW-compressed stack dramatically faster than before.
 - 🧱 **Virtual Frames Hierarchy**: `VirtualFrames<T>` is now a backend-neutral cache/eviction/prefetch skeleton, with the memory-mapped parts in `MmfFrames<T>`. `IsVirtual` is no longer MMF-only, so the status-bar "(Cached NN%)" badge and the dashboard's Virtual badge follow a Lazy backend as it fills. Repeat reads of the same frame no longer cause preload churn, and eviction now drops the true LRU frame.

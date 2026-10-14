@@ -28,6 +28,10 @@ namespace MxPlot.Core.Processing
         /// Conversion is performed via internal methods. Integer types are rounded (not truncated to 0).
         /// For example, normalizing a <c>ushort</c> dataset to 100 yields values in 0–100.
         /// </remarks>
+        /// <exception cref="NotSupportedException">
+        /// Thrown for a structured element type (e.g. Complex), which this operation does not support yet: read
+        /// the data in a value mode first with <see cref="MatrixDataValueConverter.ToScalars{T}"/>.
+        /// </exception>
         public static MatrixData<T> Normalize<T>(
             this MatrixData<T> src,
             double target,
@@ -39,6 +43,7 @@ namespace MxPlot.Core.Processing
         {
             if (src == null) throw new ArgumentNullException(nameof(src));
             if (target <= 0) throw new ArgumentOutOfRangeException(nameof(target), "Target must be positive.");
+            StructuredDataSupport.ThrowIfNotSupported<T>(nameof(Normalize));
 
             int frameCount = src.FrameCount;
             progress?.Report(-frameCount);
@@ -99,7 +104,12 @@ namespace MxPlot.Core.Processing
         // Log Transform
         // =========================================================================================
 
-        private const double LogEpsilon = 1e-10;
+        /// <summary>
+        /// The floor below which a logarithm is not taken. <see cref="NegativeHandling.Clamp"/> and the log₁₀ option
+        /// of <see cref="MatrixDataValueConverter.ToDoubleAllFrames(MatrixData{System.Numerics.Complex}, ComplexValueMode, bool, MatrixData{double}?)"/>
+        /// share it, so both routes to the log of a Complex mode give the same values.
+        /// </summary>
+        internal const double LogEpsilon = 1e-10;
 
         /// <summary>
         /// Applies a per-element logarithm transform to all frames,
@@ -117,6 +127,7 @@ namespace MxPlot.Core.Processing
             this MatrixData<T> src,
             LogBase logBase = LogBase.Natural,
             NegativeHandling handling = NegativeHandling.Shift,
+            int valueMode = 0,
             IProgress<int>? progress = null,
             CancellationToken ct = default)
             where T : unmanaged
@@ -151,15 +162,14 @@ namespace MxPlot.Core.Processing
                 double shift = 0.0;
                 if (handling == NegativeHandling.Shift)
                 {
-                    var (frameMin, _) = src.GetValueRange(i);
+                    var (frameMin, _) = src.GetValueRange(i, valueMode);
                     shift = frameMin <= 0 ? Math.Abs(frameMin) + LogEpsilon : 0.0;
                 }
 
                 double dstMin = double.MaxValue, dstMax = double.MinValue;
                 for (int k = 0; k < srcSpan.Length; k++)
                 {
-                    
-                    double v = NumericConverter.ToDouble(srcSpan[k]);
+                                        double v = NumericConverter.ToDouble(srcSpan[k], valueMode);
                     double lv = handling == NegativeHandling.Shift
                         ? logFunc(v + shift)
                         : logFunc(Math.Max(v, LogEpsilon));

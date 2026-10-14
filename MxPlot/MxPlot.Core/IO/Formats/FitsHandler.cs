@@ -81,7 +81,7 @@ namespace MxPlot.Core.IO.Formats
             IMatrixData raw = Load(filePath, progress, ct);
             if (raw is MatrixData<T> typed) return typed;
             throw new InvalidOperationException(
-                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+                $"File contains '{raw.ElementType.Name}' data, but '{typeof(T).Name}' was requested.");
         }
 
         /// <summary>

@@ -131,9 +131,6 @@ namespace MxPlot.App.Views
         /// </summary>
         private bool? _dragHintShiftState;
 
-        /// <summary>Threshold above which the loading-mode dialog is shown.</summary>
-        private const long LargeFileThresholdBytes = 500 * 1024 * 1024;
-
         private MxPlotAppViewModel ViewModel => (MxPlotAppViewModel)DataContext!;
 
         public MxPlotAppWindow()

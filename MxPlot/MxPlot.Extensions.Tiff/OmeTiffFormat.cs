@@ -84,12 +84,13 @@ namespace MxPlot.Extensions.Tiff
         public bool CompressionInWrite { get; set; } = true;
 
         /// <summary>
-        /// Maximum degree of parallelism for InMemory loading.
-        /// <c>0</c> or <c>1</c> = sequential (default).
+        /// Maximum degree of parallelism for InMemory loading of compressed data.
+        /// <c>-1</c> = all logical cores (default).
+        /// <c>0</c> or <c>1</c> = sequential.
         /// <c>N &gt; 1</c> = open N LibTiff handles and decompress frames in parallel.
-        /// Primarily useful for LZW/Deflate-compressed files; uncompressed files are already fast.
+        /// Uncompressed data always reads sequentially: it is I/O-bound.
         /// </summary>
-        public int MaxParallelDegree { get; set; } = 0;
+        public int MaxParallelDegree { get; set; } = -1;
 
         private CancellationToken _ct;
         CancellationToken IMatrixDataReader.CancellationToken { get => _ct; set => _ct = value; }
@@ -130,6 +131,28 @@ namespace MxPlot.Extensions.Tiff
                     $"the backing instance must be Disposed before calling Load. " +
                     $"Pattern: md.SaveAs(path, format); md.Dispose(); var loaded = Load(path, format);",
                     ex);
+            }
+        }
+
+        /// <summary>
+        /// Uses the same rule as the Virtual load: compressed data is decoded on access, and
+        /// uncompressed data (strips or tiles) is memory-mapped. The frame count is the IFD count.
+        /// </summary>
+        public VirtualLoadProbe ProbeVirtualLoad(string filePath)
+        {
+            try
+            {
+                using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r");
+                if (tiff == null)
+                    return VirtualLoadProbe.Unknown;
+
+                int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
+                var backend = compression == (int)Compression.NONE ? VirtualBackendKind.Mapped : VirtualBackendKind.Decoded;
+                return new VirtualLoadProbe(backend, TiffIfdIndex.ReadOffsets(filePath).Length);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+            {
+                return VirtualLoadProbe.Unknown;
             }
         }
 

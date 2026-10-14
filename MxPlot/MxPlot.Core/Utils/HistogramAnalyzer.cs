@@ -80,7 +80,7 @@ namespace MxPlot.Core.Utils
         /// </param>
         /// <param name="converter">
         /// An optional scalar projection function. When provided, overrides the default
-        /// <see cref="NumericConverter.ToDouble{T}"/> conversion. Intended for structured types
+        /// <see cref="NumericConverter.ToDouble{T}(T)"/> conversion. Intended for structured types
         /// where the desired projection cannot be inferred from <paramref name="valueMode"/> alone,
         /// or when a custom mapping is required.
         /// </param>
@@ -113,9 +113,13 @@ namespace MxPlot.Core.Utils
                 (min, max) = src.GetValueRange(frameIndex, valueMode);
             }
 
-            //fallback to default converter if not provided
+            // Without a converter, values are read in the same mode as the range above.
             if (converter == null)
-                return Compute(src.AsSpan(frameIndex), min, max, bins);
+            {
+                if (valueMode == 0)
+                    return Compute(src.AsSpan(frameIndex), min, max, bins);
+                converter = v => NumericConverter.ToDouble(v, valueMode);
+            }
 
             return Compute(src.AsSpan(frameIndex), converter, min, max, bins);
         }

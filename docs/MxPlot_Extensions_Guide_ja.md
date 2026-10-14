@@ -91,7 +91,7 @@ namespace MxPlot.Extensions.Zarr
             IMatrixData raw = Read(filePath);
             if (raw is MatrixData<T> typed) return typed;
             throw new InvalidOperationException(
-                $"File contains '{raw.ValueTypeName}' data, but '{typeof(T).Name}' was requested.");
+                $"File contains '{raw.ElementType.Name}' data, but '{typeof(T).Name}' was requested.");
         }
 
         // 型を問わず読む版。呼び出し側がファイルの実データ型を知らない場合に使う。
@@ -492,10 +492,9 @@ MxPlot ダッシュボード（メインウィンドウ）の **☰ → Tools �
 
 ### 5.2 プロジェクト設定
 
-`MxPlot.App` はリファレンスアプリケーションであってライブラリではないため、NuGetパッケージとしては公開されていません（将来のバージョンで `IMxPlotAppPlugin`/`IMxPlotAppContext` を小さな `MxPlot.App.Plugins` パッケージに切り出し、通常の `PackageReference` で参照できるようにする予定です）。それまでは、次の2通りのいずれかでこの2つのインターフェース型を参照してください。
-
-- **ソースをクローンして `ProjectReference`** — `MxPlot.App\MxPlot.App.csproj` を直接参照する。
-- **ビルド済みの `MxPlot.App.dll` を直接参照** — `HintPath` に、ローカルにインストール済みのMxPlot.App（`MxPlot.exe` があるフォルダ）を指す。リポジトリのクローンなしで、リリース版のアプリだけで開発できる。
+`MxPlot.App` はリファレンスアプリケーションであってライブラリではないため、NuGetパッケージとしては
+公開されていません。`IMxPlotAppPlugin`/`IMxPlotAppContext` は、代わりに`MxPlot.App.Plugins`という、
+他に依存を持たない小さな専用パッケージに入っています。
 
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
@@ -507,16 +506,7 @@ MxPlot ダッシュボード（メインウィンドウ）の **☰ → Tools �
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="MxPlot" Version="x.x.x" />
-
-    <!-- MxPlot.App自体はNuGetパッケージではないので、ローカルにインストール済みのDLLを直接参照する。
-         IMxPlotAppPlugin/IMxPlotAppContextのためだけに必要。Private=false（CopyLocal=false）が重要 —
-         これがないとこのプラグイン自身のビルド出力にMxPlot.App.dllがコピーされてしまい、
-         MxPlotAppPluginRegistry.LoadFromDirectory()がplugins フォルダ内の全DLLを読み込もうとする際に、
-         MxPlot.App.dllの重複コピーが無駄な読み込みの原因になる。 -->
-    <Reference Include="MxPlot.App">
-      <HintPath>C:\Path\To\Installed\MxPlot.App\MxPlot.App.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <PackageReference Include="MxPlot.App.Plugins" Version="x.x.x" />
   </ItemGroup>
 </Project>
 ```
@@ -564,6 +554,10 @@ namespace MyCompany.MxPlotAppPlugin.BatchExport
     }
 }
 ```
+
+`IMxPlotAppPlugin` にも任意の `GroupName` があります。同じ non-null なグループ名を返すプラグインは、
+トップレベルではなく Tools メニュー内の共有サブメニューにまとめられます。`IMatrixPlotterPlugin` の
+Plugins タブでのグループ化（4.3 節）と同じパターンです。
 
 #### ファイルダイアログを使う例（async 版）
 

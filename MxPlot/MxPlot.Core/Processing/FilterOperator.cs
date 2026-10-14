@@ -51,6 +51,10 @@ namespace MxPlot.Core.Processing
         /// </param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>A new <see cref="MatrixData{T}"/> with the filtered data.</returns>
+        /// <exception cref="NotSupportedException">
+        /// Thrown for a structured element type (e.g. Complex), which this operation does not support yet: read
+        /// the data in a value mode first with <see cref="MatrixDataValueConverter.ToScalars{T}"/>.
+        /// </exception>
         public static MatrixData<T> ApplyFilter<T>(
             this MatrixData<T> source,
             IFilterKernel kernel,
@@ -58,6 +62,7 @@ namespace MxPlot.Core.Processing
             IProgress<int>? progress = null,
             CancellationToken cancellationToken = default) where T : unmanaged
         {
+            StructuredDataSupport.ThrowIfNotSupported<T>(nameof(ApplyFilter));
             int w = source.XCount;
             int h = source.YCount;
             int frameCount = source.FrameCount;

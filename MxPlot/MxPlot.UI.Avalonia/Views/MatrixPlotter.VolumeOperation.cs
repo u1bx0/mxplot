@@ -932,6 +932,14 @@ namespace MxPlot.UI.Avalonia.Views
                 Width = 12,
                 Height = 12,
             };
+            // Square-pixel display ignores every step size, so a custom axis ratio has no effect.
+            if (!_view.IsAspectCorrectionEnabled)
+            {
+                scaleItem.IsEnabled = false;
+                global::Avalonia.Controls.ToolTip.SetShowOnDisabled(scaleItem, true);
+                global::Avalonia.Controls.ToolTip.SetTip(scaleItem,
+                    "Not available while the data is displayed as square pixels / cubic voxels.");
+            }
             scaleItem.Click += async (_, _) => await ShowAxisScaleDialogAsync();
             yield return scaleItem;
 

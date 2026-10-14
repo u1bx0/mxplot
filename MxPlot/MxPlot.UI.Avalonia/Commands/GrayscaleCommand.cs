@@ -27,6 +27,7 @@ namespace MxPlot.UI.Avalonia.Commands
             Choices = choices,
             FailureTitle = "Convert to Grayscale Failed",
             WholeData = true,
+            WorksOnScalars = true,
             Progress = ProgressMode.Always,
             ProgressLabel = "Converting to grayscale…",
             CreateOperation = run => new GrayscaleOperation(

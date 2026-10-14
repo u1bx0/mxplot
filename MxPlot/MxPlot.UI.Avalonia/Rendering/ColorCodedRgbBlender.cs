@@ -1,4 +1,4 @@
-using MxPlot.Core;
+﻿using MxPlot.Core;
 using System;
 using System.Collections.Generic;
 using System.Numerics;
@@ -100,16 +100,16 @@ namespace MxPlot.UI.Avalonia.Rendering
                 frameIndices[i] = dims.GetFrameIndexAt(indices);
             }
 
-            return source.ValueType switch
+            return source switch
             {
-                Type t when t == typeof(byte) => BlendTyped((MatrixData<byte>)source, frameIndices, valueMin, valueMax, depthColors, mode),
-                Type t when t == typeof(ushort) => BlendTyped((MatrixData<ushort>)source, frameIndices, valueMin, valueMax, depthColors, mode),
-                Type t when t == typeof(short) => BlendTyped((MatrixData<short>)source, frameIndices, valueMin, valueMax, depthColors, mode),
-                Type t when t == typeof(int) => BlendTyped((MatrixData<int>)source, frameIndices, valueMin, valueMax, depthColors, mode),
-                Type t when t == typeof(float) => BlendTyped((MatrixData<float>)source, frameIndices, valueMin, valueMax, depthColors, mode),
-                Type t when t == typeof(double) => BlendTyped((MatrixData<double>)source, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<byte> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<ushort> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<short> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<int> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<float> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
+                MatrixData<double> typed => BlendTyped(typed, frameIndices, valueMin, valueMax, depthColors, mode),
                 _ => throw new NotSupportedException(
-                    $"ColorCodedRgbBlender does not support value type '{source.ValueType}'."),
+                    $"ColorCodedRgbBlender does not support value type '{source.ElementType.Type}'."),
             };
         }
 

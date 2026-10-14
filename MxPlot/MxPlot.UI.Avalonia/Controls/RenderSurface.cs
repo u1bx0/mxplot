@@ -146,8 +146,12 @@ namespace MxPlot.UI.Avalonia.Controls
                 _isAspectCorrectionEnabled = value;
                 if (_isFitToView && _bitmap != null) FitToView();
                 else { ClampTranslation(); InvalidateVisual(); }
+                AspectCorrectionChanged?.Invoke(this, EventArgs.Empty);
             }
         }
+
+        /// <summary>Raised after <see cref="IsAspectCorrectionEnabled"/> changed and the view was updated.</summary>
+        public event EventHandler? AspectCorrectionChanged;
 
         /// <summary>Fired when the user drags the crosshair to a new data-space position.</summary>
         public event EventHandler<Point>? CrosshairMoved;
@@ -413,12 +417,10 @@ namespace MxPlot.UI.Avalonia.Controls
             {
                 if (_complexValueMode == value) return;
                 _complexValueMode = value;
-                if (MatrixData?.ValueType == typeof(Complex))
-                {
-                    if (_writer != null)
-                        _writer.StructValueConverter = GetComplexConverter();
+                if (_writer != null)
+                    _writer.ComplexValueMode = value;
+                if (MatrixData is MatrixData<Complex>)
                     RebuildAndInvalidate();
-                }
             }
         }
 
@@ -649,20 +651,20 @@ namespace MxPlot.UI.Avalonia.Controls
 
             // Recreate the writer when type or mode changes
             bool needsNewWriter = _writer == null
-                || _writer.ValueType != data.ValueType
+                || _writer.ValueType != data.ElementType.Type
                 || !IsWriterCompatible(_writer, mode);
 
             if (needsNewWriter)
             {
                 _writer = mode switch
                 {
-                    RenderingMode.Lut => new LutBitmapWriter(data.ValueType),
-                    RenderingMode.Composite => new CompositeBitmapWriter(data.ValueType),
+                    RenderingMode.Lut => new LutBitmapWriter(data.ElementType.Type),
+                    RenderingMode.Composite => new CompositeBitmapWriter(data.ElementType.Type),
                     // The ColorCoded live child window's data is the winner *value* matrix itself --
                     // an ordinary projection-shaped result, same type as the source data -- combined
                     // at render time with the winner-index/depth-palette data in ColorCodedInfo.
                     // See ColorCoded_View_InitialDesign.md section 3.3.
-                    RenderingMode.ColorCoded => new ColorCodedBitmapWriter(data.ValueType),
+                    RenderingMode.ColorCoded => new ColorCodedBitmapWriter(data.ElementType.Type),
                     _ => throw new NotSupportedException($"RenderingMode {mode} is not supported.")
                 };
             }
@@ -671,9 +673,8 @@ namespace MxPlot.UI.Avalonia.Controls
             _writer.ParallelPolicy = ParallelPolicyFromParallelism;
             _writer.ParallelOptions = _parallelismOptions;
 
-            // Set Complex projection function when data is Complex
-            if (data.ValueType == typeof(Complex))
-                _writer.StructValueConverter = GetComplexConverter();
+            // The writer ignores it for anything but Complex data.
+            _writer.ComplexValueMode = _complexValueMode;
         }
 
         private static bool IsWriterCompatible(IBitmapWriter writer, RenderingMode mode)
@@ -787,7 +788,7 @@ namespace MxPlot.UI.Avalonia.Controls
             }
             else
             {
-                int valueMode = data.ValueType == typeof(Complex) ? (int)_complexValueMode : 0;
+                int valueMode = data.ElementType.ClampMode((int)_complexValueMode);
                 (min, max) = data.GetValueRange(FrameIndex, valueMode);
                 AutoRangeComputed?.Invoke(this, (min, max));
             }
@@ -1418,11 +1419,11 @@ namespace MxPlot.UI.Avalonia.Controls
         // ── Helpers ──────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Returns a projection function from Complex to double
-        /// corresponding to the current ComplexValueMode.
+        /// The value mode <paramref name="data"/> is rendered in: the selected <see cref="ComplexValueMode"/> for
+        /// Complex data, and 0 for anything else. Only Complex offers a choice of mode in the UI; a registered
+        /// custom struct with several modes is shown in its first one.
         /// </summary>
-        private Func<Complex, double> GetComplexConverter() =>
-            ComplexValueModeConverter.GetConverter(_complexValueMode);
+        internal int ShownValueMode(IMatrixData data) => data is MatrixData<Complex> ? (int)_complexValueMode : 0;
 
         private void ClampTranslation()
         {
@@ -1708,31 +1709,29 @@ namespace MxPlot.UI.Avalonia.Controls
                         // is already the real value. Only the depth position needs the auxiliary
                         // winner-index matrix and Axis that ColorCodedInfo carries.
                         int depthIndex = (int)Math.Round(info.WinnerIndex.GetValueAt(rawIx, rawIy, 0));
-                        double depthValue = md.GetValueAt(rawIx, rawIy, FrameIndex);
+                        double depthValue = md.GetValueAt(rawIx, rawIy, FrameIndex, ShownValueMode(md));
                         string axisUnit = info.Axis.Unit.Length > 0 ? $" {info.Axis.Unit}" : "";
                         string depthLabel = $"{info.Axis.Name}={info.Axis.ValueAt(depthIndex):G4}{axisUnit}";
-                        runs.Add((prefix + $"{depthLabel}, value={FormatCursorValue(md.ValueType, depthValue)}",
+                        runs.Add((prefix + $"{depthLabel}, value={FormatCursorValue(md.ElementType.Type, depthValue)}",
                             Brushes.White));
                     }
                     else if (!TryAddCompositeValueRuns(runs, md, rawIx, rawIy, prefix))
                     {
                         double value;
                         string cmplxValue = "";
-                        if (md.ValueType == typeof(Complex)
-                            && _writer?.StructValueConverter is Func<Complex, double> conv)
+                        if (md is MatrixData<Complex> typedData)
                         {
-                            var typedData = (MatrixData<Complex>)md;
                             var span = typedData.AsSpan(FrameIndex);
 
                             var z = span[rawIy * md.XCount + rawIx];
-                            value = conv(z);
+                            value = z.ToScalar(_complexValueMode);
                             cmplxValue = $" ({z.Real:G5}{(z.Imaginary >= 0 ? "+" : "-")}{Math.Abs(z.Imaginary):G5}i)";
                         }
                         else
                         {
                             value = md.GetValueAt(rawIx, rawIy, FrameIndex);
                         }
-                        runs.Add((prefix + FormatCursorValue(md.ValueType, value) + cmplxValue, Brushes.White));
+                        runs.Add((prefix + FormatCursorValue(md.ElementType.Type, value) + cmplxValue, Brushes.White));
                     }
                 }
                 else
@@ -1823,7 +1822,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 if (any) runs.Add((" / ", separator));
 
                 double value = md.GetValueAt(rawIx, rawIy, indices[i]);
-                runs.Add((FormatCursorValue(md.ValueType, value),
+                runs.Add((FormatCursorValue(md.ElementType.Type, value),
                           new SolidColorBrush(BrightenForText(recipes[i].ColorArgb))));
                 any = true;
             }

@@ -60,16 +60,16 @@ namespace MxPlot.UI.Avalonia.Rendering
         {
             var indexData = (MatrixData<int>)winnerIndex;
 
-            return winnerValue.ValueType switch
+            return winnerValue switch
             {
-                Type t when t == typeof(byte) => ColorizeTyped((MatrixData<byte>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
-                Type t when t == typeof(ushort) => ColorizeTyped((MatrixData<ushort>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
-                Type t when t == typeof(short) => ColorizeTyped((MatrixData<short>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
-                Type t when t == typeof(int) => ColorizeTyped((MatrixData<int>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
-                Type t when t == typeof(float) => ColorizeTyped((MatrixData<float>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
-                Type t when t == typeof(double) => ColorizeTyped((MatrixData<double>)winnerValue, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<byte> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<ushort> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<short> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<int> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<float> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
+                MatrixData<double> typed => ColorizeTyped(typed, indexData, start, valueMin, valueMax, depthColors),
                 _ => throw new NotSupportedException(
-                    $"ColorCodedColorizer does not support value type '{winnerValue.ValueType}'."),
+                    $"ColorCodedColorizer does not support value type '{winnerValue.ElementType.Type}'."),
             };
         }
 

@@ -23,12 +23,17 @@ namespace MxPlot.Core.IO.Formats
         ///   <item><c>2</c> — <c>TileLayout</c> is a <see cref="TileGrid"/> record struct
         ///         (<c>{"X":..,"Y":..,"Z":..}</c>) and the origins array is written from the public
         ///         <c>FovAxis.Origins</c> property.</item>
+        ///   <item><c>3</c> — <c>ValueTypeName</c>/<c>ValueTypeAlias</c> renamed to
+        ///         <see cref="ElementTypeName"/>/<see cref="ElementTypeAlias"/>, matching
+        ///         <see cref="IMatrixData.ElementType"/>. Added <see cref="ElementSize"/>, the
+        ///         per-element byte size at save time, checked against the registered type's current
+        ///         size on load.</item>
         /// </list>
         /// Nothing branches on this value today; it exists so that a file predating the change can
         /// still be identified. A version-1 file that carries a <c>FovAxis</c> will load with an
         /// empty tile grid, because the reader no longer looks for the old member names.
         /// </summary>
-        public const int CurrentVersion = 2;
+        public const int CurrentVersion = 3;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="MatrixDataConfig"/> class.
@@ -44,7 +49,8 @@ namespace MxPlot.Core.IO.Formats
         public MatrixDataConfig(IMatrixData data)
         {
             Version = CurrentVersion;
-            ValueTypeName = data.ValueType?.FullName ?? string.Empty;
+            ElementTypeName = data.ElementType.PersistentName;
+            ElementSize = data.ElementSize;
             XCount = data.XCount;
             YCount = data.YCount;
             FrameCount = data.FrameCount;
@@ -92,23 +98,31 @@ namespace MxPlot.Core.IO.Formats
         public bool IsCompressed { get; init; } = false;
 
         /// <summary>
-        /// Gets the full .NET Type name of the stored values. 
+        /// Gets the persisted element type identifier: <see cref="ElementType.PersistentName"/> at save
+        /// time (a registered custom struct's TypeId, or a built-in type's CLR full name).
         /// Used for dynamic type resolution during data restoration.
         /// </summary>
-        public string ValueTypeName { get; init; } = string.Empty;
+        public string ElementTypeName { get; init; } = string.Empty;
 
         /// <summary>
-        /// Gets a friendly C# alias for the value type. 
+        /// Gets a friendly display name for the element type.
         /// Supports standard numeric types (signed/unsigned) and falls back to the short type name for custom structs.
         /// </summary>
-        public string ValueTypeAlias => GetValueTypeAlias(ValueTypeName);
+        public string ElementTypeAlias => GetElementTypeAlias(ElementTypeName);
 
         /// <summary>
-        /// Utility to get an alias name of value type such as "int" from "System.Int32".
+        /// Gets the per-element byte size at save time (<c>Unsafe.SizeOf&lt;T&gt;()</c>), checked against
+        /// the registered type's current size on load to catch a struct whose layout changed since the
+        /// file was written. Not a substitute for full schema versioning: a layout change that keeps the
+        /// same total byte size (e.g. two same-size fields swapped) is not detected.
         /// </summary>
-        /// <param name="valueTypeName"></param>
-        /// <returns></returns>
-        public static string GetValueTypeAlias(string valueTypeName) => valueTypeName switch
+        public int ElementSize { get; init; }
+
+        /// <summary>
+        /// Utility to get an alias name of an element type such as "int" from "System.Int32".
+        /// </summary>
+        /// <param name="elementTypeName">A persisted <see cref="ElementTypeName"/> value.</param>
+        public static string GetElementTypeAlias(string elementTypeName) => elementTypeName switch
         {
             "System.Double" => "double",
             "System.Single" => "float",
@@ -121,9 +135,11 @@ namespace MxPlot.Core.IO.Formats
             "System.Byte" => "byte",
             "System.SByte" => "sbyte",
             "System.Numerics.Complex" => "Complex",
-            // Fallback for custom unmanaged structs: Extract the class name from the namespace
+            // A custom struct registered in this process: use its real display name.
+            _ when MatrixData.ResolveElementType(elementTypeName) is { } elementType => elementType.Name,
+            // Nothing in this process ever registered this TypeId: fall back to the short name.
             string s when s.Contains('.') => s.Split('.').Last(),
-            _ => valueTypeName
+            _ => elementTypeName
         };
 
         #endregion

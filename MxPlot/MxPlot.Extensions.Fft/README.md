@@ -56,7 +56,7 @@ image.Set((ix, iy, x, y) => Math.Sin(x) * Math.Cos(y));
 var spectrum = image.Fft2D(ShiftOption.Centered); // DC shifted to center
 
 // Power spectrum statistics
-var (min, max) = spectrum.GetMinMaxValues(0, ComplexValueMode.Power);
+var (min, max) = spectrum.GetValueRange(0, ComplexValueMode.Power);
 
 // Inverse FFT — back to spatial domain
 var restored = spectrum.InverseFft2D(ShiftOption.Centered);

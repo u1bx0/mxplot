@@ -117,7 +117,10 @@ namespace MxPlot.Core.IO.Formats
             var config = new MatrixDataConfig
             {
                 Version = MatrixDataConfig.CurrentVersion,
-                ValueTypeName = typeof(T).FullName ?? "",
+                // Must be the registered TypeId, not the raw CLR name, or a custom struct written
+                // through this streaming path fails Load<T>'s type-name guard on the way back in.
+                ElementTypeName = MatrixDataSerializer.GetPersistentName<T>(),
+                ElementSize = Unsafe.SizeOf<T>(),
                 XCount = _xcount,
                 YCount = _ycount,
                 FrameCount = _frameCount,

@@ -72,6 +72,8 @@ namespace MxPlot.Core
         /// <param name="scale"></param>
         private MatrixData(int xnum, int ynum, Scale2D? scale = null)
         {
+            // Every constructor chains here, so this is the single place an unregistered T is refused.
+            EnsureRegistered();
             CheckPlane(xnum, ynum);
             _xcount = xnum;
             _ycount = ynum;

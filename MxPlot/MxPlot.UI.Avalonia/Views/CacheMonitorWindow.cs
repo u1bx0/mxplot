@@ -43,7 +43,7 @@ namespace MxPlot.UI.Avalonia.Views
             _virtualList = virtualList;
             _frameSize   = (long)matrixData.XCount * matrixData.YCount * matrixData.ElementSize;
 
-            Title  = $"Cache Monitor — {matrixData.ValueTypeName}  [{matrixData.XCount}×{matrixData.YCount}]";
+            Title  = $"Cache Monitor — {matrixData.ElementType.Name}  [{matrixData.XCount}×{matrixData.YCount}]";
             Width  = 600;
             Height = 500;
 

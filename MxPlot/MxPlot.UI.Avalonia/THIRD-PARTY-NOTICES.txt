@@ -48,7 +48,7 @@ schemes devised by other people, though, and our thanks go to them for such
 fascinating work - the credits below are a courtesy, not something a license
 asks for:
 
-  Grayscale, Hot, OrangeHot, GreenHot, Cold, BSMod, Spectrum, Phase, HiLo
+  Grayscale, Hot, OrangeHot, GreenHot, Cold, Profiler, Spectrum, Phase, HiLo
     Original implementations (no restrictions).
 
   Jet

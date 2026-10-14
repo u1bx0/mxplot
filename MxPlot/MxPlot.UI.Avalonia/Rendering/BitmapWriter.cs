@@ -100,11 +100,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// </summary>
         public bool FlipY { get; set; } = true;
 
-        /// <summary>
-        /// Gets or sets a converter function for Complex data (e.g. <c>c => c.Magnitude</c>).
-        /// Must be a <see cref="Func{Complex, Double}"/>.
-        /// </summary>
-        public object? StructValueConverter { get; set; }
+        /// <summary>The value mode <see cref="Complex"/> data is rendered in. Ignored for any other element type.</summary>
+        public ComplexValueMode ComplexValueMode { get; set; }
 
         /// <summary>Gets or sets parallel processing options. Null for sequential (default).</summary>
         public ParallelOptions? ParallelOptions
@@ -152,9 +149,6 @@ namespace MxPlot.UI.Avalonia.Rendering
                     _ => RenderFallback
                 };
             }
-            // Set default Complex projection function (prevents crash when StructValueConverter is not set)
-            if (type == typeof(Complex))
-                StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);
         }
 
         #endregion
@@ -200,7 +194,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                 PixelFormat.Bgra8888,
                 AlphaFormat.Premul);
 
-            var writer = new BitmapWriter(lut, source.ValueType);
+            var writer = new BitmapWriter(lut, source.ElementType.Type);
             writer.SetValueRange(valueMin, valueMax);
             writer.Render(source, frameIndex, bmp);
             return bmp;
@@ -542,10 +536,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             ReadOnlyMemory<int> lutMemory, double valueScale, double valueOffset, int lutMaxIndex)
         {
             var data = source as MatrixData<Complex> ?? throw new InvalidCastException("Expected MatrixData<Complex>");
-            if (StructValueConverter is not Func<Complex, double> converter)
-                throw new InvalidOperationException(
-                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering. " +
-                    "Example: writer.StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);");
+            var mode = ComplexValueMode;
             int missingColor = _lookupTable.MissingColor;
             var mem = data.AsMemory(frameIndex);
 
@@ -558,7 +549,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int* pRow = targetPtr + iy * strideInts;
                     for (int ix = 0; ix < width; ++ix)
                     {
-                        double v = converter(values[ix]);
+                        double v = values[ix].ToScalar(mode);
                         pRow[ix] = double.IsNaN(v) ? missingColor
                             : lut[Math.Clamp((int)(v * valueScale + valueOffset), 0, lutMaxIndex)];
                     }
@@ -574,7 +565,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int* pRow = targetPtr + iy * strideInts;
                     for (int ix = 0; ix < width; ++ix)
                     {
-                        double v = converter(values[rowOffset + ix]);
+                        double v = values[rowOffset + ix].ToScalar(mode);
                         pRow[ix] = double.IsNaN(v) ? missingColor
                             : lut[Math.Clamp((int)(v * valueScale + valueOffset), 0, lutMaxIndex)];
                     }

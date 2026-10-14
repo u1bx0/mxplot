@@ -5,21 +5,31 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace MxPlot.Core.Processing
 {
-
     /// <summary>
-    /// Provides static methods for converting matrix data between types, supporting both
-    /// single-frame and multi-frame operations.
+    /// Converts the element values of matrix data: reading a structured element type in one of its value modes,
+    /// reducing any element to double with a function, and converting between primitive element types.
     /// </summary>
     /// <remarks>
-    /// This class includes conversion methods optimized for performance, utilizing parallel
-    /// processing and unsafe code where appropriate. It supports conversion from unmanaged types
-    /// and complex numbers, with options for applying specific conversion modes and logarithmic scaling.
-    /// Callers must ensure that destination matrices are correctly sized to avoid exceptions.
-    /// The conversion methods are designed for use with large matrices and may leverage parallelism
-    /// based on matrix size and processor count.
+    /// <para>The methods are grouped by what the caller has in hand:</para>
+    /// <list type="bullet">
+    /// <item><b>A value mode</b>: <see cref="ToScalars{T}"/> for any registered element type. For Complex,
+    /// <c>ToDoubleAllFrames(ComplexValueMode, …)</c> and its single-frame form <c>ToDouble(ComplexValueMode, …)</c>
+    /// can also apply log₁₀ in the same pass.</item>
+    /// <item><b>A function from the element to double</b>: <see cref="ToDoubleAllFrames{T}"/> and
+    /// <see cref="ToDouble{T}"/>, for a reduction that is not one of the element type's value modes.</item>
+    /// <item><b>Another element type</b>: <see cref="ConvertTo{TSrc,TDst}(MatrixData{TSrc},Func{TSrc,TDst})"/>, or
+    /// <see cref="ConvertToType"/> when only an <see cref="IMatrixData"/> and a <see cref="Type"/> are known.</item>
+    /// </list>
+    /// <para>
+    /// Within each group, the all-frame method comes first, then its single-frame form. All-frame methods
+    /// process frames in parallel; a single frame is split into parallel rows once it reaches
+    /// <see cref="ParallelThreshold"/> elements.
+    /// </para>
     /// </remarks>
     public static class MatrixDataValueConverter
     {
@@ -29,7 +39,172 @@ namespace MxPlot.Core.Processing
         /// </summary>
         public static readonly int ParallelThreshold = 256 * 256;
 
-        #region ToDouble<T> (T → double)
+        #region Value mode → double
+
+        /// <summary>
+        /// Reads every element of <paramref name="src"/> in value mode <paramref name="valueMode"/>, through the
+        /// element type's registered reading (<see cref="ElementTypeRegistration{T}.ToScalar"/>, or the built-in one
+        /// for a primitive type and Complex). The result has the same frames, scale and
+        /// dimensions; for a primitive element type it is simply a copy as double.
+        /// </summary>
+        /// <typeparam name="T">The source element type.</typeparam>
+        /// <param name="src">The data to read.</param>
+        /// <param name="valueMode">An index into <see cref="ElementType.ValueModes"/>; clamped like <see cref="ElementType.ClampMode"/>.</param>
+        /// <param name="progress">Receives <c>-FrameCount</c> first, then <c>0..FrameCount-1</c> as frames complete.</param>
+        /// <param name="ct">Cancels the operation.</param>
+        /// <returns>A <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with every frame read.</returns>
+        public static MatrixData<double> ToScalars<T>(
+            this MatrixData<T> src,
+            int valueMode = 0,
+            IProgress<int>? progress = null,
+            CancellationToken ct = default)
+            where T : unmanaged
+        {
+            ArgumentNullException.ThrowIfNull(src);
+
+            // Non-null for any instance: an element type can only be constructed once registered.
+            var provider = MatrixData<T>.RegisteredValueProvider!;
+            int mode = src.ElementType.ClampMode(valueMode);
+            int xnum = src.XCount;
+            int ynum = src.YCount;
+            int frameCount = src.FrameCount;
+            var options = new ParallelOptions { CancellationToken = ct };
+            progress?.Report(-frameCount);
+
+            var frames = new double[frameCount][];
+            int completed = 0;
+
+            // The provider reads a whole row (or frame) per call, so its bulk path is used either way.
+            void ReadFrame(int frameIndex, bool byRows)
+            {
+                ct.ThrowIfCancellationRequested();
+                ReadOnlyMemory<T> srcMem = src.AsMemory(frameIndex);
+                var dst = new double[xnum * ynum];
+                if (byRows)
+                    Parallel.For(0, ynum, options, iy =>
+                        provider.ToScalars(srcMem.Span.Slice(iy * xnum, xnum), dst.AsSpan(iy * xnum, xnum), mode));
+                else
+                    provider.ToScalars(srcMem.Span, dst, mode);
+                frames[frameIndex] = dst;
+                progress?.Report(Interlocked.Increment(ref completed) - 1);
+            }
+
+            if (frameCount == 1)
+                ReadFrame(0, byRows: Environment.ProcessorCount > 1 && (long)xnum * ynum >= ParallelThreshold);
+            else
+                Parallel.For(0, frameCount, options, i => ReadFrame(i, byRows: false));
+
+            var result = new MatrixData<double>(xnum, ynum, frames.ToList());
+            result.CopyPropertiesFrom(src, copyScale: true, copyDimensions: true);
+            return result;
+        }
+
+        /// <summary>
+        /// Converts all frames of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
+        /// to <c>double</c> by extracting the specified complex component.
+        /// Frames are processed in parallel.
+        /// </summary>
+        /// <param name="src">Source complex matrix data.</param>
+        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
+        /// <param name="applyLog10">
+        /// When <c>true</c>, applies <c>log₁₀</c> to each output value, flooring it at the same small value as
+        /// <see cref="ElementWiseOperator.LogTransform{T}"/> with <see cref="NegativeHandling.Clamp"/>, so the two give
+        /// the same result. Meant for the non-negative modes, Magnitude and Power: a negative value is floored too.
+        /// </param>
+        /// <param name="dst">Optional pre-allocated destination matching source dimensions; otherwise a new instance is created.</param>
+        /// <returns>A <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with all frames converted.</returns>
+        public static MatrixData<double> ToDoubleAllFrames(
+            this MatrixData<Complex> src,
+            ComplexValueMode mode,
+            bool applyLog10 = false,
+            MatrixData<double>? dst = null)
+        {
+            var (ret, xnum, ynum) = PrepareDstForToDouble<Complex>(src, dst, src.FrameCount);
+            dst = ret;
+            Parallel.For(0, src.FrameCount, frameIndex =>
+            {
+                ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
+                double[] dstArray = dst.GetArray(frameIndex);
+                ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: false);
+                dst.Invalidate(frameIndex);
+            });
+            return dst;
+        }
+
+        /// <summary>
+        /// Converts a single frame of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
+        /// to <c>double</c> by extracting the specified complex component.
+        /// </summary>
+        /// <param name="src">Source complex matrix data.</param>
+        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
+        /// <param name="applyLog10">
+        /// When <c>true</c>, applies <c>log₁₀</c> to each output value, flooring it at the same small value as
+        /// <see cref="ElementWiseOperator.LogTransform{T}"/> with <see cref="NegativeHandling.Clamp"/>, so the two give
+        /// the same result. Meant for the non-negative modes, Magnitude and Power: a negative value is floored too.
+        /// </param>
+        /// <param name="frameIndex">The frame to convert. If negative, the active frame index is used.</param>
+        /// <param name="dst">Optional pre-allocated single-frame destination; otherwise a new instance is created.</param>
+        /// <returns>A single-frame <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with the extracted values.</returns>
+        public static MatrixData<double> ToDouble(
+            this MatrixData<Complex> src,
+            ComplexValueMode mode,
+            bool applyLog10 = false,
+            int frameIndex = -1,
+            MatrixData<double>? dst = null)
+        {
+            var (ret, xnum, ynum) = PrepareDstForToDouble<Complex>(src, dst, 1);
+            dst = ret;
+
+            ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
+            double[] dstArray = dst.GetArray();
+
+            ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: true);
+
+            dst.Invalidate();
+            return dst;
+        }
+
+        private static void ToDoubleFromComplexProc(ReadOnlyMemory<Complex> srcMem, double[] dstArray,
+            ComplexValueMode mode, bool applyLog10, int xnum, int ynum, bool useParallel)
+        {
+            // Row-level processing (optimized path)
+            void ProcessRow(int iy)
+            {
+                int offset = iy * xnum;
+
+                // Obtain base references for the current row
+                ReadOnlySpan<Complex> srcRow = srcMem.Span.Slice(offset, xnum);
+                ref double dstRefBase = ref MemoryMarshal.GetArrayDataReference(dstArray);
+                ref double rowDstBase = ref Unsafe.Add(ref dstRefBase, offset);
+
+                // Inner loop using base+ix addressing (JIT-friendly pattern)
+                for (int ix = 0; ix < xnum; ix++)
+                {
+                    ref readonly Complex currentSrc = ref srcRow[ix];
+
+                    double val = currentSrc.ToScalar(mode);
+
+                    if (applyLog10)
+                        val = Math.Log10(Math.Max(val, ElementWiseOperator.LogEpsilon));
+
+                    Unsafe.Add(ref rowDstBase, ix) = val;
+                }
+            }
+
+            // Parallel execution decision
+            if (useParallel && Environment.ProcessorCount > 1 && (long)xnum * ynum >= ParallelThreshold)
+            {
+                Parallel.For(0, ynum, ProcessRow);
+            }
+            else
+            {
+                for (int y = 0; y < ynum; y++) ProcessRow(y);
+            }
+        }
+
+        #endregion
+
+        #region Element function → double
 
         /// <summary>
         /// Converts all frames of <paramref name="src"/> to <c>double</c> using the specified element converter.
@@ -74,10 +249,10 @@ namespace MxPlot.Core.Processing
         /// </param>
         /// <returns>A single-frame <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with the converted values.</returns>
         public static MatrixData<double> ToDouble<T>(this MatrixData<T> src,
-         Func<T, double> converter,
-         int frameIndex = -1,
-         MatrixData<double>? dst = null)
-         where T : unmanaged
+            Func<T, double> converter,
+            int frameIndex = -1,
+            MatrixData<double>? dst = null)
+            where T : unmanaged
         {
             var (dstRet, xnum, ynum) = PrepareDstForToDouble(src, dst, 1);
             dst = dstRet;
@@ -89,32 +264,6 @@ namespace MxPlot.Core.Processing
 
             dst.Invalidate();
             return dst;
-        }
-
-        private static (MatrixData<double> dst, int xnum, int ynum)
-            PrepareDstForToDouble<T>(MatrixData<T> src, MatrixData<double>? dst, int frameCount)
-            where T : unmanaged
-        {
-            int xnum = src.XCount;
-            int ynum = src.YCount;
-            var scale = src.GetScale();
-            if (dst == null)
-            {
-                dst = new MatrixData<double>(xnum, ynum, frameCount);
-            }
-            else if (dst.XCount != xnum || dst.YCount != ynum || dst.FrameCount != frameCount)
-            {
-                throw new ArgumentException("Size mismatch.");
-            }
-
-            // Sync scale if different
-            //if (!dst.GetScale().Equals(scale))
-            //{
-            //   dst.SetXYScale(scale.XMin, scale.XMax, scale.YMin, scale.YMax);//
-            //}
-            dst.CopyPropertiesFrom(src);
-
-            return (dst, xnum, ynum);
         }
 
         private static void ToDoubleProc<T>(ReadOnlyMemory<T> srcMem, double[] dstArray,
@@ -149,139 +298,7 @@ namespace MxPlot.Core.Processing
 
         #endregion
 
-        #region ToDouble (Complex → double)
-
-        /// <summary>
-        /// Converts a single frame of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
-        /// to <c>double</c> by extracting the specified complex component.
-        /// </summary>
-        /// <param name="src">Source complex matrix data.</param>
-        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
-        /// <param name="applyLog10">When <c>true</c>, applies <c>log₁₀</c> to each output value (with a small epsilon floor to avoid log(0)).</param>
-        /// <param name="frameIndex">The frame to convert. If negative, the active frame index is used.</param>
-        /// <param name="dst">Optional pre-allocated single-frame destination; otherwise a new instance is created.</param>
-        /// <returns>A single-frame <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with the extracted values.</returns>
-        public static MatrixData<double> ToDouble(
-            this MatrixData<Complex> src,
-            ComplexValueMode mode,
-            bool applyLog10 = false,
-            int frameIndex = -1,
-            MatrixData<double>? dst = null)
-        {
-            var (ret, xnum, ynum) = PrepareDstForToDouble<Complex>(src, dst, 1);
-            dst = ret;
-
-            //Complex[] srcArray = src.GetArray(frameIndex);
-            ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
-            double[] dstArray = dst.GetArray();
-
-            ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: true);
-
-            dst.Invalidate();
-            return dst;
-        }
-
-        /// <summary>
-        /// Converts all frames of a <see cref="MatrixData{T}">MatrixData&lt;Complex&gt;</see>
-        /// to <c>double</c> by extracting the specified complex component.
-        /// Frames are processed in parallel.
-        /// </summary>
-        /// <param name="src">Source complex matrix data.</param>
-        /// <param name="mode">Specifies which component to extract (magnitude, real, imaginary, phase, or power).</param>
-        /// <param name="applyLog10">When <c>true</c>, applies <c>log₁₀</c> to each output value.</param>
-        /// <param name="dst">Optional pre-allocated destination matching source dimensions; otherwise a new instance is created.</param>
-        /// <returns>A <see cref="MatrixData{T}">MatrixData&lt;double&gt;</see> with all frames converted.</returns>
-        public static MatrixData<double> ToDoubleAllFrames(
-            this MatrixData<Complex> src,
-            ComplexValueMode mode,
-            bool applyLog10 = false,
-            MatrixData<double>? dst = null)
-        {
-            var (ret, xnum, ynum) = PrepareDstForToDouble<Complex>(src, dst, src.FrameCount);
-            dst = ret;
-            Parallel.For(0, src.FrameCount, frameIndex =>
-            {
-                //Complex[] srcArray = src.GetArray(frameIndex);
-                ReadOnlyMemory<Complex> srcMem = src.AsMemory(frameIndex);
-                double[] dstArray = dst.GetArray(frameIndex);
-                ToDoubleFromComplexProc(srcMem, dstArray, mode, applyLog10, xnum, ynum, useParallel: false);
-                dst.Invalidate(frameIndex);
-            });
-            return dst;
-        }
-
-        private static void ToDoubleFromComplexProc(ReadOnlyMemory<Complex> srcMem, double[] dstArray,
-            ComplexValueMode mode, bool applyLog10, int xnum, int ynum, bool useParallel)
-        {
-            // Row-level processing (optimized path)
-            void ProcessRow(int iy)
-            {
-                int offset = iy * xnum;
-
-                // Obtain base references for the current row
-                //ref Complex srcRefBase = ref MemoryMarshal.GetArrayDataReference(srcArray);
-                ReadOnlySpan<Complex> srcRow = srcMem.Span.Slice(offset, xnum);
-                ref double dstRefBase = ref MemoryMarshal.GetArrayDataReference(dstArray);
-
-                //ref Complex rowSrcBase = ref Unsafe.Add(ref srcRefBase, offset);
-                ref double rowDstBase = ref Unsafe.Add(ref dstRefBase, offset);
-
-                // Inner loop using base+ix addressing (JIT-friendly pattern)
-                for (int ix = 0; ix < xnum; ix++)
-                {
-                    //ref Complex currentSrc = ref Unsafe.Add(ref rowSrcBase, ix);
-                    ref readonly Complex currentSrc = ref srcRow[ix];
-
-                    double val;
-
-                    switch (mode)
-                    {
-                        case ComplexValueMode.Magnitude:
-                            val = currentSrc.Magnitude;
-                            break;
-                        case ComplexValueMode.Real:
-                            val = currentSrc.Real;
-                            break;
-                        case ComplexValueMode.Imaginary:
-                            val = currentSrc.Imaginary;
-                            break;
-                        case ComplexValueMode.Phase:
-                            val = currentSrc.Phase;
-                            break;
-                        case ComplexValueMode.Power:
-                            double r = currentSrc.Real;
-                            double i = currentSrc.Imaginary;
-                            val = r * r + i * i;
-                            break;
-                        default:
-                            val = 0.0;
-                            break;
-                    }
-
-                    if (applyLog10)
-                    {
-                        double eps = 1e-12;
-                        val = Math.Log10(Math.Max(val, eps));
-                    }
-
-                    Unsafe.Add(ref rowDstBase, ix) = val;
-                }
-            }
-
-            // Parallel execution decision
-            if (useParallel && Environment.ProcessorCount > 1 && (long)xnum * ynum >= ParallelThreshold)
-            {
-                Parallel.For(0, ynum, ProcessRow);
-            }
-            else
-            {
-                for (int y = 0; y < ynum; y++) ProcessRow(y);
-            }
-        }
-
-        #endregion
-
-        #region ConvertTo<TSrc, TDst> (general-purpose type conversion)
+        #region Element type → element type
 
         /// <summary>
         /// Converts all frames of a <see cref="MatrixData{TSrc}"/> to <see cref="MatrixData{TDst}"/>
@@ -375,6 +392,96 @@ namespace MxPlot.Core.Processing
         }
 
         /// <summary>
+        /// Converts all frames of <paramref name="src"/> to the specified <paramref name="targetType"/>
+        /// with optional linear scaling, dispatching through the typed
+        /// <see cref="ConvertTo{TSrc,TDst}(MatrixData{TSrc},Func{TSrc,TDst})"/> path.
+        /// </summary>
+        /// <remarks>
+        /// Both <paramref name="src"/> value type and <paramref name="targetType"/> must be in
+        /// <see cref="MatrixData.SupportedPrimitiveTypes"/> (excludes <c>Complex</c>).
+        /// Integral target types receive rounded, clamped values. Floating-point targets are
+        /// clamped to their representable range only.
+        /// </remarks>
+        /// <param name="src">Source data (type-erased).</param>
+        /// <param name="targetType">CLR type to convert elements to.</param>
+        /// <param name="doScale">
+        /// When <c>true</c>, applies a linear mapping:
+        /// <c>dst = tgtMin + (src − srcMin) / (srcMax − srcMin) × (tgtMax − tgtMin)</c>.
+        /// When <c>false</c>, direct-casts each element, clamping to the target range.
+        /// </param>
+        /// <param name="srcMin">Source range minimum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
+        /// <param name="srcMax">Source range maximum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
+        /// <param name="tgtMin">Target range minimum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
+        /// <param name="tgtMax">Target range maximum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
+        /// <returns>A new <see cref="IMatrixData"/> with the element type set to <paramref name="targetType"/>.</returns>
+        public static IMatrixData ConvertToType(this IMatrixData src, Type targetType,
+            bool doScale = false,
+            double srcMin = 0.0, double srcMax = 1.0,
+            double tgtMin = 0.0, double tgtMax = 1.0)
+        {
+            if (!MatrixData.SupportedPrimitiveTypes.Contains(src.ElementType.Type))
+                throw new ArgumentException(
+                    $"Source type '{src.ElementType.Type.Name}' is not a supported primitive type. " +
+                    $"For complex or custom struct types, provide an explicit element converter via ConvertTo<TSrc,TDst>.",
+                    nameof(src));
+            if (!MatrixData.SupportedPrimitiveTypes.Contains(targetType))
+                throw new ArgumentException(
+                    $"Target type '{targetType.Name}' is not a supported primitive type. " +
+                    $"For complex or custom struct types, provide an explicit element converter via ConvertTo<TSrc,TDst>.",
+                    nameof(targetType));
+
+            // All SupportedPrimitiveTypes implement INumber<T>; verify at the dispatch boundary
+            // in case this method is ever called with a type that was added to SupportedPrimitiveTypes
+            // but does not implement INumber<T> (e.g. a future Complex addition).
+            static bool implementsINumber(Type t) =>
+                t.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(INumber<>));
+            if (!implementsINumber(src.ElementType.Type))
+                throw new NotSupportedException(
+                    $"Source type '{src.ElementType.Type.Name}' does not implement INumber<T>. " +
+                    $"Use ConvertTo<TSrc,TDst> with a custom converter lambda instead.");
+            if (!implementsINumber(targetType))
+                throw new NotSupportedException(
+                    $"Target type '{targetType.Name}' does not implement INumber<T>. " +
+                    $"Use ConvertTo<TSrc,TDst> with a custom converter lambda instead.");
+
+            var method = typeof(MatrixDataValueConverter)
+                .GetMethod(nameof(ConvertToTypeDispatch),
+                    BindingFlags.NonPublic | BindingFlags.Static)!
+                .MakeGenericMethod(src.ElementType.Type, targetType);
+
+            return (IMatrixData)method.Invoke(null, [src, doScale, srcMin, srcMax, tgtMin, tgtMax])!;
+        }
+
+        // Concrete generic dispatch; called via reflection above.
+        // INumber<T> constraint is satisfied by all MatrixData.SupportedPrimitiveTypes.
+        private static IMatrixData ConvertToTypeDispatch<TSrc, TDst>(
+            MatrixData<TSrc> src, bool doScale,
+            double srcMin, double srcMax, double tgtMin, double tgtMax)
+            where TSrc : unmanaged, INumber<TSrc>
+            where TDst : unmanaged, INumber<TDst>
+        {
+            Func<TSrc, TDst> converter;
+            if (!doScale)
+            {
+                // TSrc → double → TDst with saturation (clamp to TDst range, no throw).
+                converter = v => TDst.CreateSaturating(double.CreateSaturating(v));
+            }
+            else
+            {
+                double srcRange = srcMax - srcMin;
+                // Precompute scale once: replaces per-pixel division with multiply.
+                // isZeroRange → scale=0 collapses the formula to tgtMin with no branch in the loop.
+                double scale = Math.Abs(srcRange) < double.Epsilon ? 0.0 : (tgtMax - tgtMin) / srcRange;
+                converter = v =>
+                {
+                    double d = double.CreateSaturating(v);
+                    return TDst.CreateSaturating(tgtMin + (d - srcMin) * scale);
+                };
+            }
+            return src.ConvertTo(converter);
+        }
+
+        /// <summary>
         /// Core array conversion using Unsafe row-processing.
         /// Uses row-level parallelism for large arrays, matching the ToDouble path.
         /// </summary>
@@ -411,96 +518,30 @@ namespace MxPlot.Core.Processing
 
         #endregion
 
-        #region ConvertToType (IMatrixData type-erased dispatcher)
+        #region Shared helpers
 
         /// <summary>
-        /// Converts all frames of <paramref name="src"/> to the specified <paramref name="targetType"/>
-        /// with optional linear scaling, dispatching through the typed
-        /// <see cref="ConvertTo{TSrc,TDst}(MatrixData{TSrc},Func{TSrc,TDst})"/> path.
+        /// The destination of a conversion to double: <paramref name="dst"/> when given (it must match the
+        /// source's size and <paramref name="frameCount"/>), or else a new instance. Either way the source's
+        /// properties are copied onto it.
         /// </summary>
-        /// <remarks>
-        /// Both <paramref name="src"/> value type and <paramref name="targetType"/> must be in
-        /// <see cref="MatrixData.SupportedPrimitiveTypes"/> (excludes <c>Complex</c>).
-        /// Integral target types receive rounded, clamped values. Floating-point targets are
-        /// clamped to their representable range only.
-        /// </remarks>
-        /// <param name="src">Source data (type-erased).</param>
-        /// <param name="targetType">CLR type to convert elements to.</param>
-        /// <param name="doScale">
-        /// When <c>true</c>, applies a linear mapping:
-        /// <c>dst = tgtMin + (src − srcMin) / (srcMax − srcMin) × (tgtMax − tgtMin)</c>.
-        /// When <c>false</c>, direct-casts each element, clamping to the target range.
-        /// </param>
-        /// <param name="srcMin">Source range minimum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
-        /// <param name="srcMax">Source range maximum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
-        /// <param name="tgtMin">Target range minimum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
-        /// <param name="tgtMax">Target range maximum (used only when <paramref name="doScale"/> is <c>true</c>).</param>
-        /// <returns>A new <see cref="IMatrixData"/> with the element type set to <paramref name="targetType"/>.</returns>
-        public static IMatrixData ConvertToType(this IMatrixData src, Type targetType,
-            bool doScale = false,
-            double srcMin = 0.0, double srcMax = 1.0,
-            double tgtMin = 0.0, double tgtMax = 1.0)
+        private static (MatrixData<double> dst, int xnum, int ynum)
+            PrepareDstForToDouble<T>(MatrixData<T> src, MatrixData<double>? dst, int frameCount)
+            where T : unmanaged
         {
-            if (!MatrixData.SupportedPrimitiveTypes.Contains(src.ValueType))
-                throw new ArgumentException(
-                    $"Source type '{src.ValueType.Name}' is not a supported primitive type. " +
-                    $"For complex or custom struct types, provide an explicit element converter via ConvertTo<TSrc,TDst>.",
-                    nameof(src));
-            if (!MatrixData.SupportedPrimitiveTypes.Contains(targetType))
-                throw new ArgumentException(
-                    $"Target type '{targetType.Name}' is not a supported primitive type. " +
-                    $"For complex or custom struct types, provide an explicit element converter via ConvertTo<TSrc,TDst>.",
-                    nameof(targetType));
-
-            // All SupportedPrimitiveTypes implement INumber<T>; verify at the dispatch boundary
-            // in case this method is ever called with a type that was added to SupportedPrimitiveTypes
-            // but does not implement INumber<T> (e.g. a future Complex addition).
-            static bool implementsINumber(Type t) =>
-                t.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(INumber<>));
-            if (!implementsINumber(src.ValueType))
-                throw new NotSupportedException(
-                    $"Source type '{src.ValueType.Name}' does not implement INumber<T>. " +
-                    $"Use ConvertTo<TSrc,TDst> with a custom converter lambda instead.");
-            if (!implementsINumber(targetType))
-                throw new NotSupportedException(
-                    $"Target type '{targetType.Name}' does not implement INumber<T>. " +
-                    $"Use ConvertTo<TSrc,TDst> with a custom converter lambda instead.");
-
-            var method = typeof(MatrixDataValueConverter)
-                .GetMethod(nameof(ConvertToTypeDispatch),
-                    BindingFlags.NonPublic | BindingFlags.Static)!
-                .MakeGenericMethod(src.ValueType, targetType);
-
-            return (IMatrixData)method.Invoke(null, [src, doScale, srcMin, srcMax, tgtMin, tgtMax])!;
-        }
-
-        // Concrete generic dispatch; called via reflection above.
-        // INumber<T> constraint is satisfied by all MatrixData.SupportedPrimitiveTypes.
-        private static IMatrixData ConvertToTypeDispatch<TSrc, TDst>(
-            MatrixData<TSrc> src, bool doScale,
-            double srcMin, double srcMax, double tgtMin, double tgtMax)
-            where TSrc : unmanaged, INumber<TSrc>
-            where TDst : unmanaged, INumber<TDst>
-        {
-            Func<TSrc, TDst> converter;
-            if (!doScale)
+            int xnum = src.XCount;
+            int ynum = src.YCount;
+            if (dst == null)
             {
-                // TSrc → double → TDst with saturation (clamp to TDst range, no throw).
-                converter = v => TDst.CreateSaturating(double.CreateSaturating(v));
+                dst = new MatrixData<double>(xnum, ynum, frameCount);
             }
-            else
+            else if (dst.XCount != xnum || dst.YCount != ynum || dst.FrameCount != frameCount)
             {
-                double srcRange = srcMax - srcMin;
-                // Precompute scale once: replaces per-pixel division with multiply.
-                // isZeroRange → scale=0 collapses the formula to tgtMin with no branch in the loop.
-                double scale = Math.Abs(srcRange) < double.Epsilon ? 0.0 : (tgtMax - tgtMin) / srcRange;
-                converter = v =>
-                {
-                    double d = double.CreateSaturating(v);
-                    return TDst.CreateSaturating(tgtMin + (d - srcMin) * scale);
-                };
+                throw new ArgumentException("Size mismatch.");
             }
-            return src.ConvertTo(converter);
+
+            dst.CopyPropertiesFrom(src);
+            return (dst, xnum, ynum);
         }
 
         #endregion

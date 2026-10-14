@@ -108,7 +108,7 @@ namespace MxPlot.UI.Avalonia.ViewModels
             var vm = new MatrixPlotterViewModel();
             vm.MatrixData = data;
             vm.Lut = lut ?? ColorThemes.Grayscale;
-            vm.Title = title ?? $"{data.ValueTypeName}  [{data.XCount} × {data.YCount}]";
+            vm.Title = title ?? $"{data.ElementType.Name}  [{data.XCount} × {data.YCount}]";
             vm.SourcePath = sourcePath;
             return vm;
         }

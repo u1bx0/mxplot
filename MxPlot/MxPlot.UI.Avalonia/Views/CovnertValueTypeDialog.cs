@@ -65,7 +65,7 @@ namespace MxPlot.UI.Avalonia.Views
             CanMinimize = false;
 
             _targetTypeCombo = new ComboBox { MinWidth = 115, Width = double.NaN, Height = 24, FontSize = 11, MinHeight = 0, Padding = new Thickness(8, 0, 4, 0) };
-            _targetTypeCombo.ItemsSource = Array.ConvertAll(TargetTypes, MatrixData.GetValueTypeName);
+            _targetTypeCombo.ItemsSource = Array.ConvertAll(TargetTypes, MatrixData.GetElementTypeName);
             int defaultIdx = Array.IndexOf(TargetTypes, _lastTargetType);
             _targetTypeCombo.SelectedIndex = defaultIdx >= 0 ? defaultIdx : Array.IndexOf(TargetTypes, typeof(ushort));
 
@@ -256,7 +256,7 @@ namespace MxPlot.UI.Avalonia.Views
                 static string Fmt(long b) => b >= 1024 * 1024
                     ? $"{b / (1024.0 * 1024.0):F1}\u00a0MB"
                     : $"{b / 1024.0:F1}\u00a0KB";
-                if (tgt != _srcData.ValueType)
+                if (tgt != _srcData.ElementType.Type)
                 {
                     int tgtElemSize = System.Runtime.InteropServices.Marshal.SizeOf(tgt);
                     long tgtBytes = (long)_srcData.XCount * _srcData.YCount * _srcData.FrameCount * tgtElemSize;
@@ -275,7 +275,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                if (_srcData?.ValueType == tgt)
+                if (_srcData?.ElementType.Type == tgt)
                     _warningText.Text = "\u2139 Type unchanged \u2014 values will be rescaled within the same type.";
                 else
                     _warningText.Text = "\u2139 Values will be linearly mapped to the target range.";
@@ -310,7 +310,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (minOob || maxOob)
             {
                 var (lo, hi) = GetTypeRangeText(tgt);
-                _tgtWarningText.Text = $"\u26a0 Target range exceeds {MatrixData.GetValueTypeName(tgt)} [{lo}, {hi}] \u2014 out-of-range values will be clamped.";
+                _tgtWarningText.Text = $"\u26a0 Target range exceeds {MatrixData.GetElementTypeName(tgt)} [{lo}, {hi}] \u2014 out-of-range values will be clamped.";
             }
             else
             {
@@ -320,7 +320,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void UpdateDirectCastWarning(Type tgt)
         {
-            if (_srcData?.ValueType == tgt)
+            if (_srcData?.ElementType.Type == tgt)
             {
                 _warningText.Text = "\u26a0 Same type selected with no scaling \u2014 this produces an identical copy with no effect.";
                 _warningText.Foreground = new SolidColorBrush(Color.FromRgb(160, 160, 160));
@@ -345,13 +345,13 @@ namespace MxPlot.UI.Avalonia.Views
                     bool overflow = dataMin < typeMin || dataMax > typeMax;
                     if (!overflow)
                     {
-                        _warningText.Text = $"\u2713 All data values ({FormatValue(dataMin)}\u2013{FormatValue(dataMax)}) fit in {MatrixData.GetValueTypeName(tgt)} range.";
+                        _warningText.Text = $"\u2713 All data values ({FormatValue(dataMin)}\u2013{FormatValue(dataMax)}) fit in {MatrixData.GetElementTypeName(tgt)} range.";
                         _warningText.Foreground = new SolidColorBrush(Color.FromRgb(80, 200, 120));
                         return;
                     }
                     else
                     {
-                        _warningText.Text = $"\u26a0 Data range [{FormatValue(dataMin)}, {FormatValue(dataMax)}] exceeds {MatrixData.GetValueTypeName(tgt)} range. Out-of-range values will be clamped.";
+                        _warningText.Text = $"\u26a0 Data range [{FormatValue(dataMin)}, {FormatValue(dataMax)}] exceeds {MatrixData.GetElementTypeName(tgt)} range. Out-of-range values will be clamped.";
                         _warningText.Foreground = Brushes.Orange;
                         return;
                     }

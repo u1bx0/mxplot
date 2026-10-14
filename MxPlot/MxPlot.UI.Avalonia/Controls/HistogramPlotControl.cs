@@ -91,7 +91,7 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>
         /// Color of the two boundary lines marking [ViewMin, ViewMax]. Defaults to red (the ordinary
         /// value-range/LUT reading). Callers that reuse this control for something other than a value
-        /// range -- e.g. MatrixPlotter.ColorCoded's depth histogram, where the boundary lines mark the
+        /// range -- e.g. MatrixPlotter.ColorCoded's depth profile plot, where the boundary lines mark the
         /// frame range used for color coding -- should pick a different color here so the two readings
         /// aren't visually confused with each other.
         /// </summary>

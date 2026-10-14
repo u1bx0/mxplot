@@ -106,6 +106,12 @@ namespace MxPlot.UI.Avalonia.Controls
             set => _surface.ComplexValueMode = value;
         }
 
+        /// <summary>
+        /// The value mode <paramref name="data"/> is shown in: the selected <see cref="ComplexValueMode"/> for
+        /// Complex data, and 0 for anything else.
+        /// </summary>
+        internal int ShownValueMode(IMatrixData data) => _surface.ShownValueMode(data);
+
         /// <summary>Fired each time the auto value range is computed. Carries (Min, Max).</summary>
         public event EventHandler<(double Min, double Max)>? AutoRangeComputed;
 
@@ -416,6 +422,13 @@ namespace MxPlot.UI.Avalonia.Controls
             set => _surface.IsAspectCorrectionEnabled = value;
         }
 
+        /// <summary>
+        /// Raised after <see cref="IsAspectCorrectionEnabled"/> changed. <see cref="MatrixPlotter"/>
+        /// subscribes so that setting it directly on <c>MainView</c> / <c>BottomView</c> / <c>RightView</c>
+        /// brings the other views and the Scale tab along.
+        /// </summary>
+        public event EventHandler? AspectCorrectionChanged;
+
         /// <summary>Moves the crosshair to the given data-space position and redraws.</summary>
         public void SetCrosshairDataPosition(Point dataPos) => _surface.SetCrosshairDataPosition(dataPos);
 
@@ -632,6 +645,7 @@ namespace MxPlot.UI.Avalonia.Controls
                 ViewportChanged?.Invoke(this, EventArgs.Empty);
             };
             _surface.BitmapRefreshed += (_, _) => ViewportChanged?.Invoke(this, EventArgs.Empty);
+            _surface.AspectCorrectionChanged += (_, _) => AspectCorrectionChanged?.Invoke(this, EventArgs.Empty);
             _surface.AutoRangeComputed += (_, args) => AutoRangeComputed?.Invoke(this, args);
 
             // Scrollbar → surface
@@ -1007,7 +1021,9 @@ namespace MxPlot.UI.Avalonia.Controls
             }
 
             // ── Complex display mode submenu ─────────────────────────────────────
-            if (MatrixData?.ValueType == typeof(System.Numerics.Complex))
+            // Complex only: its entries are ComplexValueMode. A registered custom struct with several
+            // value modes is shown in its first one, with no choice offered (see ShownValueMode).
+            if (MatrixData is MatrixData<System.Numerics.Complex>)
             {
                 var complexMenu = new MenuItem { Header = "Complex Value", FontSize = 11 };
                 complexMenu.Icon = MakeIconSlot(MenuIcons.ComplexZ);

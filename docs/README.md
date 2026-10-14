@@ -34,7 +34,7 @@
   3D volume operations: MIP/MinIP/AIP projections, orthogonal views, and performance optimization.
 
 - **[Custom Value Types Guide](./CustomValueTypes_Guide.md)**  
-  Working with custom unmanaged structs beyond primitive types. **Status: Preliminary**
+  Complex and custom unmanaged structs: element types, value modes, registering a struct (with templates), processing and saving structured data. Core API stable; UI support for custom structs is partial.
 
 ---
 

@@ -19,7 +19,7 @@ namespace MxPlot.UI.Avalonia.Commands
 
             var (lutMin, lutMax) = host.DisplayedRange;
             var dialog = new ConvertValueTypeDialog(
-                data.ValueTypeName, lutMin, lutMax, srcData: data, isLinkWindow: host.IsReplaceBlocked);
+                data.ElementType.Name, lutMin, lutMax, srcData: data, isLinkWindow: host.IsReplaceBlocked);
             var choice = await dialog.ShowCenteredOnAsync(host.Owner, host.Owner);
             if (choice == null) return;
             var (targetType, doScale, replaceData, srcMin, srcMax, tgtMin, tgtMax) = choice.Value;
@@ -38,7 +38,7 @@ namespace MxPlot.UI.Avalonia.Commands
             }
 
             converted.CopyPropertiesFrom(data);
-            string typeDesc = $"{data.ValueTypeName} → {converted.ValueTypeName}";
+            string typeDesc = $"{data.ElementType.Name} → {converted.ElementType.Name}";
             string detail = doScale
                 ? $"{typeDesc}; scale [{srcMin:G6}, {srcMax:G6}] → [{tgtMin:G6}, {tgtMax:G6}]"
                 : $"{typeDesc}; direct cast";

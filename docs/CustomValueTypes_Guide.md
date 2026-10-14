@@ -1,609 +1,549 @@
 ﻿# Custom Value Types Guide
 
-**MxPlot.Core Advanced Topics**
+**MxPlot.Core — Element Types and Value Modes**
 
-> Last Updated: 2026-02-21  
-> Status: **Preliminary** (Design under active development)
+> Last Updated: 2026-09-27 (0.6.0-dev2)
+> Status: **Core API stable; UI support for custom structs is partial** (see [UI Support](#ui-support))
 
 ## 📚 Table of Contents
 
-1. [Introduction](#introduction)
-2. [The Unmanaged Constraint](#the-unmanaged-constraint)
-3. [Complex Number Support](#complex-number-support)
-4. [Custom Struct Registration](#custom-struct-registration)
-5. [Value Mode Management](#value-mode-management)
-6. [Potential Applications](#potential-applications)
-7. [Implementation Notes](#implementation-notes)
+1. [Overview](#overview)
+2. [Element Types and Value Modes](#element-types-and-value-modes)
+3. [Complex (Built-in)](#complex-built-in)
+4. [Registering a Custom Struct](#registering-a-custom-struct)
+5. [The Functions Must Not Keep State](#the-functions-must-not-keep-state)
+6. [Templates](#templates)
+7. [Using a Registered Struct](#using-a-registered-struct)
+8. [Processing Structured Data](#processing-structured-data)
+9. [Saving and Loading (.mxd)](#saving-and-loading-mxd)
+10. [UI Support](#ui-support)
+11. [Checklist and API Summary](#checklist-and-api-summary)
 
 ---
 
-## Introduction
+## Overview
 
-`MatrixData<T>` is designed to handle **any unmanaged type**, extending beyond primitive numerics to custom structs including `Complex`. This enables advanced scientific computing scenarios such as vector fields, spectral data, and multi-component measurements.
+`MatrixData<T>` can hold any **unmanaged** type `T`, not just primitive numbers. Every element type falls into one
+of three groups:
 
-**⚠️ Important**: While the core infrastructure supports custom structs, the design and best practices are still evolving. This guide presents the current capabilities and potential future directions.
+| Group | Types | What you do |
+|---|---|---|
+| Built-in primitives | `byte`, `sbyte`, `short`, `ushort`, `int`, `uint`, `long`, `ulong`, `float`, `double` | Nothing — use them directly |
+| Built-in structured type | `System.Numerics.Complex` | Nothing — registered by the library, with five value modes |
+| Custom structs | Any other unmanaged struct | **Register it once** before creating the first instance |
 
-### Key Design Philosophy
-
-MxPlot.Core provides the **flexibility** to work with arbitrary unmanaged types while maintaining:
-- Zero-copy performance
-- Type safety
-- Extensibility for domain-specific needs
-
----
-
-## The Unmanaged Constraint
-
-### What is Unmanaged?
-
-The `unmanaged` constraint ensures types can be stored in contiguous memory and manipulated via pointers:
+A structured element (a `Complex`, a vector, a multi-channel pixel) has no single "value". It can be *read* in
+several ways — its magnitude, its real part, one of its components. Each of these readings is a **value mode**.
+Displaying, histogramming, profiling and most processing all need a plain `double`, so they read the element in
+one of its value modes.
 
 ```csharp
-// ✅ Valid: All fields are unmanaged
-public struct Vector3D
+// ✅ Unmanaged: every field is a value type
+public struct Velocity2D
 {
-    public double X;
-    public double Y;
-    public double Z;
+    public float Vx;
+    public float Vy;
 }
 
-// ❌ Invalid: Contains managed reference
-public struct InvalidStruct
+// ❌ Not unmanaged: contains a reference
+public struct Labeled
 {
     public double Value;
-    public string Label;  // ← Managed type not allowed
+    public string Label;   // managed reference — not allowed
 }
 ```
 
 ---
 
-## Complex Number Support
+## Element Types and Value Modes
 
-MxPlot.Core provides built-in support for `System.Numerics.Complex` as a reference implementation.
-
-### Built-in Min/Max Finder
-
-`Complex` has a pre-registered finder that calculates min/max for 5 different modes:
+Every `MatrixData<T>` describes its element type through `ElementType`:
 
 ```csharp
-public enum ComplexValueMode
-{
-    Magnitude = 0,  // |z| (default)
-    Real = 1,       // Re(z)
-    Imaginary = 2,  // Im(z)
-    Phase = 3,      // arg(z)
-    Power = 4       // |z|²
-}
+IMatrixData data = ...;
+ElementType et = data.ElementType;
+
+et.Type             // the CLR type, e.g. typeof(Complex)
+et.Name             // display name: "ushort", "Complex", "Velocity2D"
+et.PersistentName   // name written to .mxd files (see "Saving and Loading")
+et.ValueModes       // the value modes, in index order; never empty
+et.ValueModeCount   // shorthand for ValueModes.Count
+et.ClampMode(mode)  // mode if it is valid, otherwise 0
 ```
 
-### Usage Example
+A value mode is identified by its **index** into `ValueModes`; its `Name` is for display. A primitive type has a
+single mode named `"Value"`. Every API that takes a value mode takes this index:
 
 ```csharp
-var data = new MatrixData<Complex>(256, 256);
-data.Set((ix, iy, x, y) => new Complex(Math.Cos(x), Math.Sin(y)));
-
-// Access different modes
-var (magMin, magMax) = data.GetValueRange(0, ComplexValueMode.Magnitude);
-var (phaseMin, phaseMax) = data.GetValueRange(0, ComplexValueMode.Phase);
-var (powerMin, powerMax) = data.GetValueRange(0, ComplexValueMode.Power);
-
-// Or using integer mode index
-var (min, max) = data.GetValueRange(frameIndex: 0, valueMode: 0);  // Magnitude
+double v = data.GetValueAt(ix, iy, frameIndex, valueMode: 1);
+var (min, max) = data.GetValueRange(frameIndex, valueMode: 1);
 ```
 
-**Implementation Detail**: The built-in `MinMaxFinder` (delegate) for `Complex` returns a `double[5]` array containing min/max for all modes simultaneously, enabling efficient single-pass computation.
-
-**Key Insight**: Custom structs can follow the same pattern—return multiple modes in a single array for efficiency.
+For a single-mode type, every mode reads the value itself, so code written for structured data also works on
+primitive data.
 
 ---
 
-## Custom Struct Registration
+## Complex (Built-in)
 
-### Critical Requirement: Min/Max Finder
+`Complex` is registered by the library with five value modes, in the order of the `ComplexValueMode` enum:
 
-To support statistics and visualization, custom structs need a **registered finder** for min/max operations.
-
-#### Actual API
+| Index | `ComplexValueMode` | Value |
+|---|---|---|
+| 0 | `Magnitude` | \|z\| (the default) |
+| 1 | `Real` | Re(z) |
+| 2 | `Imaginary` | Im(z) |
+| 3 | `Phase` | arg(z), in radians [−π, π] |
+| 4 | `Power` | \|z\|² |
 
 ```csharp
-// Register once per type (typically in application startup)
-MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(array =>
+using System.Numerics;
+using MxPlot.Core;
+using MxPlot.Core.Processing;
+
+var field = new MatrixData<Complex>(256, 256);
+field.Set((ix, iy, x, y) => Complex.FromPolarCoordinates(1.0, x * y));
+
+// Ranges and values in a given mode
+var (phaseMin, phaseMax) = field.GetValueRange(0, ComplexValueMode.Phase);
+double re = field.GetValueAt(10, 20, 0, (int)ComplexValueMode.Real);
+
+// A single element
+double power = new Complex(3, 4).ToScalar(ComplexValueMode.Power);   // 25
+
+// The whole data in one mode, as double
+MatrixData<double> phase = field.ToScalars((int)ComplexValueMode.Phase);
+
+// Complex only: extract a mode and apply log10 in one pass (e.g. a spectrum in dB-like scale)
+MatrixData<double> logPower = field.ToDoubleAllFrames(ComplexValueMode.Power, applyLog10: true);
+```
+
+`ToScalar(ComplexValueMode)` is the single definition of the five modes: value reads, processing and rendering all
+use it, so a value always lies within the range reported for its mode.
+
+> **log₁₀ and signed modes.** `applyLog10` floors values at the same small epsilon as `LogTransform` with
+> `NegativeHandling.Clamp`, so both give the same result. Use it with the non-negative modes (`Magnitude`, `Power`):
+> the negative values of `Real`, `Imaginary` and `Phase` would all be flattened onto the floor.
+
+---
+
+## Registering a Custom Struct
+
+A custom struct must be registered **once**, **before the first `MatrixData<T>` of it is created**. Creating an
+instance of an unregistered type throws `InvalidOperationException`:
+
+```csharp
+MatrixData<Velocity2D>.IsRegistered;          // false until registered
+var data = new MatrixData<Velocity2D>(64, 64); // ❌ InvalidOperationException
+```
+
+Registration supplies the value modes, and two **functions**: how to read an element in each mode, and how to find a
+frame's range in each mode.
+
+```csharp
+MatrixData<Velocity2D>.Register(new ElementTypeRegistration<Velocity2D>
 {
-    // Calculate min/max for the entire array
-    double minMag = double.PositiveInfinity;
-    double maxMag = double.NegativeInfinity;
-    
-    foreach (var vec in array)
-    {
-        double mag = Math.Sqrt(vec.X * vec.X + vec.Y * vec.Y + vec.Z * vec.Z);
-        if (mag < minMag) minMag = mag;
-        if (mag > maxMag) maxMag = mag;
-    }
-    
-    // Return arrays: single mode (magnitude)
-    return (new[] { minMag }, new[] { maxMag });
+    TypeId       = "MyLab.Velocity2D",                                          // stable identifier for .mxd files
+    ValueModes   = [new ValueMode("Speed"), new ValueMode("Vx"), new ValueMode("Vy")],
+    ToScalar     = static (v, mode) => mode switch { 1 => v.Vx, 2 => v.Vy, _ => v.Speed },
+    MinMaxFinder = FindVelocityRange,                                           // min/max of each mode
 });
-
-// Now all new MatrixData<Vector3D> instances can calculate min/max
-var data = new MatrixData<Vector3D>(512, 512, 100);
-var (min, max) = data.GetValueRange();  // Uses registered finder
 ```
 
-#### Multi-Mode Example
+| Property | Required | What it is |
+|---|---|---|
+| `TypeId` | ✅ | A stable identifier written to `.mxd` headers. Keep it unchanged when the type is moved or renamed. |
+| `ValueModes` | ✅ | The value modes, in index order. At least one. |
+| `ToScalar` | ✅ | `Func<T, int, double>`: the value of an element in a mode (an index into `ValueModes`). Only valid modes are passed. |
+| `ToScalars` | — | `ScalarsReader<T>`: a faster bulk form of `ToScalar` for a whole row. Must give the same values. Without one, the library loops over `ToScalar`. |
+| `MinMaxFinder` | ✅ | `MatrixData<T>.MinMaxFinder`: a frame's minimum and maximum **for every mode**, in the same order. |
+| `Interpolator` | — | An `IBilinearInterpolator<T>` for interpolated reads and bilinear resampling. Without one, those fall back to nearest-neighbor. |
 
-For types with multiple meaningful representations (like `Complex`):
+Rules:
 
-```csharp
-public struct ElectricField
-{
-    public Complex Ex, Ey, Ez;
-}
+- **Once per type.** Registering a type again throws `InvalidOperationException`. Built-in types cannot be
+  registered (`NotSupportedException`).
+- **One entry per mode.** `Register` calls the finder once on a single `default(T)` element — the value every new
+  frame starts with — and throws `ArgumentException` if it does not return one minimum and one maximum per mode.
+- **Display name.** The display name (`ElementType.Name`) is the type's name; it is not part of the registration.
+- **The functions must not keep state** — see the next section.
 
-MatrixData<ElectricField>.RegisterDefaultMinMaxFinder(array =>
-{
-    // Mode 0: Total magnitude
-    // Mode 1: Ex magnitude
-    // Mode 2: Ey magnitude
-    // Mode 3: Ez magnitude
-    
-    double minTotal = double.PositiveInfinity;
-    double maxTotal = double.NegativeInfinity;
-    double minEx = double.PositiveInfinity;
-    double maxEx = double.NegativeInfinity;
-    double minEy = double.PositiveInfinity;
-    double maxEy = double.NegativeInfinity;
-    double minEz = double.PositiveInfinity;
-    double maxEz = double.NegativeInfinity;
-    
-    foreach (var field in array)
-    {
-        // Total magnitude
-        double total = Math.Sqrt(
-            field.Ex.Magnitude * field.Ex.Magnitude +
-            field.Ey.Magnitude * field.Ey.Magnitude +
-            field.Ez.Magnitude * field.Ez.Magnitude
-        );
-        if (total < minTotal) minTotal = total;
-        if (total > maxTotal) maxTotal = total;
-        
-        // Ex component
-        double ex = field.Ex.Magnitude;
-        if (ex < minEx) minEx = ex;
-        if (ex > maxEx) maxEx = ex;
-        
-        // Ey component
-        double ey = field.Ey.Magnitude;
-        if (ey < minEy) minEy = ey;
-        if (ey > maxEy) maxEy = ey;
-        
-        // Ez component
-        double ez = field.Ez.Magnitude;
-        if (ez < minEz) minEz = ez;
-        if (ez > maxEz) maxEz = ez;
-    }
-    
-    return (
-        new[] { minTotal, minEx, minEy, minEz },
-        new[] { maxTotal, maxEx, maxEy, maxEz }
-    );
-});
-
-// Usage with mode selection
-var data = new MatrixData<ElectricField>(256, 256, 50);
-var (min0, max0) = data.GetValueRange(frameIndex: 0, valueMode: 0);  // Total
-var (min1, max1) = data.GetValueRange(frameIndex: 0, valueMode: 1);  // Ex
-```
-
-### Key Characteristics
-
-**Type-Global Registration**:
-- Register **once per type** at application startup
-- All instances created **after registration** will use the finder
-- `MatrixData<int>` and `MatrixData<float>` have separate registrations
-
-**Timing Matters**:
-```csharp
-// ❌ Wrong: Create before registration
-var data1 = new MatrixData<Vector3D>(512, 512);
-MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(...);
-// data1 will throw exception on RefreshValueRange()
-
-// ✅ Correct: Register first
-MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(...);
-var data2 = new MatrixData<Vector3D>(512, 512);
-// data2 works fine
-```
-
-**Recommended Pattern**:
-```csharp
-// In your application startup (Program.cs, etc.)
-public static class CustomTypeInitializer
-{
-    public static void RegisterCustomFinders()
-    {
-        MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(...);
-        MatrixData<ElectricField>.RegisterDefaultMinMaxFinder(...);
-        MatrixData<SpectrumPixel>.RegisterDefaultMinMaxFinder(...);
-    }
-}
-
-// Call once at startup
-CustomTypeInitializer.RegisterCustomFinders();
-```
+The finder is called once per frame and its result is cached; computing every mode in a **single pass** over the frame
+is usually the most efficient. It defines the range the data reports, which is normally the exact minimum and maximum
+of each mode as `ToScalar` reads it.
 
 ---
 
-## Value Mode Management
+## The Functions Must Not Keep State
 
-### The Value Mode Problem
+Everything you register — `ToScalar`, `ToScalars`, `MinMaxFinder` and the `Interpolator` — is **shared by the whole
+process** for as long as the type is registered, and is **called concurrently**: from parallel loops over rows and
+frames, from the UI's rendering thread, and from background processing. Each call must depend only on its arguments.
 
-For complex data types, a single "value" can have multiple meaningful interpretations. The min/max finder must calculate statistics for **all modes** you want to support.
+**Do not:**
 
-### Current Approach: Integer Index
+| ❌ Don't | Why it breaks |
+|---|---|
+| Keep a "current mode" (or any setting) that one call sets for the next | Other threads change it between the set and the read |
+| Reuse a buffer, cache or counter kept outside the call | Concurrent calls overwrite each other's data |
+| Capture a variable that can change after registration | The reading changes silently for every existing instance |
+| Do slow or blocking work (I/O, locks, allocations per element) | These run once per element, often on the UI's rendering path |
 
-The current design uses integer indices to select modes:
+**Do:**
 
-```csharp
-// Mode 0, 1, 2, ... correspond to different interpretations
-var (min, max) = data.GetValueRange(frameIndex: 0, valueMode: 0);
-```
+- Write the functions as **`static` lambdas** or **static methods**. Neither can capture anything, so the compiler
+  rules out the third row above:
 
-**Complex Example**:
-```csharp
-public enum ComplexValueMode
-{
-    Magnitude = 0,  // Default
-    Real = 1,
-    Imaginary = 2,
-    Phase = 3,
-    Power = 4
-}
+  ```csharp
+  ToScalar = static (v, mode) => mode switch { 1 => v.Vx, 2 => v.Vy, _ => v.Speed },   // ✅ cannot capture
+  ToScalar = Velocity2DModes.Read,                                                       // ✅ static method
+  ```
 
-// Extension method for type-safe access
-var (min, max) = complexData.GetValueRange(0, ComplexValueMode.Phase);
-```
+- Keep temporary values in **local variables** inside the call.
+- If a reading needs a parameter (a calibration factor, say), make it a constant, or a new value mode — not a field
+  that changes.
 
-### Extending to Custom Types
-
-**Option 1: Define Custom Enum**
-
-```csharp
-public enum ElectricFieldMode
-{
-    TotalMagnitude = 0,
-    ComponentEx = 1,
-    ComponentEy = 2,
-    ComponentEz = 3
-}
-
-// Type-safe extension method
-public static (double Min, double Max) GetValueRange(
-    this MatrixData<ElectricField> data,
-    int frameIndex,
-    ElectricFieldMode mode)
-{
-    return data.GetValueRange(frameIndex, (int)mode);
-}
-
-// Usage
-var (min, max) = data.GetValueRange(0, ElectricFieldMode.ComponentEx);
-```
-
-**Option 2: Constants Class**
-
-```csharp
-public static class ElectricFieldModes
-{
-    public const int TotalMagnitude = 0;
-    public const int ComponentEx = 1;
-    public const int ComponentEy = 2;
-    public const int ComponentEz = 3;
-}
-
-// Usage
-var (min, max) = data.GetValueRange(0, ElectricFieldModes.ComponentEx);
-```
-
-### Design Tradeoffs
-
-**Current System**:
-- ✅ Simple and efficient (integer indexing)
-- ✅ No additional API surface
-- ❌ Mode semantics not self-documenting
-- ❌ Requires user documentation
-
-**Future Possibilities**:
-- Generic metadata system for mode descriptions
-- Runtime mode enumeration/discovery
-- Integration with visualization layer for auto-labeling
-
-**Recommendation**: Define enums or constants for your custom types to maintain type safety and code clarity.
+The same applies to a `MinMaxFinder` passed later to `RegisterDefaultMinMaxFinder` or `SetMinMaxFinder`.
 
 ---
 
-## Potential Applications
+## Templates
 
-### 1. Vector Fields
+### Template A — a struct with several value modes
 
-```csharp
-public struct VectorField3D
-{
-    public double Vx;
-    public double Vy;
-    public double Vz;
-    
-    public double Magnitude => Math.Sqrt(Vx*Vx + Vy*Vy + Vz*Vz);
-}
-
-var flowField = new MatrixData<VectorField3D>(512, 512, 100);
-// Store velocity field from fluid simulation
-```
-
-**Visualization Modes**:
-- Magnitude map
-- Direction (quiver plot)
-- Component maps (Vx, Vy, Vz)
-- Divergence/curl (requires spatial derivatives)
-
-### 2. Spectral Data
+A complete, copy-ready registration: the struct, its readings as static methods, a one-pass finder, and registration
+at module load.
 
 ```csharp
-public struct SpectrumPixel
+using System;
+using System.Runtime.CompilerServices;
+using MxPlot.Core;
+
+// 1. The struct: unmanaged fields only
+public struct Velocity2D
 {
-    public fixed float Intensities[32];  // 32 wavelength channels
-    
-    // Fixed-size buffers are unmanaged
+    public float Vx;
+    public float Vy;
+
+    public Velocity2D(float vx, float vy) { Vx = vx; Vy = vy; }
+    public readonly double Speed => Math.Sqrt((double)Vx * Vx + (double)Vy * Vy);
 }
 
-var hyperSpectral = new MatrixData<SpectrumPixel>(1024, 1024);
-```
-
-**Visualization Modes**:
-- RGB composite (select 3 channels)
-- Specific wavelength
-- Spectral index (NDVI, etc.)
-
-### 3. Multi-Modal Sensor Data
-
-```csharp
-public struct MultiSensorPixel
+public static class Velocity2DModes
 {
-    public ushort Visible;
-    public ushort Infrared;
-    public ushort Thermal;
-    public byte Quality;
-}
-```
+    // 2. Mode indices, for readable call sites (optional)
+    public const int Speed = 0;
+    public const int Vx = 1;
+    public const int Vy = 2;
 
-**Visualization Modes**:
-- Individual sensor channels
-- Sensor ratios
-- Composite indices
-
----
-
-## Implementation Notes
-
-### Current Status
-
-- ✅ Core infrastructure supports any `unmanaged` type
-- ✅ `Complex` fully supported with 5 value modes
-- ✅ Registration API is stable: `RegisterDefaultMinMaxFinder()`
-- ⚠️ Mode enumeration/discovery not yet standardized
-- ⚠️ Documentation conventions for custom modes need guidance
-
-### API Surface
-
-```csharp
-// Static registration (once per type)
-MatrixData<T>.RegisterDefaultMinMaxFinder(MinMaxFinder finder);
-
-// Delegate signature
-public delegate (double[] minValues, double[] maxValues) MinMaxFinder(T[] array);
-
-// Instance-level access
-var (min, max) = data.GetValueRange(frameIndex, valueMode);
-var (minArr, maxArr) = data.GetMinMaxArrays(frameIndex);
-
-// Per-instance override (if needed)
-data.SetMinMaxFinder(customFinder);
-```
-
-### Design Considerations
-
-1. **Type-Global vs. Instance-Specific**
-   - **Current**: Type-global registration with optional instance override
-   - **Rationale**: Most applications have consistent interpretation per type
-   - **Flexibility**: `SetMinMaxFinder()` allows special cases
-
-2. **Mode Enumeration**
-   - **Current**: Integer indices (0, 1, 2, ...)
-   - **Best Practice**: Define enums or constants for clarity
-   - **Future**: Potential metadata system for mode descriptions
-
-3. **Performance**
-   - Min/max finder runs once per frame (cached)
-   - Multi-mode calculation in single pass is efficient
-   - Parallel processing possible (not yet implemented)
-
-4. **Serialization**
-   - Custom structs serialize as raw binary (works automatically)
-   - Min/max arrays stored separately in `.mxd` format
-   - Mode metadata must be documented externally (no standard yet)
-
-### Best Practices Summary
-
-**For Library Authors**:
-1. Register finders at module initialization
-2. Document mode indices clearly
-3. Provide extension methods for type-safe access
-4. Consider multi-mode single-pass calculation
-
-**For Application Developers**:
-1. Call registration in `Program.cs` or equivalent
-2. Define enums for your custom modes
-3. Test min/max calculation before large-scale use
-4. Handle missing registration gracefully (catch exceptions)
-
-### Example: Complete Integration
-
-**Note**: This example demonstrates all features for educational purposes. In practice, most applications only need 1-2 modes (e.g., Magnitude only), not all possible interpretations.
-
-```csharp
-// 1. Define struct
-public struct Vector3D
-{
-    public double X, Y, Z;
-    public double Magnitude => Math.Sqrt(X*X + Y*Y + Z*Z);
-}
-
-// 2. Define modes (for documentation, even if not all are implemented)
-public enum Vector3DMode
-{
-    Magnitude = 0,
-    ComponentX = 1,
-    ComponentY = 2,
-    ComponentZ = 3
-}
-
-// 3. Register finder (startup)
-public static class Vector3DSupport
-{
-    public static void Register()
+    // 3. How each mode is read — static, so it cannot keep state
+    public static double Read(Velocity2D v, int mode) => mode switch
     {
-        // ⚠️ EDUCATIONAL EXAMPLE: This calculates ALL modes for demonstration
-        // In production, consider registering only the modes you actually need
-        MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(array =>
+        Vx => v.Vx,
+        Vy => v.Vy,
+        _ => v.Speed,
+    };
+
+    // 4. Min/max of every mode in one pass, in the same order as the modes
+    public static (double[] minValues, double[] maxValues) FindRange(Velocity2D[] array)
+    {
+        var min = new[] { double.PositiveInfinity, double.PositiveInfinity, double.PositiveInfinity };
+        var max = new[] { double.NegativeInfinity, double.NegativeInfinity, double.NegativeInfinity };
+        foreach (var v in array)
         {
-            double minMag = double.PositiveInfinity;
-            double maxMag = double.NegativeInfinity;
-            double minX = double.PositiveInfinity;
-            double maxX = double.NegativeInfinity;
-            double minY = double.PositiveInfinity;
-            double maxY = double.NegativeInfinity;
-            double minZ = double.PositiveInfinity;
-            double maxZ = double.NegativeInfinity;
-            
-            foreach (var v in array)
-            {
-                double mag = v.Magnitude;
-                if (mag < minMag) minMag = mag;
-                if (mag > maxMag) maxMag = mag;
-                if (v.X < minX) minX = v.X;
-                if (v.X > maxX) maxX = v.X;
-                if (v.Y < minY) minY = v.Y;
-                if (v.Y > maxY) maxY = v.Y;
-                if (v.Z < minZ) minZ = v.Z;
-                if (v.Z > maxZ) maxZ = v.Z;
-            }
-            
-            return (
-                new[] { minMag, minX, minY, minZ },
-                new[] { maxMag, maxX, maxY, maxZ }
-            );
-        });
+            double speed = v.Speed;
+            if (speed < min[0]) min[0] = speed;
+            if (speed > max[0]) max[0] = speed;
+            if (v.Vx < min[1]) min[1] = v.Vx;
+            if (v.Vx > max[1]) max[1] = v.Vx;
+            if (v.Vy < min[2]) min[2] = v.Vy;
+            if (v.Vy > max[2]) max[2] = v.Vy;
+        }
+        return (min, max);
     }
-    
-    // 🎯 REALISTIC ALTERNATIVE: Register only what you need
-    public static void RegisterMagnitudeOnly()
+
+    // 5. Register once, before any MatrixData<Velocity2D> exists.
+    //    A module initializer runs when the assembly loads, so the type is always ready.
+    [ModuleInitializer]
+    internal static void Register()
     {
-        MatrixData<Vector3D>.RegisterDefaultMinMaxFinder(array =>
+        MatrixData<Velocity2D>.Register(new ElementTypeRegistration<Velocity2D>
         {
-            double minMag = double.PositiveInfinity;
-            double maxMag = double.NegativeInfinity;
-            
-            foreach (var v in array)
-            {
-                double mag = v.Magnitude;
-                if (mag < minMag) minMag = mag;
-                if (mag > maxMag) maxMag = mag;
-            }
-            
-            // Single mode: [0] = Magnitude
-            return (new[] { minMag }, new[] { maxMag });
+            TypeId = "MyLab.Velocity2D",
+            ValueModes = [new ValueMode("Speed"), new ValueMode("Vx"), new ValueMode("Vy")],
+            ToScalar = Read,
+            MinMaxFinder = FindRange,
         });
     }
 }
+```
 
-// 4. Extension methods (optional)
-public static class Vector3DExtensions
+If you prefer explicit startup code over a module initializer, call the registration from `Program.Main` (or your
+application's startup) before creating any data, and guard it with `IsRegistered` if it can run more than once:
+
+```csharp
+if (!MatrixData<Velocity2D>.IsRegistered)
+    MatrixData<Velocity2D>.Register(...);
+```
+
+### Template B — a struct with a single value mode
+
+When one reading is all you need (a luminance, a temperature), register a single mode. A `static` lambda is enough:
+
+```csharp
+public struct RgbPixel
 {
-    public static (double Min, double Max) GetValueRange(
-        this MatrixData<Vector3D> data,
-        int frameIndex,
-        Vector3DMode mode)
+    public byte R, G, B;
+    public readonly double Luminance => 0.2126 * R + 0.7152 * G + 0.0722 * B;
+}
+
+MatrixData<RgbPixel>.Register(new ElementTypeRegistration<RgbPixel>
+{
+    TypeId = "MyLab.RgbPixel",
+    ValueModes = [new ValueMode("Luminance")],
+    ToScalar = static (p, mode) => p.Luminance,   // only mode 0 exists
+    MinMaxFinder = static array =>
     {
-        return data.GetValueRange(frameIndex, (int)mode);
+        double min = double.PositiveInfinity, max = double.NegativeInfinity;
+        foreach (var p in array)
+        {
+            double l = p.Luminance;
+            if (l < min) min = l;
+            if (l > max) max = l;
+        }
+        return ([min], [max]);
+    },
+});
+```
+
+### Optional — a faster bulk read
+
+Register `ToScalars` when reading a whole row at once can be done faster than element by element — typically by
+deciding the mode once, outside the loop. It must give the same values as `ToScalar`:
+
+```csharp
+public static void ReadRow(ReadOnlySpan<Velocity2D> source, Span<double> destination, int mode)
+{
+    switch (mode)
+    {
+        case Velocity2DModes.Vx:
+            for (int i = 0; i < source.Length; i++) destination[i] = source[i].Vx;
+            break;
+        case Velocity2DModes.Vy:
+            for (int i = 0; i < source.Length; i++) destination[i] = source[i].Vy;
+            break;
+        default:
+            for (int i = 0; i < source.Length; i++) destination[i] = source[i].Speed;
+            break;
     }
 }
 
-// 5. Usage
-Vector3DSupport.RegisterMagnitudeOnly();  // Recommended for most cases
-
-var data = new MatrixData<Vector3D>(512, 512, 100);
-var (min, max) = data.GetValueRange();  // Gets magnitude min/max
+// in the registration:
+ToScalars = Velocity2DModes.ReadRow,
 ```
 
-### Practical Recommendations
+### Optional — interpolation
 
-**When to use single-mode registration**:
-- ✅ Most visualization needs (magnitude/intensity)
-- ✅ Simple data types with obvious primary metric
-- ✅ Performance-critical applications
+Supply an `IBilinearInterpolator<T>` if interpolated reads (`GetValue(x, y, interpolate: true)`) and bilinear
+resampling should blend elements rather than pick the nearest one. Interpolate in the struct's own space — for a
+vector, component by component. Like the functions above, it is shared and called concurrently, so it must not keep
+state:
 
-**When to use multi-mode registration**:
-- Use when you genuinely need multiple interpretations displayed simultaneously
-- Consider calculating additional modes on-demand instead
-- Example: Complex numbers inherently need multiple modes (magnitude, phase, etc.)
+```csharp
+public sealed class Velocity2DInterpolator : IBilinearInterpolator<Velocity2D>
+{
+    public Velocity2D Interpolate(Velocity2D v00, Velocity2D v10, Velocity2D v01, Velocity2D v11, double dx, double dy)
+    {
+        float Lerp2(float a, float b, float c, float d) =>
+            (float)((a * (1 - dx) + b * dx) * (1 - dy) + (c * (1 - dx) + d * dx) * dy);
+        return new Velocity2D(Lerp2(v00.Vx, v10.Vx, v01.Vx, v11.Vx), Lerp2(v00.Vy, v10.Vy, v01.Vy, v11.Vy));
+    }
+}
 
-**Design philosophy**: **Register only what you need**. You can always provide additional analysis methods separately without burdening the min/max finder.
+// in the registration:
+Interpolator = new Velocity2DInterpolator(),
+```
+
+Like the finder, the interpolator can be replaced later, for instances created afterwards:
+`MatrixData<Velocity2D>.RegisterDefaultInterpolator(other)`. This requires the type to be registered, and is not
+allowed for the primitive types, whose values are interpolated numerically.
 
 ---
 
-## Summary
+## Using a Registered Struct
 
-MxPlot.Core provides **production-ready support** for custom unmanaged types through a well-defined registration API. While `Complex` serves as the reference implementation, the framework readily extends to:
+Once registered, a custom struct is used like any other element type:
 
-- Multi-component vector fields
-- Spectral/hyperspectral data
-- Multi-sensor fusion
-- Custom scientific measurements
+```csharp
+var flow = new MatrixData<Velocity2D>(512, 512, frameCount: 100);
+flow.Set((ix, iy, x, y) => new Velocity2D((float)-y, (float)x));
 
-### Integration Checklist
+// Reads and ranges in a mode
+double vx = flow.GetValueAt(10, 20, 0, Velocity2DModes.Vx);
+var (sMin, sMax) = flow.GetValueRange(0, Velocity2DModes.Speed);
 
-To add support for your custom type:
+// Mode names, e.g. to build a UI
+foreach (var m in flow.ElementType.ValueModes)
+    Console.WriteLine(m.Name);            // Speed, Vx, Vy
 
-1. ✅ **Define struct** (ensure all fields are `unmanaged`)
-2. ✅ **Register min/max finder** (`RegisterDefaultMinMaxFinder()`)
-3. ✅ **Define mode enum** (for type-safe access)
-4. ✅ **Document modes** (what each index means)
-5. ✅ **Test** (create MatrixData instance and verify min/max)
+// Plain double data in one mode
+MatrixData<double> speed = flow.ToScalars(Velocity2DModes.Speed);
+```
 
-### Key Points
+Reading without a mode (`GetValueAt(ix, iy)`, `GetValueRange()`) reads mode 0.
 
-- **Type-global registration**: One-time setup per type
-- **Multi-mode support**: Return `double[]` for multiple interpretations
-- **Performance**: Single-pass calculation, cached results
-- **Flexibility**: Override per-instance if needed
+### Replacing the MinMaxFinder
 
-### Current Limitations
+The finder given at registration can be replaced later — for example with a faster implementation, or with a
+different algorithm for a particular purpose:
 
-- Mode metadata not stored in `.mxd` files (document externally)
-- No automatic mode discovery API (use conventions)
-- Parallel min/max finding not yet implemented (future optimization)
+```csharp
+// For every instance created from now on (existing instances keep theirs)
+MatrixData<Velocity2D>.RegisterDefaultMinMaxFinder(fasterFinder);
 
-This design balances **simplicity** (minimal API surface), **performance** (efficient caching), and **flexibility** (extensible to arbitrary types), making MxPlot.Core a robust foundation for diverse scientific computing applications.
+// For one instance, for a while
+flow.SetMinMaxFinder(customFinder);   // cached ranges are invalidated
+flow.ResetMinMaxFinder();             // back to the default; cached ranges are invalidated again
+```
+
+A replacement must also return one entry per mode (checked the same way as at registration) and must not keep state.
+`ToScalar`, and therefore the value modes, cannot be replaced once registered.
+
+> **Note:** since the finder defines the range the data reports, it can also report something other than the exact
+> extremes, such as a percentile-clipped range. Consumers that map values to a range (LUT rendering, histograms)
+> clamp values outside it.
+
+---
+
+## Processing Structured Data
+
+Operations fall into three kinds when the element type is structured:
+
+| Kind | Examples | With structured data |
+|---|---|---|
+| **Keep the element type, independent of mode** | `Transpose`, slicing, `Resample` (with the registered interpolator, or nearest-neighbor) | Work directly |
+| **Reduce to double (projecting)** | `ToScalars`, `LogTransform`, histograms, line profiles | Take a `valueMode` and read the data in it |
+| **Keep the element type, but defined on numbers** | `Normalize`, `ApplyFilter` (Median, Gaussian), `Grayscale` | **Not supported yet** — read the data as double first |
+
+```csharp
+using MxPlot.Core.Processing;
+using MxPlot.Core.Utils;
+
+// Projecting operations take the mode to read
+var logSpeed = flow.LogTransform(LogBase.Log10, NegativeHandling.Shift, valueMode: Velocity2DModes.Speed);
+int[] hist = flow.CreateHistogram(frameIndex: 0, bins: 256, valueMode: Velocity2DModes.Vx);
+var (pos, values) = flow.GetLineProfile((0, 0), (100, 100), valueMode: Velocity2DModes.Vy);
+
+// Operations defined on numbers: read the mode as double first
+var smoothedVx = flow.ToScalars(Velocity2DModes.Vx).ApplyFilter(new GaussianKernel(radius: 2));
+
+// Calling them directly throws, and the message points to ToScalars
+flow.Normalize(1.0, NormalizeScope.PerFrame);   // ❌ NotSupportedException: "... does not support Velocity2D data yet ..."
+```
+
+"Not supported yet" is deliberate wording: these operations may gain direct support for structured types in the
+future (for example component-wise Gaussian smoothing of a Complex field). Today, reading a value mode as double
+first is the supported route, and the result is `double`.
+
+The same applies to `Complex`: to smooth a spectrum's magnitude, use
+`spectrum.ToScalars((int)ComplexValueMode.Magnitude).ApplyFilter(...)`.
+
+---
+
+## Saving and Loading (.mxd)
+
+| | Built-in types (incl. `Complex`) | Custom structs |
+|---|---|---|
+| Save (`SaveAs(path, new MxBinaryFormat())`) | ✅ | ✅ Raw element bytes; the header records the `TypeId` and each frame's range for every mode |
+| Typed load (`MatrixDataSerializer.Load<T>(path)`) | ✅ | ✅ The type must be registered; the header's `TypeId` must match |
+| Untyped load (`MatrixDataSerializer.LoadDynamic(path)`) | ✅ | ❌ Not supported yet |
+| Virtual (memory-mapped) load of uncompressed files | ✅ | Typed only (`LoadVirtual<T>`) |
+
+```csharp
+flow.SaveAs("flow.mxd", new MxBinaryFormat());
+var loaded = MatrixDataSerializer.Load<Velocity2D>("flow.mxd");   // Velocity2D must be registered
+```
+
+Things to keep in mind for custom structs:
+
+- **Keep `TypeId` stable.** It is how a file is matched to its type. Moving or renaming the struct is fine as long
+  as the `TypeId` stays the same.
+- **Change `TypeId` when the layout changes.** Elements are stored as raw bytes and there is no layout versioning
+  yet, so a file written with a different field layout would be misread. Giving the new layout a new `TypeId`
+  (for example `"MyLab.Velocity2D.v2"`) makes old files fail to match instead.
+- **Value modes are not stored in the file.** They come from the registration of the application that reads it.
+
+---
+
+## UI Support
+
+MxPlot.UI.Avalonia (`MatrixPlotter`, `MxView`) supports **`Complex` fully**:
+
+- the value mode can be switched from the view's context menu, and the status bar shows it (e.g. `Complex (Mag)`);
+- rendering, cursor values, histograms and line profiles follow the displayed mode;
+- processing commands read the data in the displayed mode (a live "Sync source data" window follows mode changes);
+- **Data › View › Open Synced View** opens a second, synced view of the current frame, so the same data can be shown
+  in two modes side by side (e.g. its phase next to its magnitude).
+
+For **custom structs, UI support is partial**: a registered struct can be opened and is displayed in its first value
+mode (the status bar shows e.g. `Velocity2D (Speed)`), but switching modes, histograms and line profiles are not
+supported yet. **Full UI support for custom structs is planned for a future release.** Until then, convert the data
+to double in the mode you need (`ToScalars(mode)`) before showing it.
+
+---
+
+## Checklist and API Summary
+
+### Checklist for a custom struct
+
+1. ✅ **Define the struct** — unmanaged fields only
+2. ✅ **Choose the value modes** — their order is their index; optionally define constants for the indices
+3. ✅ **Write `ToScalar`** — a `static` lambda or static method reading each mode
+4. ✅ **Write a `MinMaxFinder`** — one minimum and one maximum per mode, preferably in one pass
+5. ✅ **Make sure nothing keeps state** — see [The Functions Must Not Keep State](#the-functions-must-not-keep-state)
+6. ✅ **Pick a stable `TypeId`** — and change it if the layout changes
+7. ✅ **Register once, before the first instance** — `[ModuleInitializer]` or startup code
+8. ✅ **Test** — create an instance, check `GetValueRange` for each mode, and round-trip a file if you save data
+
+### API summary
+
+```csharp
+// Registration
+public sealed class ElementTypeRegistration<T> where T : unmanaged
+{
+    public required string TypeId { get; init; }
+    public required IReadOnlyList<ValueMode> ValueModes { get; init; }
+    public required Func<T, int, double> ToScalar { get; init; }
+    public ScalarsReader<T>? ToScalars { get; init; }                        // optional bulk form
+    public required MatrixData<T>.MinMaxFinder MinMaxFinder { get; init; }
+    public IBilinearInterpolator<T>? Interpolator { get; init; }             // optional
+}
+public delegate void ScalarsReader<T>(ReadOnlySpan<T> source, Span<double> destination, int mode);
+
+// MatrixData<T>
+static void Register(ElementTypeRegistration<T> registration);
+static bool IsRegistered { get; }
+static void RegisterDefaultMinMaxFinder(MinMaxFinder finder);   // replaces the default for new instances
+static void RegisterDefaultInterpolator(IBilinearInterpolator<T> interpolator);   // likewise
+
+ElementType ElementType { get; }
+double GetValueAt(int ix, int iy, int frameIndex, int valueMode);
+(double Min, double Max) GetValueRange(int frameIndex, int valueMode);
+void SetMinMaxFinder(MinMaxFinder finder);
+void ResetMinMaxFinder();
+
+// Reading as double (MxPlot.Core.Processing)
+MatrixData<double> ToScalars<T>(this MatrixData<T> src, int valueMode = 0, IProgress<int>? progress = null, CancellationToken ct = default);
+
+// Complex (MxPlot.Core)
+double ToScalar(this Complex value, ComplexValueMode mode);
+(double Min, double Max) GetValueRange(this MatrixData<Complex> src, int frameIndex, ComplexValueMode mode);
+```
 
 ---
 
 ## Related Topics
 
-- **[MatrixData Operations Guide](./MatrixData_Operations_Guide.md)** - Core operations applicable to all types
-- **[VolumeAccessor Guide](./VolumeAccessor_Guide.md)** - 3D operations (works with custom types)
-- [Main API Reference](../README.md) - Type constraints and requirements
-
----
-
-**Status**: Stable API, evolving best practices  
-**Last Updated**: 2026-02-08  
-**Feedback**: Implementation suggestions welcome via GitHub issues
+- **[MatrixData Operations Guide](./MatrixData_Operations_Guide.md)** — operations available on all element types
+- **[VolumeAccessor Guide](./VolumeAccessor_Guide.md)** — 3D operations
+- **[MxPlot.Extensions.Fft](../MxPlot/MxPlot.Extensions.Fft/README.md)** — FFT, which produces `MatrixData<Complex>`

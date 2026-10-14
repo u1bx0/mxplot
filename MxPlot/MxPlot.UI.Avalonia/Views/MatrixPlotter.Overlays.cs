@@ -619,12 +619,9 @@ namespace MxPlot.UI.Avalonia.Views
             var result = new List<PlotSeries>();
             var dims = md.Dimensions;
 
-            // Complex data (including Composite) has no natural double value — reduce it using
-            // the same ComplexValueMode-based projection currently shown in sourceView's bitmap,
-            // so the profile matches what the user sees on screen.
-            Func<Complex, double>? complexConverter = md.ValueType == typeof(Complex)
-                ? ComplexValueModeConverter.GetConverter(sourceView.ComplexValueMode)
-                : null;
+            // Complex data (including Composite) has no natural double value -- read it in the value
+            // mode currently shown in sourceView's bitmap, so the profile matches what the user sees.
+            var complexValueMode = sourceView.ComplexValueMode;
 
             if (groupAxisName != null && dims.Contains(groupAxisName))
             {
@@ -644,7 +641,7 @@ namespace MxPlot.UI.Avalonia.Views
                     if (i < _compositeRecipes.Count && !_compositeRecipes[i].IsVisible)
                         continue;
 
-                    var profile = ExtractLineProfile(line, md, frameIndices[i], sourceView.FlipY, complexConverter);
+                    var profile = ExtractLineProfile(line, md, frameIndices[i], sourceView.FlipY, complexValueMode);
                     if (profile.Count == 0) continue;
 
                     string label = taggedAxis != null ? taggedAxis[i] : $"{axis.Name}{i}";
@@ -656,7 +653,7 @@ namespace MxPlot.UI.Avalonia.Views
             }
             else
             {
-                var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY, complexConverter);
+                var profile = ExtractLineProfile(line, md, sourceView.FrameIndex, sourceView.FlipY, complexValueMode);
                 if (profile.Count > 0)
                     result.Add(new PlotSeries(profile, "Profile", PlotStyle.Line));
             }
@@ -888,7 +885,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private static List<(double X, double Y)> ExtractLineProfile(
             LineObject line, IMatrixData md, int frameIndex, bool flipY = true,
-            Func<Complex, double>? complexValueConverter = null)
+            ComplexValueMode complexValueMode = ComplexValueMode.Magnitude)
         {
             // ── 1. SAT: return empty when the segment lies entirely outside
             //          the bitmap rectangle [0, XCount-1] × [0, YCount-1] ─────────────
@@ -919,11 +916,11 @@ namespace MxPlot.UI.Avalonia.Views
             if (px1 > px2 || (px1 == px2 && py1 > py2))
                 (px1, py1, px2, py2) = (px2, py2, px1, py1);
 
-            (double[] pos, double[] values) = md.ValueType == typeof(Complex)
-                ? ((MatrixData<Complex>)md).GetLineProfile(
+            (double[] pos, double[] values) = md is MatrixData<Complex> typedMd
+                ? typedMd.GetLineProfile(
                     (X: px1, Y: py1), (X: px2, Y: py2),
                     frameIndex: frameIndex, option: LineProfileOption.Bilinear,
-                    valueConverter: complexValueConverter ?? (c => c.Magnitude))
+                    valueMode: (int)complexValueMode)
                 : md.GetLineProfile(
                     (X: px1, Y: py1), (X: px2, Y: py2),
                     frameIndex: frameIndex, option: LineProfileOption.Bilinear);

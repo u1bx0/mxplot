@@ -75,6 +75,9 @@ namespace MxPlot.UI.Avalonia.Controls
             set => _lutLabel.Text = value;
         }
 
+        /// <summary>The colorbar bitmap of the currently selected LUT, as shown in the closed ComboBox.</summary>
+        internal IImage? SelectedPreview => (_comboBox.SelectedItem as LutItem)?.Preview;
+
         /// <summary>A <see cref="WindowIcon"/> representing the currently selected LUT gradient.</summary>
         public WindowIcon? SelectedIcon => (_comboBox.SelectedItem as LutItem)?.Icon;
 

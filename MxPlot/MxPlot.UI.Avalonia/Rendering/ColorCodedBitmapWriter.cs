@@ -104,8 +104,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         private bool _autoWantsParallel;
 
 
-        /// <inheritdoc />
-        public object? StructValueConverter { get; set; }
+        /// <summary>The value mode <see cref="Complex"/> data is rendered in. Ignored for any other element type.</summary>
+        public ComplexValueMode ComplexValueMode { get; set; }
 
         private readonly RenderLoopDelegate _renderLoop;
         private int[]? _scratch;
@@ -144,9 +144,9 @@ namespace MxPlot.UI.Avalonia.Rendering
                 throw new ArgumentException(
                     $"Expected {nameof(ColorCodedRenderingContext)}, got {context.GetType().Name}.",
                     nameof(context));
-            if (source.ValueType != ValueType)
+            if (source.ElementType.Type != ValueType)
                 throw new ArgumentException(
-                    $"Source type {source.ValueType} does not match writer type {ValueType}.");
+                    $"Source type {source.ElementType.Type} does not match writer type {ValueType}.");
             if (target.PixelSize.Width != source.XCount || target.PixelSize.Height != source.YCount)
                 throw new ArgumentException(
                     $"Target bitmap size ({target.PixelSize.Width}x{target.PixelSize.Height}) " +

@@ -20,23 +20,40 @@ namespace MxPlot.Extensions.Tiff;
 /// Two kinds of LibTiff handle, so synchronous and background reads never contend:
 /// </para>
 /// <list type="bullet">
-///   <item>One main handle, opened in the constructor and kept for the instance's lifetime, serves
-///   synchronous cache misses through <see cref="ReadFrame"/> (the indexer). It is guarded by its
-///   own lock, since a single handle is not safe for concurrent directory-switch+read pairs.</item>
+///   <item>One main handle, opened in the constructor, serves synchronous cache misses through
+///   <see cref="ReadFrame"/> (the indexer). It is guarded by its own lock, since a single handle is
+///   not safe for concurrent directory-switch+read pairs.</item>
 ///   <item>Each background preload worker gets its own handle through
 ///   <see cref="CreatePreloadReader"/>, so up to <see cref="VirtualFrames{T}.MaxConcurrentPreloads"/>
 ///   frames decode truly in parallel. The base class pools these while the file is still loading
 ///   and closes them once every frame is cached.</item>
 /// </list>
+/// <para>
+/// <b>Resident state.</b> When the whole dataset fits the cache capacity computed at construction,
+/// the instance becomes resident as soon as every frame is cached: the main handle is closed, so
+/// the file is no longer held open, and no frame is evicted from then on (<see cref="CanEvict"/>),
+/// so <see cref="VirtualFrames{T}.IsVirtual"/> stays <see langword="false"/> -- even through a
+/// later <see cref="VirtualFrames{T}.TrimCacheTo"/>. The data then behaves as if it had been loaded
+/// in memory. A dataset that fits only a temporarily raised capacity (e.g. while an orthogonal view
+/// is open) never becomes resident, since that capacity is expected to be trimmed back.
+/// </para>
 /// </remarks>
 internal sealed class TiffDecodedFrames<T> : VirtualFrames<T> where T : unmanaged
 {
-    private readonly BitMiracle.LibTiff.Classic.Tiff _tiff;
+    // Null once resident or disposed; guarded by _tiffLock.
+    private BitMiracle.LibTiff.Classic.Tiff? _tiff;
     private readonly long[] _ifdOffsets;
     private readonly int _width;
     private readonly int _height;
     private readonly bool _flipY;
     private readonly object _tiffLock = new();
+
+    // Whether the constructor's capacity covers every frame, i.e. whether filling the cache
+    // completely can make this instance resident.
+    private readonly bool _fitsCapacity;
+
+    // Read by CanEvict under the base class's cache lock, so it must not take _tiffLock.
+    private volatile bool _isResident;
 
     /// <param name="filePath">Path to the TIFF file. Opened independently for this instance.</param>
     /// <param name="width">Frame width in pixels (same for every directory).</param>
@@ -64,8 +81,7 @@ internal sealed class TiffDecodedFrames<T> : VirtualFrames<T> where T : unmanage
         if (ifdOffsets.Length < frameCount)
             throw new InvalidDataException($"TIFF file has {ifdOffsets.Length} IFDs, but {frameCount} frames were requested: {filePath}");
 
-        _tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filePath, "r")
-            ?? throw new IOException($"Failed to open TIFF file: {filePath}");
+        _tiff = OpenTiff(filePath);
         _ifdOffsets = ifdOffsets;
         _width = width;
         _height = height;
@@ -99,7 +115,8 @@ internal sealed class TiffDecodedFrames<T> : VirtualFrames<T> where T : unmanage
         // headroom for recently viewed frames, so shifting the window by one frame evicts the
         // oldest history instead of a frame that is still inside the window (which would then be
         // re-queued and evict another -- churn).
-        CacheStrategy = CacheCapacity >= frameCount
+        _fitsCapacity = CacheCapacity >= frameCount;
+        CacheStrategy = _fitsCapacity
             ? new NeighborStrategy(lookAhead: frameCount, lookBehind: frameCount)
             : new NeighborStrategy(lookAhead: Math.Max(4, CacheCapacity * 3 / 8), lookBehind: Math.Max(1, CacheCapacity / 8));
     }
@@ -110,9 +127,42 @@ internal sealed class TiffDecodedFrames<T> : VirtualFrames<T> where T : unmanage
 
         lock (_tiffLock)
         {
-            return DecodeFrame(_tiff, index);
+            if (_tiff != null)
+                return DecodeFrame(_tiff, index);
+
+            // Resident already: a synchronous miss that raced the final background insert. Serve it
+            // from a short-lived handle rather than keeping the file open.
+            using var tiff = OpenTiff(SourcePath);
+            return DecodeFrame(tiff, index);
         }
     }
+
+    /// <summary>True once every frame is cached for good and the file is no longer held open.</summary>
+    internal bool IsResident => _isResident;
+
+    protected override void OnFrameStored(int frameIndex)
+    {
+        base.OnFrameStored(frameIndex);
+        if (_fitsCapacity && !_isResident && StoredFrameCount >= Count)
+            BecomeResident();
+    }
+
+    protected override bool CanEvict(int frameIndex) => !_isResident;
+
+    private void BecomeResident()
+    {
+        lock (_tiffLock)
+        {
+            if (_isResident || IsDisposed) return;
+            _isResident = true;
+            _tiff?.Dispose();
+            _tiff = null;
+        }
+    }
+
+    private static BitMiracle.LibTiff.Classic.Tiff OpenTiff(string path)
+        => BitMiracle.LibTiff.Classic.Tiff.Open(path, "r")
+            ?? throw new IOException($"Failed to open TIFF file: {path}");
 
     protected override PreloadReader CreatePreloadReader() => new HandleReader(this);
 
@@ -150,7 +200,11 @@ internal sealed class TiffDecodedFrames<T> : VirtualFrames<T> where T : unmanage
         base.Dispose();
         if (!wasDisposed)
         {
-            _tiff.Dispose();
+            lock (_tiffLock)
+            {
+                _tiff?.Dispose();
+                _tiff = null;
+            }
         }
     }
 }

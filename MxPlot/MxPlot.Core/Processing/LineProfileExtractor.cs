@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MxPlot.Core.Utils;
+using System;
 
 namespace MxPlot.Core.Processing
 {
@@ -100,11 +101,15 @@ namespace MxPlot.Core.Processing
         /// <param name="valueConverter">
         /// Reduces a sampled <typeparamref name="T"/> value to <c>double</c>.
         /// Unnecessary (and ignored) when <typeparamref name="T"/> is one of
-        /// <see cref="MatrixData.SupportedPrimitiveTypes"/>. Required for any other <typeparamref name="T"/>
-        /// (e.g. <c>Complex</c>) — throws <see cref="ArgumentNullException"/> if omitted.
+        /// <see cref="MatrixData.SupportedPrimitiveTypes"/>. For any other <typeparamref name="T"/> it is
+        /// optional: when omitted, value mode <paramref name="valueMode"/> is read through the type's registered
+        /// <see cref="ElementTypeRegistration{T}.ToScalar"/> (for Complex, the built-in reading).
         /// For <see cref="LineProfileOption.Bilinear"/>, interpolation happens in <typeparamref name="T"/>-space
-        /// first (via <see cref="MatrixData{T}.GetValue(double, double, int, bool)"/>), and <paramref name="valueConverter"/>
-        /// is applied to the interpolated result — not to the four corner values independently.
+        /// first (via <see cref="MatrixData{T}.GetValue(double, double, int, bool)"/>), and the value is read from
+        /// the interpolated result — not from the four corner values independently.
+        /// </param>
+        /// <param name="valueMode">
+        /// The value mode to read when <paramref name="valueConverter"/> is omitted. Ignored for primitive types.
         /// </param>
         /// <returns>
         /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
@@ -117,10 +122,11 @@ namespace MxPlot.Core.Processing
             (double X, double Y) end,
             int frameIndex = -1,
             LineProfileOption option = LineProfileOption.NearestNeighbor,
-            Func<T, double>? valueConverter = null)
+            Func<T, double>? valueConverter = null,
+            int valueMode = 0)
             where T : unmanaged
         {
-            ValidateConverter<T>(valueConverter);
+            var converter = ResolveConverter(valueConverter, valueMode);
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
             if (!ClipSegment(src, ref start, ref end, out _, out _))
                 return Empty();
@@ -131,7 +137,7 @@ namespace MxPlot.Core.Processing
             int n = ComputeAdaptiveSampleCount(src, dx, dy, clippedLen);
 
             return SampleLine(start, end, clippedLen, n,
-                (x, y) => SampleTyped(src, x, y, frameIndex, option, valueConverter));
+                (x, y) => SampleTyped(src, x, y, frameIndex, option, converter));
         }
 
         /// <summary>
@@ -147,6 +153,7 @@ namespace MxPlot.Core.Processing
         /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
         /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
         /// <param name="valueConverter">See the adaptive-step overload for the exact contract.</param>
+        /// <param name="valueMode">See the adaptive-step overload.</param>
         /// <returns>
         /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
         /// <c>Values</c>: sampled data values at each position.
@@ -159,12 +166,13 @@ namespace MxPlot.Core.Processing
             int numPoints,
             int frameIndex = -1,
             LineProfileOption option = LineProfileOption.NearestNeighbor,
-            Func<T, double>? valueConverter = null)
+            Func<T, double>? valueConverter = null,
+            int valueMode = 0)
             where T : unmanaged
         {
             if (numPoints < 1)
                 throw new ArgumentOutOfRangeException(nameof(numPoints), "numPoints must be >= 1.");
-            ValidateConverter<T>(valueConverter);
+            var converter = ResolveConverter(valueConverter, valueMode);
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
             if (!ClipSegment(src, ref start, ref end, out _, out _))
                 return Empty();
@@ -174,7 +182,7 @@ namespace MxPlot.Core.Processing
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
 
             return SampleLine(start, end, clippedLen, numPoints,
-                (x, y) => SampleTyped(src, x, y, frameIndex, option, valueConverter));
+                (x, y) => SampleTyped(src, x, y, frameIndex, option, converter));
         }
 
         // =============================================================
@@ -213,15 +221,12 @@ namespace MxPlot.Core.Processing
         }
 
         /// <summary>
-        /// Validates that a converter was supplied whenever <typeparamref name="T"/> is not one of
-        /// <see cref="MatrixData.SupportedPrimitiveTypes"/>.
+        /// The caller's converter, or else one that reads <paramref name="valueMode"/> through the element type's
+        /// registered value provider. (Primitive types never use it: they are sampled as double directly.)
         /// </summary>
-        private static void ValidateConverter<T>(Func<T, double>? valueConverter) where T : unmanaged
-        {
-            if (valueConverter is null && !MatrixData.SupportedPrimitiveTypes.Contains(typeof(T)))
-                throw new ArgumentNullException(nameof(valueConverter),
-                    $"valueConverter is required for non-primitive type {typeof(T).Name}.");
-        }
+        private static Func<T, double> ResolveConverter<T>(Func<T, double>? valueConverter, int valueMode)
+            where T : unmanaged
+            => valueConverter ?? (Func<T, double>)(v => NumericConverter.ToDouble(v, valueMode));
 
         /// <summary>
         /// Clips the segment to the data bounding box using Liang-Barsky.

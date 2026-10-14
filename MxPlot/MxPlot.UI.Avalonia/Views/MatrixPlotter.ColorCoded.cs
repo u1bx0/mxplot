@@ -200,7 +200,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// Pushes the winner-index/depth-palette/resolved-range/invert bundle for the most recent
         /// recompute -- drives <see cref="ColorCodedBitmapWriter"/>'s rendering, the pointer
         /// read-out's depth position (<c>RenderSurface.DrawPositionOverlay</c>), and the details
-        /// panel's depth histogram. Called by the parent after every recompute; safe to call with
+        /// panel's depth profile plot. Called by the parent after every recompute; safe to call with
         /// <c>null</c> (clears all three).
         /// </summary>
         internal void UpdateColorCodedInfo(ColorCodedRenderInfo? info)
@@ -211,10 +211,10 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// Shows/hides the busy indicator over the depth histogram while a Start/End (or palette/
+        /// Shows/hides the busy indicator over the depth profile plot while a Start/End (or palette/
         /// range/Invert) edit made in this window is being recomputed by the parent's
         /// <c>OrthogonalViewController</c>. The parent's own <c>MainView.IsBusy</c> spinner lives on
-        /// the *parent* window, out of sight while the user is looking at this child's histogram --
+        /// the *parent* window, out of sight while the user is looking at this child's plot --
         /// this gives feedback where the user is actually interacting. Called by the parent around
         /// <c>OrthogonalViewController.SetColorCodedParams</c> (see
         /// <c>MatrixPlotter.VolumeOperation.cs</c>'s <c>OnXYProjectionColorCodedParamsChanged</c> /
@@ -225,66 +225,62 @@ namespace MxPlot.UI.Avalonia.Views
             if (_colorCodedBusyIndicator != null) _colorCodedBusyIndicator.IsActive = busy;
         }
 
+        // HistogramPlotControl takes integer bins; the depth profile is scaled onto this many levels.
+        private const int DepthProfileLevels = 10000;
+
         /// <summary>
-        /// Rebuilds the depth histogram from <paramref name="info"/>.WinnerIndex: one bin per axis
+        /// Rebuilds the depth profile plot from <paramref name="info"/>.DepthProfile: one bar per axis
         /// index across the *whole* axis (<c>[0, info.Axis.Count-1]</c>, fixed regardless of the
-        /// current Start/End), tinted with the same DepthColors the image itself is coloured with
-        /// wherever a bin falls inside [Start, End] -- literally "how many pixels chose each depth",
-        /// the same question <see cref="HistogramPlotControl"/> already answers for ordinary
-        /// LUT-mode data, just asked of the index map instead of the value map.
+        /// current Start/End), its height the mean pixel value of that slice -- how the signal is
+        /// distributed along the color-coded axis. The bars inside [Start, End] are tinted with the
+        /// DepthColors the image itself is colored with; the bars outside it are drawn gray, so the
+        /// part of the signal the current range leaves out stays visible.
         /// <para>
-        /// The plot window is deliberately the full axis, not just [Start, End]: WinnerIndex
-        /// physically cannot contain a value outside the currently-scanned range (see
-        /// <see cref="Core.Processing.ExtremumIndexOperation"/>), so bins outside it are always
-        /// exactly zero and simply don't draw a bar -- accepted as fine (better than the alternative
-        /// of resizing the plot to hug the current selection, which glues the red lines to the plot
-        /// edges and leaves no way to drag them *outward* to widen Start/End again).
-        /// </para>
-        /// <para>
-        /// The actual scan (<see cref="System.Collections.Generic.IReadOnlyList{T}"/> -- one pass
-        /// over WinnerIndex) is precomputed on the background thread that produced
-        /// <paramref name="info"/> itself (<c>OrthogonalViewController.ComputeXYProjectionAsync</c>),
-        /// not here -- this was previously a synchronous full-frame scan on the UI thread and, for a
-        /// large XY / long-axis dataset, the dominant cause of the UI freezing on every Start/End
-        /// edit. This method now only hands the already-computed array to
-        /// <see cref="HistogramPlotControl"/>.
+        /// The plot window is the full axis, not just [Start, End]: <c>preservePlotWindow</c> keeps it
+        /// from collapsing onto the current selection on every recompute, which would glue the
+        /// boundary lines to the plot edges and leave no way to drag them outward to widen
+        /// Start/End again.
         /// </para>
         /// </summary>
         private void UpdateColorCodedHistogram(ColorCodedRenderInfo? info)
         {
             if (_colorCodedHistogram == null) return;
-            if (info?.Histogram == null) { _colorCodedHistogram.IsVisible = false; return; }
+            if (info?.DepthProfile == null) { _colorCodedHistogram.IsVisible = false; return; }
 
             int start = info.Start;
-            int sliceCount = info.DepthColors.Count;
-            int end = start + sliceCount - 1;
+            int end = start + info.DepthColors.Count - 1;
             int axisCount = info.Axis.Count;
 
-            var hist = info.Histogram;
-
-            // Pass depthColors itself (sized sliceCount, not axisCount) -- HistogramPlotControl's
-            // UpdateBrushCache does NOT index aRgbs by raw bin position; it normalizes each bin's
-            // value into [viewMin, viewMax] (t = (binValue - viewMin) / (viewMax - viewMin)) and
-            // indexes aRgbs by that t, i.e. aRgbs is always taken to span the *view* range end to
-            // end. Padding it out to axisCount (an earlier version of this method did) broke that
-            // assumption -- t no longer reached 1.0 until the *padded* array's last slot, so the
-            // real depth colours only ever occupied a squeezed-together sliver instead of the whole
-            // [Start, End] view range, which is exactly the "shifted" colouring seen on the real
-            // machine. Bins outside [Start, End] still get some (clamped, meaningless) colour from
-            // this array, but always at count 0, so nothing is ever drawn for them.
+            // HistogramPlotControl maps aRgbs over the view range [viewMin, viewMax] end to end, so
+            // it must be the array of the swept slices (not one padded to the whole axis).
             var depthColors = info.DepthColors as int[] ?? new List<int>(info.DepthColors).ToArray();
 
-            // preservePlotWindow: true is load-bearing, not cosmetic -- SetHistogram's default
-            // (false) resets the *actual* rendered plot window (_plotMin/_plotMax) to exactly
-            // viewMin/viewMax on every call, regardless of valueMin/valueMax (those only feed a
-            // separate badge calculation). Without this, the plot window collapses to the current
-            // Start..End on every recompute, so the red lines always render glued to its edges --
-            // exactly the bug this whole change was meant to fix. true instead only ever widens the
-            // window to cover viewMin/viewMax, never narrows it, so the [0, axisCount-1] window
-            // established on the first call (always the full range -- see OnProjectionSelectionChanged's
-            // reset-on-fresh-enable) is preserved through every later narrower Start/End.
             _colorCodedHistogram.IsVisible = true;
-            _colorCodedHistogram.SetHistogram(hist, 0, axisCount - 1, start, end, depthColors, preservePlotWindow: true);
+            _colorCodedHistogram.SetHistogram(
+                ScaleDepthProfile(info.DepthProfile), 0, axisCount - 1, start, end, depthColors, preservePlotWindow: true);
+        }
+
+        // Scales the profile onto [0, DepthProfileLevels] with zero as the baseline, so bar heights
+        // stay proportional to the mean. Only a profile with negative values moves the baseline down
+        // to its minimum. Non-finite entries draw no bar.
+        private static int[] ScaleDepthProfile(double[] profile)
+        {
+            double min = 0, max = 0;
+            foreach (double v in profile)
+            {
+                if (!double.IsFinite(v)) continue;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+
+            var bins = new int[profile.Length];
+            double span = max - min;
+            if (span <= 0) return bins;
+
+            for (int i = 0; i < profile.Length; i++)
+                if (double.IsFinite(profile[i]))
+                    bins[i] = (int)Math.Round((profile[i] - min) / span * DepthProfileLevels);
+            return bins;
         }
 
         /// <summary>
@@ -391,7 +387,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>
         /// Builds the ColorCoded details panel: Start / End numeric boxes (design doc section
         /// 3.3.2 -- plain textboxes are the primary input, deliberately not a dual-thumb range
-        /// slider), an Invert toggle, and a depth histogram (<see cref="UpdateColorCodedHistogram"/>)
+        /// slider), an Invert toggle, and a depth profile plot (<see cref="UpdateColorCodedHistogram"/>)
         /// that doubles as a drag-to-narrow control for Start/End. Replaces the ordinary LUT panel's
         /// Level spinner, which has no equivalent here -- there is no value→colour LUT to resample,
         /// ColorCodedBitmapWriter uses the depth palette directly.
@@ -495,8 +491,8 @@ namespace MxPlot.UI.Avalonia.Views
             row.Children.Add(_colorCodedInvertChk);
             row.Children.Add(new Border { Width = 1, Background = Brushes.Gray, Margin = new Thickness(5, 3) });
 
-            // Depth histogram: one bin per axis index, tinted with the depth palette -- see
-            // UpdateColorCodedHistogram's doc comment. Initial width matches _lutModeDetails's
+            // Depth profile plot: one bar per axis index, tinted with the depth palette inside
+            // [Start, End] -- see UpdateColorCodedHistogram's doc comment. Initial width matches _lutModeDetails's
             // _histogramPlot; resized dynamically below.
             _colorCodedHistogram = new HistogramPlotControl
             {
@@ -508,7 +504,8 @@ namespace MxPlot.UI.Avalonia.Views
                 // Blue, not the ordinary histogram's red: these boundary lines mark the frame range
                 // used for color coding (Start/End), not a value range -- see the Description below.
                 BoundaryBrush = Brushes.DodgerBlue,
-                Description = "Frame range used for color coding (Start/End), not a value range.",
+                Description = "Mean intensity of each slice along the color-coded axis.\n" +
+                    "The lines mark the range used for color coding (Start/End).",
             };
             _colorCodedHistogram.ViewRangeChanged += (min, max) =>
             {

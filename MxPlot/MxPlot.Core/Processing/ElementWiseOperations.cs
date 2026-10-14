@@ -33,11 +33,12 @@ namespace MxPlot.Core.Processing
     public record LogTransformOperation(
         LogBase Base = LogBase.Natural,
         NegativeHandling Handling = NegativeHandling.Shift,
+        int ValueMode = 0,
         IProgress<int>? Progress = null,
         CancellationToken CancellationToken = default) : IMatrixDataOperation
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
-            => src.LogTransform(Base, Handling, Progress, CancellationToken);
+            => src.LogTransform(Base, Handling, ValueMode, Progress, CancellationToken);
     }
 
     // =========================================================================================
@@ -74,5 +75,22 @@ namespace MxPlot.Core.Processing
     {
         public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
             => src.Normalize(Target, Scope, PrecomputedGlobalMax, Progress, CancellationToken);
+    }
+
+    // =========================================================================================
+    // Value mode → double
+    // =========================================================================================
+
+    /// <summary>
+    /// Reads the data in one of its value modes as double
+    /// (see <see cref="MatrixDataValueConverter.ToScalars{T}"/>).
+    /// </summary>
+    public record ToScalarsOperation(
+        int ValueMode = 0,
+        IProgress<int>? Progress = null,
+        CancellationToken CancellationToken = default) : IMatrixDataOperation
+    {
+        public IMatrixData Execute<T>(MatrixData<T> src) where T : unmanaged
+            => src.ToScalars(ValueMode, Progress, CancellationToken);
     }
 }

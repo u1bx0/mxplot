@@ -138,9 +138,13 @@ namespace MxPlot.Core
         /// (double.NaN, double.NaN) if the value range cannot be determined.</returns>
         public (double Min, double Max) GetValueRange(int frameIndex, int valueMode)
         {
-            return GetValueRangeList(frameIndex) is (var minArr, var maxArr)
-                 ? (minArr[valueMode], maxArr[valueMode])
-                 : (double.NaN, double.NaN);
+            var (minArr, maxArr) = GetValueRangeList(frameIndex);
+            if ((uint)valueMode >= (uint)minArr.Count || minArr.Count != maxArr.Count)
+            {
+                return (double.NaN, double.NaN);
+            }
+
+            return (minArr[valueMode], maxArr[valueMode]);
         }
 
         /// <summary>
@@ -192,7 +196,43 @@ namespace MxPlot.Core
                 //Debug.WriteLine($"[MatrixData.GetValueRangeList] Use cached value range for {frameIndex}");
                 return (range.MinValues, range.MaxValues);
             }
-            return ([double.NaN], [double.NaN]);
+
+            return CreateUnknownValueRange();
+        }
+
+        private (List<double> MinValues, List<double> MaxValues) CreateUnknownValueRange()
+        {
+            int modeCount = ElementType.ValueModeCount;
+            var minValues = new List<double>(modeCount);
+            var maxValues = new List<double>(modeCount);
+            for (int i = 0; i < modeCount; i++)
+            {
+                minValues.Add(double.NaN);
+                maxValues.Add(double.NaN);
+            }
+
+            return (minValues, maxValues);
+        }
+
+        /// <summary>
+        /// Reads one value mode out of a cached range, failing instead of throwing when the entry does
+        /// not cover that mode. <c>ValueRange.IsValid</c> only requires equal, non-empty Min/Max lists,
+        /// so an entry supplied by a caller can be shorter than <c>ElementType.ValueModeCount</c>.
+        /// </summary>
+        private static bool TryGetModeRange(ValueRange range, int valueMode, out double min, out double max)
+        {
+            var minValues = range.MinValues;
+            var maxValues = range.MaxValues;
+            if ((uint)valueMode >= (uint)minValues.Count || minValues.Count != maxValues.Count)
+            {
+                min = double.NaN;
+                max = double.NaN;
+                return false;
+            }
+
+            min = minValues[valueMode];
+            max = maxValues[valueMode];
+            return true;
         }
 
         /// <summary>
@@ -277,8 +317,7 @@ namespace MxPlot.Core
                         RefreshValueRange(frameIndex);
                     if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
                     {
-                        double vmin = range.MinValues[valueMode];
-                        double vmax = range.MaxValues[valueMode];
+                        if (!TryGetModeRange(range, valueMode, out double vmin, out double vmax)) continue;
 
                         if (vmin < min) min = vmin;
                         if (vmax > max) max = vmax;
@@ -304,14 +343,19 @@ namespace MxPlot.Core
 
                     if (_valueRangeMap.TryGetValue(GetFrameKey(frameIndex), out var range))
                     {
-                        double vmin = range.MinValues[valueMode];
-                        double vmax = range.MaxValues[valueMode];
+                        if (!TryGetModeRange(range, valueMode, out double vmin, out double vmax)) continue;
                         if (vmin < min) min = vmin;
                         if (vmax > max) max = vmax;
                     }
                 }
             }
 
+            if (double.IsPositiveInfinity(min) || double.IsNegativeInfinity(max))
+            {
+                // No frame contributed a range for this mode: report it as unknown, like the other
+                // overloads do, rather than letting the seed values escape as an inverted range.
+                return (double.NaN, double.NaN);
+            }
             return (min, max);
         }
 
@@ -395,8 +439,7 @@ namespace MxPlot.Core
                 // Catches both originally-valid frames AND frames that were just refreshed above.
                 if (range.IsValid)
                 {
-                    var vmin = range.MinValues[valueMode];
-                    var vmax = range.MaxValues[valueMode];
+                    if (!TryGetModeRange(range, valueMode, out double vmin, out double vmax)) continue;
                     if (vmin < min) min = vmin;
                     if (vmax > max) max = vmax;
                 }
@@ -501,11 +544,9 @@ namespace MxPlot.Core
                     }
 
                     // Fetch and aggregate values
-                    if (_valueRangeMap.TryGetValue(key, out var range) && range.IsValid)
+                    if (_valueRangeMap.TryGetValue(key, out var range) && range.IsValid
+                        && TryGetModeRange(range, valueMode, out double vmin, out double vmax))
                     {
-                        double vmin = range.MinValues[valueMode];
-                        double vmax = range.MaxValues[valueMode];
-
                         if (vmin < min) min = vmin;
                         if (vmax > max) max = vmax;
                     }
@@ -552,11 +593,11 @@ namespace MxPlot.Core
         {
             if (frameIndex < 0) frameIndex = _activeIndex;
 
-            // FAIL-SAFE: If no calculator is registered (e.g., for custom structs), 
-            // return NaN lists to prevent application crash and allow data transport to continue.
+            // Defensive only: registration always supplies a finder and SetMinMaxFinder rejects null,
+            // so no instance is expected to get here without one.
             if (_minMaxFinder == null)
             {
-                return ([double.NaN], [double.NaN]);
+                return CreateUnknownValueRange();
             }
 
             var array = GetInternalArray(frameIndex, needsInvalidate: false);
@@ -570,7 +611,7 @@ namespace MxPlot.Core
             else
             {
                 // FAIL-SAFE: Fallback for unexpected state to maintain consistent return type
-                return ([double.NaN], [double.NaN]);
+                return CreateUnknownValueRange();
             }
         }
 

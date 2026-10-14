@@ -1,5 +1,6 @@
 ﻿using MxPlot.Core.IO.Formats;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -12,7 +13,7 @@ namespace MxPlot.Core
     public static class MatrixData
     {
         /// <summary>
-        /// Contains the set of primitive numeric types supported for MatrixData&lt;T&gt;. 
+        /// Contains the set of primitive numeric types supported for MatrixData&lt;T&gt;.
         /// This collection is used to determine if certain operations, such as GetValueAsDouble, are supported for a given type parameter T.
         /// </summary>
         /// <remarks>This static, read-only collection can be used to validate or restrict types during
@@ -26,12 +27,47 @@ namespace MxPlot.Core
             typeof(float), typeof(double)
          };
 
+        // Shared, non-generic table from a custom struct's TypeId to its ElementType, populated by
+        // MatrixData<T>.Register. Built-in element types never call Register, so this only ever holds
+        // custom structs. This is what lets .mxd dynamic loading (LoadDynamic/LoadDynamicVirtual) and
+        // MatrixDataConfig.GetElementTypeAlias resolve a persisted TypeId back to a live CLR Type
+        // without Type.GetType, which cannot see types outside MxPlot.Core and mscorlib.
+        private static readonly ConcurrentDictionary<string, ElementType> _elementTypesByTypeId = new();
+
+        /// <summary>
+        /// Records a custom struct's <see cref="ElementType"/> under its <see cref="ElementType.PersistentName"/>
+        /// (TypeId), for later lookup by <see cref="ResolveElementType"/>. Called once by
+        /// <c>MatrixData&lt;T&gt;.Register</c> per registered T.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">
+        /// Thrown when the TypeId is already registered for a different CLR type.
+        /// </exception>
+        internal static void RegisterElementType(ElementType elementType)
+        {
+            if (!_elementTypesByTypeId.TryAdd(elementType.PersistentName, elementType))
+            {
+                var existing = _elementTypesByTypeId[elementType.PersistentName];
+                if (existing.Type != elementType.Type)
+                    throw new InvalidOperationException(
+                        $"TypeId '{elementType.PersistentName}' is already registered for {existing.Type}; " +
+                        $"cannot also register it for {elementType.Type}.");
+            }
+        }
+
+        /// <summary>
+        /// Looks up a previously registered custom struct's <see cref="ElementType"/> by its TypeId
+        /// (<see cref="ElementType.PersistentName"/>), or <see langword="null"/> if nothing in this
+        /// process has registered that TypeId.
+        /// </summary>
+        internal static ElementType? ResolveElementType(string typeId) =>
+            _elementTypesByTypeId.TryGetValue(typeId, out var e) ? e : null;
+
         /// <summary>
         /// Returns the display name for a numeric type (e.g. <c>typeof(ushort)</c> → <c>"ushort"</c>).
-        /// This is the same friendly name returned by <see cref="IMatrixData.ValueTypeName"/> at runtime.
-        /// Falls back to <see cref="Type.Name"/> for custom structs not in the built-in set.
+        /// This is the same friendly name returned by <c>ElementType.Name</c> at runtime.
+        /// Falls back to <c>Type.Name</c> for custom structs not in the built-in set.
         /// </summary>
-        public static string GetValueTypeName(Type t)
+        public static string GetElementTypeName(Type t)
         {
             if (t == typeof(byte))    return "byte";
             if (t == typeof(sbyte))   return "sbyte";

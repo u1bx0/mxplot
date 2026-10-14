@@ -247,6 +247,30 @@ namespace MxPlot.UI.Avalonia.Controls
         /// </summary>
         private int _cacheEpoch;
 
+        // The ColorCoded depth profile (mean of every slice along the scanned axis). It depends on
+        // the data and on where the other axes are held, not on Start/End, the palette or the
+        // projection mode, so it outlives the XY projection cache across those edits and is dropped
+        // only when the data may have changed (InvalidateDepthProfile). FixedIndices is the position
+        // of every axis it was computed at, with the scanned axis's own entry zeroed.
+        private sealed record DepthProfileCache(IMatrixData Data, int[] FixedIndices, double[] Values);
+        private DepthProfileCache? _xyDepthProfile;
+        private int _depthProfileEpoch;
+
+        private void InvalidateDepthProfile()
+        {
+            _xyDepthProfile = null;
+            _depthProfileEpoch++;
+        }
+
+        // Where the non-scanned axes are right now; the depth profile is valid only for these.
+        private static int[] GetDepthProfileKey(IMatrixData data, string axisName)
+        {
+            var dims = data.Dimensions;
+            int[] key = dims.GetAxisIndices();
+            key[dims.GetAxisOrder(axisName)] = 0;
+            return key;
+        }
+
         /// <summary>
         /// Fired when an XY (Z-direction) projection result is available or cleared.
         /// Carries the projected <see cref="IMatrixData"/> or <c>null</c> when disabled.
@@ -421,6 +445,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _yzProjectionCache = null;
             _xyProjectionCache = null;
             _cacheEpoch++;
+            InvalidateDepthProfile();
             if (_data != null && _currentIX >= 0 && _currentIY >= 0)
             {
                 UpdateSlicesAsync(xChanged: true, yChanged: true);
@@ -485,6 +510,28 @@ namespace MxPlot.UI.Avalonia.Controls
         public OrthogonalViewController(OrthogonalPanel panel)
         {
             _panel = panel;
+        }
+
+        // Projection needs a numeric element type with min/max values -- the constraint of
+        // VolumeAccessorExtensions.CreateProjection. Complex and custom structs do not meet it.
+        private static bool SupportsProjection(Type elementType)
+        {
+            static bool Implements(Type type, Type openGeneric)
+                => type.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == openGeneric);
+
+            return Implements(elementType, typeof(System.Numerics.INumber<>))
+                && Implements(elementType, typeof(System.Numerics.IMinMaxValue<>));
+        }
+
+        // Null when the element type can be projected.
+        private static string? GetProjectionUnavailableMessage(ElementType elementType)
+        {
+            if (SupportsProjection(elementType.Type)) return null;
+
+            return elementType.Type == typeof(System.Numerics.Complex)
+                ? "Projection is not available for Complex data.\n" +
+                  "Tip: Convert it to double first (Conversion > Convert Complex To…)."
+                : $"Projection is not available for {elementType.Name} data.";
         }
 
         /// <summary>Activates orthogonal views for the specified data and axis name.</summary>
@@ -561,19 +608,9 @@ namespace MxPlot.UI.Avalonia.Controls
             // gated on hyperstacks - only on an orthogonal axis being active at all.
             _panel.ProjectionSelector.UpdateProjectedDataAvailability(true);
 
-            // Disable projection for Complex data (projection requires IMinMaxValue<T> constraint)
-            bool supportsProjection = data.ValueType != typeof(System.Numerics.Complex);
-            _panel.ProjectionSelector.IsEnabled = supportsProjection;
-            if (!supportsProjection)
-            {
-                global::Avalonia.Controls.ToolTip.SetTip(_panel.ProjectionSelector,
-                    "Projection is not available for Complex data.\n" +
-                    "Use slice mode (uncheck all projection options) to view orthogonal views.");
-            }
-            else
-            {
-                global::Avalonia.Controls.ToolTip.SetTip(_panel.ProjectionSelector, null);
-            }
+            // An element type that cannot be projected gets an explanation in place of the
+            // projection controls; the orthogonal slice views work as usual.
+            _panel.ProjectionSelector.SetUnavailable(GetProjectionUnavailableMessage(data.ElementType));
 
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
             _panel.ProjectionSelector.SelectionChanged += OnProjectionSelectionChanged;
@@ -643,6 +680,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _xyColorCoded      = false;
             _xyColorCodedBlendMode = null;
             _xyProjectionCache = null;
+            InvalidateDepthProfile();
             _data     = null;
             _axisName = string.Empty;
             _lastNonOrthoAxisPositions = null;
@@ -678,9 +716,9 @@ namespace MxPlot.UI.Avalonia.Controls
             }
             else
             {
-                // For Complex data: scan using the current display mode
-                int valueMode = main.MatrixData?.ValueType == typeof(System.Numerics.Complex)
-                    ? (int)main.ComplexValueMode : 0;
+                // For a multi-mode element type: scan using the current display mode. Clamped to 0
+                // (the primary mode) for a single-mode type regardless of the stored enum value.
+                int valueMode = main.MatrixData?.ElementType.ClampMode((int)main.ComplexValueMode) ?? 0;
                 (min, max) = main.ScanCurrentFrameRange(valueMode);
             }
             right.IsFixedRange = true;
@@ -690,9 +728,10 @@ namespace MxPlot.UI.Avalonia.Controls
             right.FixedMax  = max;
             bot.FixedMax    = max;
 
-            // When MainView is Complex and ComplexValueMode changed, side views need explicit refresh.
-            // (Side views' MatrixData is usually float/ushort slice, so ComplexValueMode setter doesn't trigger rebuild.)
-            if (main.MatrixData?.ValueType == typeof(System.Numerics.Complex))
+            // When MainView's element type has more than one value mode and ComplexValueMode
+            // changed, side views need explicit refresh. (Side views' MatrixData is usually
+            // float/ushort slice, so ComplexValueMode setter doesn't trigger rebuild.)
+            if ((main.MatrixData?.ElementType.ValueModeCount ?? 1) > 1)
             {
                 if (_panel.ShowBottom) bot.Refresh();
                 if (_panel.ShowRight) right.Refresh();
@@ -792,6 +831,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _yzProjectionCache = null;
             _xyProjectionCache = null;
             _cacheEpoch++;
+            InvalidateDepthProfile();
             UpdateSlicesAsync(xChanged: true, yChanged: true);
             if (_xyProjectionMode != null)
                 ComputeXYProjectionAsync();
@@ -845,6 +885,42 @@ namespace MxPlot.UI.Avalonia.Controls
             UpdateFrameIndicator();
             UpdateSlicesAsync(xChanged: true, yChanged: true);
         }
+
+        /// <summary>
+        /// Turns the step-size aspect correction on or off for all three views together, so the
+        /// zoom compensation between them keeps using one consistent set of scale factors.
+        /// While it is off every view shows one data pixel per screen pixel at zoom 1 and the
+        /// custom orthogonal-axis ratio is ignored (it is kept and applies again when it is back on).
+        /// </summary>
+        public void SetAspectCorrection(bool enabled)
+        {
+            if (IsSettingAspectCorrection) return;
+            IsSettingAspectCorrection = true;
+            // The side views raise ScrollStateChanged while their own setting changes; the main
+            // view must not be re-derived from them before all three agree.
+            _isSyncing = true;
+            try
+            {
+                _panel.BottomView.IsAspectCorrectionEnabled = enabled;
+                _panel.RightView.IsAspectCorrectionEnabled = enabled;
+                _panel.MainView.IsAspectCorrectionEnabled = enabled;
+            }
+            finally
+            {
+                _isSyncing = false;
+                IsSettingAspectCorrection = false;
+            }
+
+            if (_data != null)
+                SyncZoomFromMainView();
+        }
+
+        /// <summary>
+        /// True while <see cref="SetAspectCorrection"/> is changing the three views, so that a
+        /// listener of their <see cref="MxView.AspectCorrectionChanged"/> can tell its own
+        /// propagation from a change made directly on one view.
+        /// </summary>
+        public bool IsSettingAspectCorrection { get; private set; }
 
         private void OnMainScrollStateChanged(object? sender, EventArgs e) => SyncZoomFromMainView();
         private void OnBottomScrollStateChanged(object? sender, EventArgs e) => SyncZoomFromSideView(isBottom: true);
@@ -1426,6 +1502,19 @@ namespace MxPlot.UI.Avalonia.Controls
             int epoch = _cacheEpoch;
             var lifetimeToken = _lifetimeCts.Token;
 
+            // The depth profile is reused while the data and the other axes' positions are unchanged,
+            // so a Start/End/palette edit does not re-read the whole axis.
+            int profileEpoch = _depthProfileEpoch;
+            int[]? profileKey = null;
+            double[]? reusableProfile = null;
+            if (colorCoded && data.Axes.FindAxis(axisName) != null)
+            {
+                profileKey = GetDepthProfileKey(data, axisName);
+                if (_xyDepthProfile is { } cached && ReferenceEquals(cached.Data, data)
+                    && cached.FixedIndices.AsSpan().SequenceEqual(profileKey))
+                    reusableProfile = cached.Values;
+            }
+
             _panel.MainView.IsBusy = true;
             Task.Run(() =>
             {
@@ -1437,6 +1526,7 @@ namespace MxPlot.UI.Avalonia.Controls
                     IMatrixData result;
                     double? autoMin = null, autoMax = null;
                     ColorCodedRenderInfo? resultRenderInfo = null;
+                    double[]? depthProfile = null;
                     if (colorCoded)
                     {
                         // compositeActive is guaranteed false here (colorCoded is defined above as
@@ -1475,32 +1565,28 @@ namespace MxPlot.UI.Avalonia.Controls
                         // axis -- the same "reverse the LUT array" semantics ordinary LUT mode's
                         // Invert already has (MatrixPlotter.cs's BuildHistogramLutColors), not a
                         // per-pixel intensity flip. Baking it into the array order here means
-                        // ColorCodedBitmapWriter and the depth histogram (both of which just consume
+                        // ColorCodedBitmapWriter and the depth profile plot (both of which just consume
                         // DepthColors as given) automatically respect it with no separate flag.
                         if (colorCodedInvert) Array.Reverse(depthColors);
                         var scannedAxis = data.Axes.FindAxis(axisName);
                         if (scannedAxis != null)
                         {
-                            // Computed here (background thread), not in UpdateColorCodedHistogram on
-                            // the UI thread -- this single-threaded full-frame scan over WinnerIndex
-                            // was the dominant remaining UI-thread stall on every Start/End edit for
-                            // a large XY / long-axis dataset (e.g. otomo1.tif's 997-frame stack).
-                            // Riding along with the ExtremumIndexOperation scan that already produced
-                            // WinnerIndex means no extra pass is needed later, just a hand-off.
-                            int[] hist = winnerIndex.CreateHistogram(0, scannedAxis.Count, 0, scannedAxis.Count);
+                            // Computed here on the background thread, so the UI thread only hands the
+                            // finished profile to the details panel.
+                            depthProfile = reusableProfile ?? data.Apply(new AxisProfileOperation(axisName));
                             // Color (RGB-Max)/(RGB-Add)/(RGB-Avg): a second sweep over [Start, End], this time coloring
                             // every slice and blending R/G/B independently. It has to follow the
                             // extremum scan above, since Auto range takes its ValueMin/Max from
                             // winnerValue -- and the value range is applied per voxel here, so a
                             // range/palette/Invert change re-runs it (unlike Color(Max)'s render-time
                             // range). The winner scan is kept: the window's own data is that
-                            // Maximum projection, and the histogram / read-out use WinnerIndex.
+                            // Maximum projection, and the pointer read-out uses WinnerIndex.
                             int[]? blended = colorCodedBlendMode is { } blendMode
                                 ? ColorCodedRgbBlender.Blend(data, axisName, colorCodedStart, colorCodedEnd,
                                     valueMin, valueMax, depthColors, blendMode).GetArray(0)
                                 : null;
                             resultRenderInfo = new ColorCodedRenderInfo(
-                                winnerIndex, colorCodedStart, depthColors, valueMin, valueMax, scannedAxis, hist, blended);
+                                winnerIndex, colorCodedStart, depthColors, valueMin, valueMax, scannedAxis, depthProfile, blended);
                         }
                     }
                     else
@@ -1516,6 +1602,8 @@ namespace MxPlot.UI.Avalonia.Controls
                     if (lifetimeToken.IsCancellationRequested) return;
                     Dispatcher.UIThread.Post(() =>
                     {
+                        if (depthProfile != null && profileKey != null && profileEpoch == _depthProfileEpoch)
+                            _xyDepthProfile = new DepthProfileCache(data, profileKey, depthProfile);
                         if (epoch == _cacheEpoch)
                         {
                             _xyProjectionCache = result;
@@ -1565,6 +1653,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _xyColorCodedBlendMode = null;
             _xyProjectionCache = null;
             _cacheEpoch++;
+            InvalidateDepthProfile();
         }
     }
 }

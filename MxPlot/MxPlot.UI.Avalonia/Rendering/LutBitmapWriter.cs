@@ -115,8 +115,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         private static readonly ParallelOptions SharedParallelOptions = new();
         private bool _autoWantsParallel;
 
-        /// <inheritdoc />
-        public object? StructValueConverter { get; set; }
+        /// <summary>The value mode <see cref="Complex"/> data is rendered in. Ignored for any other element type.</summary>
+        public ComplexValueMode ComplexValueMode { get; set; }
 
         #endregion
 
@@ -152,9 +152,6 @@ namespace MxPlot.UI.Avalonia.Rendering
                     _ => RenderFallback
                 };
             }
-
-            if (valueType == typeof(Complex))
-                StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);
         }
 
         #endregion
@@ -533,9 +530,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             double valueScale, double valueOffset, int lutMaxIndex)
         {
             var typedData = (MatrixData<Complex>)source;
-            if (StructValueConverter is not Func<Complex, double> converter)
-                throw new InvalidOperationException(
-                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering.");
+            var mode = ComplexValueMode;
             int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
@@ -548,7 +543,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int* pRow = targetPtr + iy * strideInts;
                     for (int ix = 0; ix < width; ++ix)
                     {
-                        double v = converter(values[ix]);
+                        double v = values[ix].ToScalar(mode);
                         pRow[ix] = double.IsNaN(v) ? missingColor
                             : lut[Math.Clamp((int)(v * valueScale + valueOffset), 0, lutMaxIndex)];
                     }
@@ -564,7 +559,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int* pRow = targetPtr + iy * strideInts;
                     for (int ix = 0; ix < width; ++ix)
                     {
-                        double v = converter(values[rowOffset + ix]);
+                        double v = values[rowOffset + ix].ToScalar(mode);
                         pRow[ix] = double.IsNaN(v) ? missingColor
                             : lut[Math.Clamp((int)(v * valueScale + valueOffset), 0, lutMaxIndex)];
                     }
@@ -654,7 +649,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                 PixelFormat.Bgra8888,
                 AlphaFormat.Premul);
 
-            var writer = new LutBitmapWriter(source.ValueType);
+            var writer = new LutBitmapWriter(source.ElementType.Type);
             var context = new LutRenderingContext(frameIndex, lut, valueMin, valueMax);
             writer.Render(source, bmp, context);
             return bmp;

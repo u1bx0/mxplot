@@ -25,6 +25,7 @@ namespace MxPlot.UI.Avalonia.Commands
             CreateOperation = run => new LogTransformOperation(
                 Base: p.Base,
                 Handling: p.Handling,
+                ValueMode: run.ValueMode,
                 Progress: run.Progress,
                 CancellationToken: run.Token),
             PrepareResult = (result, ctx) =>

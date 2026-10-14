@@ -23,6 +23,7 @@ namespace MxPlot.UI.Avalonia.Commands
             FailureTitle = "Normalize Failed",
             Progress = ProgressMode.Always,
             ProgressLabel = "Normalizing…",
+            WorksOnScalars = true,
             Prepare = (host, scope) => ScanForGlobalMaxAsync(host, p, scope),
             CreateOperation = run => new NormalizeOperation(
                 Target: p.Target,
@@ -55,16 +56,21 @@ namespace MxPlot.UI.Avalonia.Commands
             if (!needsGlobalMax) return double.NaN;
 
             using var session = host.BeginProgress("Scanning max value…", cancellable: false);
-            return await Task.Run(() => (object?)ScanGlobalMaxValue(scope.Operand));
+            int valueMode = host.ValueMode;
+            return await Task.Run(() => (object?)ScanGlobalMaxValue(scope.Operand, valueMode));
         }
 
-        /// <summary>Scans all frames of <paramref name="data"/> and returns the global maximum value.</summary>
-        internal static double ScanGlobalMaxValue(IMatrixData data)
+        /// <summary>
+        /// Scans all frames of <paramref name="data"/> and returns the global maximum value, in the value mode
+        /// the data is normalized in (structured data is read as scalars in that mode first).
+        /// </summary>
+        internal static double ScanGlobalMaxValue(IMatrixData data, int valueMode = 0)
         {
+            int mode = data.ElementType.ClampMode(valueMode);
             double max = double.NegativeInfinity;
             for (int i = 0; i < data.FrameCount; i++)
             {
-                var (_, frameMax) = data.GetValueRange(i);
+                var (_, frameMax) = data.GetValueRange(i, mode);
                 if (frameMax > max) max = frameMax;
             }
             return max;

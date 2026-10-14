@@ -1260,6 +1260,10 @@ namespace MxPlot.Core.Processing
         /// Thrown when <paramref name="axisName"/> does not name an axis of <paramref name="src"/>, or when
         /// Rec.709 luma is requested for an axis that does not have exactly 3 channels.
         /// </exception>
+        /// <exception cref="NotSupportedException">
+        /// Thrown for a structured element type (e.g. Complex), which this operation does not support yet: read
+        /// the data in a value mode first with <see cref="MatrixDataValueConverter.ToScalars{T}"/>.
+        /// </exception>
         public static MatrixData<T> Grayscale<T>(this MatrixData<T> src,
             string axisName = "Channel",
             GrayscaleMethod method = GrayscaleMethod.Auto,
@@ -1267,6 +1271,7 @@ namespace MxPlot.Core.Processing
             CancellationToken cancellationToken = default)
             where T : unmanaged
         {
+            StructuredDataSupport.ThrowIfNotSupported<T>(nameof(Grayscale));
             var axis = src[axisName]
                 ?? throw new ArgumentException($"Axis '{axisName}' not found.");
 

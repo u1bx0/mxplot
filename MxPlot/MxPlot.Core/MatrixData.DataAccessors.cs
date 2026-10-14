@@ -20,6 +20,13 @@ namespace MxPlot.Core
             return NumericConverter.ToDouble(GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix]);
         }
 
+        /// <inheritdoc/>
+        public double GetValueAt(int ix, int iy, int frameIndex, int valueMode)
+        {
+            if (frameIndex < 0) frameIndex = _activeIndex;
+            return NumericConverter.ToDouble(GetInternalArray(frameIndex, needsInvalidate:false)[iy * _xcount + ix], valueMode);
+        }
+
         public T GetValueAtTyped(int ix, int iy, int frameIndex = -1)
         {
             if (frameIndex < 0) frameIndex = _activeIndex;

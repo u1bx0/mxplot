@@ -67,12 +67,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         ParallelRenderPolicy ParallelPolicy { get; set; }
 
         /// <summary>
-        /// Gets or sets a converter for struct-based value types
-        /// (e.g. <c>Func&lt;Complex, double&gt;</c> for Complex data).
-        /// Ignored for primitive numeric types. The implementation is responsible for
-        /// casting this to the appropriate delegate type.
+        /// The value mode <see cref="Complex"/> data is rendered in. Ignored for any other element type.
         /// </summary>
-        object? StructValueConverter { get; set; }
+        ComplexValueMode ComplexValueMode { get; set; }
 
         /// <summary>
         /// Renders the matrix data into the target bitmap using the specified context.

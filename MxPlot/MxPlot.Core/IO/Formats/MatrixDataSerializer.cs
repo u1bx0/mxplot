@@ -261,9 +261,15 @@ namespace MxPlot.Core.IO.Formats
 
             var (_, _, config) = ReadFixedHeaderAndConfig(fs, reader);
 
-            // 型チェック（ガードレール）
-            if (config.ValueTypeName != typeof(T).FullName)
-                throw new InvalidDataException($"Type mismatch: File={config.ValueTypeAlias}, Requested={typeof(T).Name}");
+            // Guard: the caller's T must match what the file was written with.
+            if (config.ElementTypeName != GetPersistentName<T>())
+                throw new InvalidDataException($"Type mismatch: File={config.ElementTypeAlias}, Requested={typeof(T).Name}");
+            // Guard: catches a registered struct whose layout changed since the file was written, as
+            // long as its size changed too (see the caveat on MatrixDataConfig.ElementSize).
+            if (config.ElementSize != Unsafe.SizeOf<T>())
+                throw new InvalidDataException(
+                    $"Element size mismatch for '{config.ElementTypeAlias}': file was written with " +
+                    $"{config.ElementSize} bytes/element, but the type registered now is {Unsafe.SizeOf<T>()} bytes/element.");
 
             progress?.Report(-config.FrameCount);
 
@@ -309,8 +315,12 @@ namespace MxPlot.Core.IO.Formats
 
             var (_, _, config) = ReadFixedHeaderAndConfig(fs, reader);
 
-            if (config.ValueTypeName != typeof(T).FullName)
-                throw new InvalidDataException($"Type mismatch: File={config.ValueTypeAlias}, Requested={typeof(T).Name}");
+            if (config.ElementTypeName != GetPersistentName<T>())
+                throw new InvalidDataException($"Type mismatch: File={config.ElementTypeAlias}, Requested={typeof(T).Name}");
+            if (config.ElementSize != Unsafe.SizeOf<T>())
+                throw new InvalidDataException(
+                    $"Element size mismatch for '{config.ElementTypeAlias}': file was written with " +
+                    $"{config.ElementSize} bytes/element, but the type registered now is {Unsafe.SizeOf<T>()} bytes/element.");
 
             if (config.IsCompressed)
                 throw new NotSupportedException(
@@ -333,6 +343,16 @@ namespace MxPlot.Core.IO.Formats
 
             return config.CreateFromVirtualFrames(vsf);
         }
+
+        /// <summary>
+        /// The header name a file of element type <typeparamref name="T"/> carries: its registered
+        /// <see cref="ElementType.PersistentName"/>, or the full type name for a type that is not registered
+        /// (which cannot be loaded anyway, since its instances cannot be constructed). Internal so that
+        /// other writers of a <see cref="MatrixDataConfig"/> trailer (<see cref="VesselWriter{T}"/>) can
+        /// reuse it instead of re-deriving the same value from <c>typeof(T)</c> directly.
+        /// </summary>
+        internal static string GetPersistentName<T>() where T : unmanaged
+            => MatrixData<T>.RegisteredElementType?.PersistentName ?? typeof(T).FullName ?? typeof(T).Name;
 
         /// <summary>
         /// Reads all frames from the stream. When <paramref name="config"/> does not already carry a
@@ -382,14 +402,32 @@ namespace MxPlot.Core.IO.Formats
             return arrays;
         }
 
-        private static IMatrixData TryLoadCustomStruct(string typeName, string path, IProgress<int>? progress, CancellationToken ct = default)
-        {
-            var type = Type.GetType(typeName);
-            if (type == null) throw new NotSupportedException($"Type {typeName} not found.");
+        /// <summary>
+        /// Resolves <paramref name="typeId"/> against the process-wide registry populated by
+        /// <c>MatrixData&lt;T&gt;.Register</c> (<see cref="MatrixData.ResolveElementType"/>), rather than
+        /// <see cref="Type.GetType(string)"/>: the latter only searches this assembly and mscorlib, so it
+        /// can never find a custom struct defined by the application that registered it.
+        /// </summary>
+        private static ElementType ResolveRegisteredType(string typeId) =>
+            MatrixData.ResolveElementType(typeId)
+                ?? throw new NotSupportedException($"Type '{typeId}' is not registered in this process.");
 
-            // MatrixDataSerializer.Load<T> をリフレクションで叩く
+        private static IMatrixData TryLoadCustomStruct(string typeId, string path, IProgress<int>? progress, CancellationToken ct = default)
+        {
+            var type = ResolveRegisteredType(typeId).Type;
+
+            // Invoke MatrixDataSerializer.Load<T> reflectively, since T is only known at runtime here.
             var method = typeof(MatrixDataSerializer).GetMethod(nameof(Load))!.MakeGenericMethod(type);
             return (IMatrixData)method.Invoke(null, [path, progress, ct])!;
+        }
+
+        private static IMatrixData TryLoadCustomStructVirtual(string typeId, string path)
+        {
+            var type = ResolveRegisteredType(typeId).Type;
+
+            // Invoke MatrixDataSerializer.LoadVirtual<T> reflectively, since T is only known at runtime here.
+            var method = typeof(MatrixDataSerializer).GetMethod(nameof(LoadVirtual))!.MakeGenericMethod(type);
+            return (IMatrixData)method.Invoke(null, [path])!;
         }
 
         /// <summary>
@@ -406,8 +444,8 @@ namespace MxPlot.Core.IO.Formats
         {
             var conf = ReadHeaderConfig(path);
 
-            // Map type name to appropriate Load<T> call
-            return conf.ValueTypeName switch
+            // Map the persisted element type name to the appropriate Load<T> call.
+            return conf.ElementTypeName switch
             {
                 "System.Double" => Load<double>(path, progress, ct),
                 "System.Single" => Load<float>(path, progress, ct),
@@ -420,7 +458,7 @@ namespace MxPlot.Core.IO.Formats
                 "System.UInt16" => Load<ushort>(path, progress, ct),
                 "System.SByte" => Load<sbyte>(path, progress, ct),
                 "System.Numerics.Complex" => Load<System.Numerics.Complex>(path, progress, ct),
-                _ => TryLoadCustomStruct(conf.ValueTypeName, path, progress, ct)
+                _ => TryLoadCustomStruct(conf.ElementTypeName, path, progress, ct)
             };
         }
 
@@ -432,7 +470,7 @@ namespace MxPlot.Core.IO.Formats
         {
             var conf = ReadHeaderConfig(path);
 
-            return conf.ValueTypeName switch
+            return conf.ElementTypeName switch
             {
                 "System.Double"  => LoadVirtual<double>(path),
                 "System.Single"  => LoadVirtual<float>(path),
@@ -444,8 +482,8 @@ namespace MxPlot.Core.IO.Formats
                 "System.UInt64"  => LoadVirtual<ulong>(path),
                 "System.UInt16"  => LoadVirtual<ushort>(path),
                 "System.SByte"   => LoadVirtual<sbyte>(path),
-                _ => throw new NotSupportedException(
-                    $"Virtual loading is not supported for type '{conf.ValueTypeAlias}'.")
+                "System.Numerics.Complex" => LoadVirtual<System.Numerics.Complex>(path),
+                _ => TryLoadCustomStructVirtual(conf.ElementTypeName, path)
             };
         }
 

@@ -5,6 +5,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Primitives.PopupPositioning;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
@@ -99,16 +100,6 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         private CompositeRangeScope _compositeScope = CompositeRangeScope.Global;
-
-        /// <summary>
-        /// The Scope flyout's own two radio buttons, kept so <see cref="SetCompositeScope"/> can
-        /// re-sync their IsChecked state when scope changes from somewhere other than the user
-        /// clicking one of them (e.g. <see cref="MatrixPlotter.CompositeRecipes"/> assigned
-        /// externally) -- built fresh each <see cref="BuildCompositeModeHeader"/> call, so these
-        /// are only valid while that header instance is the one currently shown.
-        /// </summary>
-        private RadioButton? _compositeScopeGlobalRadio;
-        private RadioButton? _compositeScopeChannelWiseRadio;
 
         /// <summary>
         /// The header range bar -- the very same control the LUT toolbar uses, so Composite mode gets
@@ -348,8 +339,6 @@ namespace MxPlot.UI.Avalonia.Views
             _compositeBars = null;
             _compositeSettingsPanel = null;
             _compositeSettingsBtn = null;
-            _compositeScopeGlobalRadio = null;
-            _compositeScopeChannelWiseRadio = null;
             UpdateWindowIcon();
         }
 
@@ -880,7 +869,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// </remarks>
         private bool TryAutoEnterRgbComposite(IMatrixData data)
         {
-            if (!CompositeModeEnabled || data.ValueType != typeof(byte)) return false;
+            if (!CompositeModeEnabled || data is not MatrixData<byte>) return false;
 
             var channelAxis = data.Axes.FindAxis("Channel");
             if (channelAxis == null || !ColorAxis.IsRgbTriplet(channelAxis)) return false;
@@ -946,7 +935,7 @@ namespace MxPlot.UI.Avalonia.Views
             int count = channelAxis.Count;
             int[] colors = channelAxis is ColorAxis { HasAssignedColors: true } cc && cc.AssignedColors!.Count == count
                 ? cc.AssignedColors!.ToArray()
-                : DefaultCompositeColors(count, data.ValueType);
+                : DefaultCompositeColors(count, data.ElementType.Type);
 
             var recipes = new List<BlendRecipe>(count);
             for (int c = 0; c < count; c++)
@@ -967,7 +956,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// the two modes feel the same:
         /// <code>
         /// LUT:       [☰][LutSelector ][===== ValueRangeBar =====][↩][▾]
-        /// Composite: [☰][Composite ▾][===== ValueRangeBar =====]    [▾]
+        /// Composite: [☰][Composite][===== ValueRangeBar =====]    [▾]
         /// </code>
         /// Channel on/off deliberately lives in the settings panel's channel rows, not here, which
         /// frees the width the range bar needs.
@@ -1091,7 +1080,7 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
-        /// The <c>[Composite ▾]</c> button and its flyout: the Shared / Per-Channel range scope
+        /// The <c>[Composite]</c> button and its context menu: the Shared / Per-Channel range scope
         /// plus the "Switch to LUT mode" command. It sits where LUT mode puts its LUT selector.
         /// </summary>
         private Button BuildCompositeMenuButton()
@@ -1105,7 +1094,6 @@ namespace MxPlot.UI.Avalonia.Views
                     Children =
                     {
                         new TextBlock { Text = "Composite", FontSize = 11, VerticalAlignment = VerticalAlignment.Center },
-                        new TextBlock { Text = "▾", FontSize = 9, VerticalAlignment = VerticalAlignment.Center },
                     },
                 },
                 Height = CompControlHeight,
@@ -1126,102 +1114,69 @@ namespace MxPlot.UI.Avalonia.Views
                 : "?";
             ToolTip.SetTip(menuBtn, $"Composite axis: {compositedAxisName}\nValue range scope / switch back to LUT mode");
 
-            // Display text only — CompositeRangeScope's member names ("Global"/"ChannelWise") are
-            // also what gets written to mxplot.composite.scope via ToString(), so they stay as-is;
-            // only the label a user reads needs to be clearer.
-            var globalRadio = _compositeScopeGlobalRadio = new RadioButton
+            // Built fresh on every click so the checked item always mirrors _compositeScope, which
+            // can also change from outside this menu (e.g. CompositeRecipes assigned externally).
+            var menu = new ContextMenu();
+            menuBtn.ContextMenu = menu;
+            menuBtn.Click += (_, _) =>
             {
-                Content = "Shared",
-                GroupName = "CompositeRangeScope",
-                FontSize = 11,
-                MinHeight = 0,
-                IsChecked = _compositeScope == CompositeRangeScope.Global,
-            };
-            globalRadio.Classes.Add("compact");
-            ToolTip.SetTip(globalRadio, "One Min/Max shared by every channel");
+                menu.Items.Clear();
 
-            var channelWiseRadio = _compositeScopeChannelWiseRadio = new RadioButton
-            {
-                Content = "Per-Channel",
-                GroupName = "CompositeRangeScope",
-                FontSize = 11,
-                MinHeight = 0,
-                IsChecked = _compositeScope == CompositeRangeScope.ChannelWise,
-            };
-            channelWiseRadio.Classes.Add("compact");
-            ToolTip.SetTip(channelWiseRadio, "Each channel evaluates and keeps its own Min/Max");
-
-            var flyout = new Flyout { Placement = PlacementMode.BottomEdgeAlignedLeft };
-
-            // Both scope choices act immediately (no separate "Apply"), so closing the flyout on
-            // click - like switchToLutItem below - avoids leaving it open after the pick is done.
-            // Hide() is deferred a tick (Post, not called inline): calling it synchronously inside
-            // IsCheckedChanged interrupts RadioButton's own same-tick "uncheck my group sibling"
-            // step (Hide() tears down the flyout's visual tree mid-toggle), which left both radios
-            // showing checked next time the flyout opened.
-            globalRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
-                if (globalRadio.IsChecked == true)
+                // Display text only: CompositeRangeScope's member names ("Global"/"ChannelWise") are
+                // also what gets written to mxplot.composite.scope via ToString(), so they stay as-is.
+                void AddScopeItem(CompositeRangeScope scope, string label, string description)
                 {
-                    SetCompositeScope(CompositeRangeScope.Global);
-                    Dispatcher.UIThread.Post(() => flyout.Hide());
-                }
-            };
-            channelWiseRadio.IsCheckedChanged += (_, _) =>
-            {
-                if (_reentrancy.IsActive(GuardContext.UiSync)) return;
-                if (channelWiseRadio.IsChecked == true)
-                {
-                    SetCompositeScope(CompositeRangeScope.ChannelWise);
-                    Dispatcher.UIThread.Post(() => flyout.Hide());
-                }
-            };
-
-            // The radios are only in the visual tree while the flyout is open, and RadioButton's own
-            // group bookkeeping (attach/detach, sibling-uncheck) can leave neither - or both -
-            // checked by the time it opens (seen intermittently). _compositeScope is the single
-            // source of truth, so re-derive both radios from it on every open: once before the
-            // popup shows, and again after the content is attached and the group has settled.
-            flyout.Opening += (_, _) => SyncCompositeScopeRadios();
-            flyout.Opened += (_, _) => SyncCompositeScopeRadios();
-
-            var switchToLutItem = ControlFactory.MakeMenuItem("Switch to LUT mode", () =>
-            {
-                flyout.Hide();
-                ExitCompositeMode();
-            }, 
-            icon: MenuIcons.Palette, 
-            fontSize: 11
-            );
-            switchToLutItem.Height = 24;
-
-            flyout.Content = new StackPanel
-            {
-                Spacing = 4,
-                Margin = new Thickness(4),
-                MinWidth = 160,
-                Children =
-                {
-                    // "Value Range" collided with the Fixed/Current/All mode dropdown that also
-                    // lives in this header - a reader could easily mistake this section for that
-                    // one. "Range Scope" names what these two options actually decide: whether the
-                    // Min/Max is one value shared across channels, or tracked per channel.
-                    new TextBlock
+                    var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 0, -24, 0) };
+                    header.Children.Add(new TextBlock
                     {
-                        Text = "Range Scope",
+                        Text = label,
                         FontSize = 11,
-                        FontWeight = FontWeight.SemiBold,
-                        Margin = new Thickness(2, 2),
-                    },
-                    globalRadio,
-                    channelWiseRadio,
-                    ControlFactory.MakeSep(),
-                    switchToLutItem,
-                },
+                        MinWidth = 100,
+                        VerticalAlignment = VerticalAlignment.Center,
+                    });
+                    header.Children.Add(new TextBlock
+                    {
+                        Text = description,
+                        FontSize = 10,
+                        Foreground = new SolidColorBrush(Color.FromRgb(140, 140, 140)),
+                        VerticalAlignment = VerticalAlignment.Center,
+                    });
+                    // The selected entry is marked in the icon slot (not with MenuItem's own toggle
+                    // glyph) so the dot and the "Switch to LUT mode" icon share one column. The
+                    // unchecked entry gets an empty placeholder of the same size to keep the labels
+                    // aligned.
+                    // PathIcon stretches the geometry to its own size, so the dot is drawn small inside
+                    // a 14x14 slot rather than sized by the geometry.
+                    var marker = new Border { Width = 14, Height = 14 };
+                    if (_compositeScope == scope)
+                        marker.Child = new PathIcon { Data = MenuIcons.RadioDot, Width = 8, Height = 8 };
+                    var item = new MenuItem { Header = header, Icon = marker };
+                    item.Click += (_, _) => SetCompositeScope(scope);
+                    menu.Items.Add(item);
+                }
+
+                AddScopeItem(CompositeRangeScope.Global, "Shared range", "One Min/Max for all channels");
+                AddScopeItem(CompositeRangeScope.ChannelWise, "Per-channel range", "Each channel keeps its own");
+
+                menu.Items.Add(new Separator());
+                var switchToLut = new MenuItem
+                {
+                    Header = "Switch to LUT mode",
+                    // The LUT the window returns to, drawn as its colorbar swatch.
+                    Icon = _lutSelector.SelectedPreview is { } lutPreview
+                        ? new Image { Source = lutPreview, Width = 14, Height = 14, Stretch = Stretch.Fill }
+                        : new PathIcon { Data = MenuIcons.Palette, Width = 14, Height = 14 },
+                    FontSize = 11,
+                };
+                switchToLut.Click += (_, _) => ExitCompositeMode();
+                menu.Items.Add(switchToLut);
+
+                menu.PlacementTarget = menuBtn;
+                menu.Placement = PlacementMode.AnchorAndGravity;
+                menu.PlacementAnchor = PopupAnchor.BottomLeft;
+                menu.PlacementGravity = PopupGravity.BottomRight;
+                menu.Open(menuBtn);
             };
-            FlyoutBase.SetAttachedFlyout(menuBtn, flyout);
-            menuBtn.Click += (_, _) => FlyoutBase.ShowAttachedFlyout(menuBtn);
             return menuBtn;
         }
 
@@ -1351,43 +1306,10 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
-        /// <summary>
-        /// Makes the Scope flyout's radios reflect <c>_compositeScope</c> exactly one-checked,
-        /// whatever state the radio group bookkeeping left them in. Writes run under
-        /// <see cref="GuardContext.UiSync"/> so the radios' own IsCheckedChanged handlers treat
-        /// them as a display sync (no scope change, no flyout close), and the radio that should
-        /// end up checked is written last so no group sibling-uncheck can clear it.
-        /// </summary>
-        private void SyncCompositeScopeRadios()
-        {
-            var global = _compositeScopeGlobalRadio;
-            var channelWise = _compositeScopeChannelWiseRadio;
-            if (global == null || channelWise == null) return;
-
-            bool wantGlobal = _compositeScope == CompositeRangeScope.Global;
-            using (_reentrancy.Begin(GuardContext.UiSync))
-            {
-                if (wantGlobal)
-                {
-                    channelWise.IsChecked = false;
-                    global.IsChecked = true;
-                }
-                else
-                {
-                    global.IsChecked = false;
-                    channelWise.IsChecked = true;
-                }
-            }
-        }
-
         private void SetCompositeScope(CompositeRangeScope scope)
         {
             if (_compositeScope == scope) return;
             _compositeScope = scope;
-            // Keeps the flyout's own radio buttons correct when scope changes from somewhere
-            // other than the user clicking one of them (e.g. MatrixPlotter.CompositeRecipes
-            // assigned externally). They are also re-synced every time the flyout opens.
-            SyncCompositeScopeRadios();
             ConfigureCompositeRangeBars();
             ApplyCompositeRanges();
             MarkCompositeDirty();
@@ -1456,8 +1378,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (data == null || _compositeAxisDimIndex < 0) return (double.NaN, double.NaN, 0);
 
             var chAxis = data.Dimensions[_compositeAxisDimIndex];
-            int valueMode = data.ValueType == typeof(System.Numerics.Complex)
-                ? (int)_view.ComplexValueMode : 0;
+            int valueMode = data.ElementType.ClampMode((int)_view.ComplexValueMode);
             // Virtual: never force a full disk scan — use what is cached and report the rest as
             // imperfect, exactly as LUT mode's ApplyAllModeRange does. A large scan on non-Virtual
             // data runs in the background (DeferFullValueRangeScan), which re-applies these ranges
@@ -1590,6 +1511,16 @@ namespace MxPlot.UI.Avalonia.Views
         }
 
         /// <summary>
+        /// Shows the data in <paramref name="mode"/> and brings everything that depends on it up to date,
+        /// including sync windows that follow this window's value mode.
+        /// </summary>
+        internal void SetComplexValueMode(ComplexValueMode mode)
+        {
+            _view.ComplexValueMode = mode;
+            SyncComplexValueModeChanged();
+        }
+
+        /// <summary>
         /// Re-evaluates the visible value-range state after ComplexValueMode changes.
         /// Composite Global+Current uses the composite header range; other modes keep the existing
         /// single-view All-mode behavior.
@@ -1614,6 +1545,8 @@ namespace MxPlot.UI.Avalonia.Views
             // so they match what is now shown on screen. Channel membership is unaffected,
             // so the lightweight index-based update (no series add/remove) is sufficient.
             UpdateAllLineProfiles();
+
+            ComplexValueModeChanged?.Invoke(this, EventArgs.Empty);
         }
 
         /// <summary>

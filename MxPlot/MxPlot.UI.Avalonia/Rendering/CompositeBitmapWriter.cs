@@ -106,11 +106,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         private bool _autoWantsParallel;
 
 
-        /// <summary>
-        /// Gets or sets the converter used for struct-based values during Complex rendering.
-        /// Must be set to <c>Func&lt;Complex, double&gt;</c> when <see cref="ValueType"/> is <see cref="Complex"/>.
-        /// </summary>
-        public object? StructValueConverter { get; set; }
+        /// <summary>The value mode <see cref="Complex"/> data is rendered in. Ignored for any other element type.</summary>
+        public ComplexValueMode ComplexValueMode { get; set; }
 
         #endregion
 
@@ -120,7 +117,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         // indices/blend mode are unchanged, even though RenderSurface.BuildCompositeContext
         // constructs a new CompositeRenderingContext record on every single call.
         private CompositeRenderingContext? _lastContext;
-        private object? _lastStructValueConverter;
+        private ComplexValueMode? _lastComplexValueMode;
 
         // Direct-index LUTs for byte / ushort / short.
         // Null entry means the layer is inactive (not visible or zero gain).
@@ -183,9 +180,6 @@ namespace MxPlot.UI.Avalonia.Rendering
         {
             ValueType = valueType ?? throw new ArgumentNullException(nameof(valueType));
 
-            if (valueType == typeof(Complex))
-                StructValueConverter = (Func<Complex, double>)(c => c.Magnitude);
-
             unsafe
             {
                 _renderLoop = valueType switch
@@ -237,9 +231,9 @@ namespace MxPlot.UI.Avalonia.Rendering
                 throw new ArgumentException(
                     "FrameIndices and Recipes must have the same length.");
 
-            if (source.ValueType != ValueType)
+            if (source.ElementType.Type != ValueType)
                 throw new ArgumentException(
-                    $"Source type {source.ValueType} does not match writer type {ValueType}.");
+                    $"Source type {source.ElementType.Type} does not match writer type {ValueType}.");
         }
 
         #endregion
@@ -248,7 +242,7 @@ namespace MxPlot.UI.Avalonia.Rendering
 
         private void EnsureLutCache(CompositeRenderingContext ctx)
         {
-            var structConverter = StructValueConverter;
+            var complexValueMode = ComplexValueMode;
 
             // Structural equality (record Equals), not ReferenceEquals: BuildCompositeContext
             // constructs a brand new CompositeRenderingContext on every single render call, so
@@ -259,7 +253,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             // reference comparisons plus a BlendMode value comparison - identical cost to the old
             // check when nothing changed, but it now actually skips the rebuild when it should.
             if (_lastContext is not null && _lastContext.Equals(ctx)
-                && ReferenceEquals(_lastStructValueConverter, structConverter))
+                && _lastComplexValueMode == complexValueMode)
                 return;
 
             if (ValueType == typeof(byte))
@@ -282,13 +276,13 @@ namespace MxPlot.UI.Avalonia.Rendering
             }
             else
             {
-                BuildScaleMaps(ctx.Recipes, structConverter);
+                BuildScaleMaps(ctx.Recipes);
                 _isRgbFastPathEligible = false;
                 _rgbFastPathRejectReason = $"ValueType is {ValueType.Name}, not byte";
             }
 
             _lastContext = ctx;
-            _lastStructValueConverter = structConverter;
+            _lastComplexValueMode = complexValueMode;
         }
 
         /// <summary>
@@ -360,19 +354,12 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// int / float / double / Complex data.
         /// Also caches per-layer scale/offset arrays.
         /// </summary>
-        private void BuildScaleMaps(IReadOnlyList<BlendRecipe> recipes, object? structConverter)
+        private void BuildScaleMaps(IReadOnlyList<BlendRecipe> recipes)
         {
             int count = recipes.Count;
             _cachedScaleMaps = new int[count][];
             _cachedScales = new double[count];
             _cachedOffsets = new double[count];
-
-            if (ValueType == typeof(Complex)
-                && structConverter is not Func<Complex, double>)
-            {
-                throw new InvalidOperationException(
-                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering.");
-            }
 
             for (int i = 0; i < count; i++)
             {
@@ -731,9 +718,7 @@ namespace MxPlot.UI.Avalonia.Rendering
             int[] active = GetActiveIndices(frameIndices.Length, maps);
             if (active.Length == 0) return;
 
-            if (StructValueConverter is not Func<Complex, double> converter)
-                throw new InvalidOperationException(
-                    "StructValueConverter must be set to Func<Complex, double> for Complex rendering.");
+            var mode = ComplexValueMode;
 
             var scales = _cachedScales!;
             var offsets = _cachedOffsets!;
@@ -752,7 +737,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                     int r = 0, g = 0, b = 0;
                     foreach (int a in active)
                     {
-                        double val = converter(memories[a].Span[rowOffset + ix]);
+                        double val = memories[a].Span[rowOffset + ix].ToScalar(mode);
                         if (double.IsNaN(val)) continue;
                         int idx = Math.Clamp(
                             (int)(val * scales[a] + offsets[a]), 0, lutMax);
@@ -824,7 +809,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                 PixelFormat.Bgra8888,
                 AlphaFormat.Premul);
 
-            var writer = new CompositeBitmapWriter(source.ValueType);
+            var writer = new CompositeBitmapWriter(source.ElementType.Type);
             var context = new CompositeRenderingContext(frameIndices, recipes, blendMode);
             writer.Render(source, bmp, context);
             return bmp;

@@ -34,6 +34,12 @@ namespace MxPlot.UI.Avalonia.Commands
         (double Min, double Max) DisplayedRange { get; }
 
         /// <summary>
+        /// The value mode the data is shown in, as an index into <see cref="ElementType.ValueModes"/> (always 0
+        /// for a single-mode element type).
+        /// </summary>
+        int ValueMode { get; }
+
+        /// <summary>
         /// Whether "This frame only" is a real choice for <paramref name="data"/>. It is not when Composite
         /// mode leaves no axis other than the composited one to step through.
         /// </summary>
@@ -92,7 +98,9 @@ namespace MxPlot.UI.Avalonia.Commands
     /// <param name="Source">The source window's data.</param>
     /// <param name="Operand">The part of it to operate on: the current frame, or the channel cube in Composite mode.</param>
     /// <param name="CompositeAxisName">The channel axis when <paramref name="Operand"/> is a channel cube; otherwise <see langword="null"/>.</param>
-    internal readonly record struct SyncInput(IMatrixData Source, IMatrixData Operand, string? CompositeAxisName);
+    /// <param name="ValueMode">The value mode the source window shows its data in at the time of the recompute.</param>
+    internal readonly record struct SyncInput(IMatrixData Source, IMatrixData Operand, string? CompositeAxisName,
+        int ValueMode = 0);
 
     /// <summary>A recomputed result.</summary>
     /// <param name="Data">The new data.</param>
