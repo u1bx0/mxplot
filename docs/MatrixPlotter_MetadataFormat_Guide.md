@@ -267,18 +267,20 @@ History is stored as a JSON array under the system key `mxplot.data.history`:
 
 ### How History is Recorded
 
-`MatrixPlotter.AppendHistory()` is called at each processing completion point:
+The public extension method `AppendHistory()` (class `MatrixDataHistoryExtensions`, namespace `MxPlot.UI.Avalonia.Metadata`) is called at each processing completion point:
 
 ```csharp
 // Signature
-internal static void AppendHistory(
-    IMatrixData data,
+public static void AppendHistory(
+    this IMatrixData data,
     string operation,
     string? from,
     string? detail = null)
 ```
 
-Current call sites (all in `MxPlot.UI.Avalonia.Views`, `MatrixPlotter` partial classes):
+It works on any `IMatrixData`, including data that an application or a plugin creates itself. Call it after `CopyPropertiesFrom` so that the source's history is kept and extended. A plugin can pass `IMatrixPlotterContext.Title` as `from`.
+
+Current call sites inside `MxPlot.UI.Avalonia` (the `MatrixPlotter` partial classes and `Commands/`):
 
 | Call site | `op` | `from` | `detail` |
 |---|---|---|---|
@@ -382,8 +384,10 @@ MxPlot.Core/
 MxPlot.Extensions.Tiff/
 │   └── OmeTiffHandler.cs        ← MarkAsFormatHeader("OME_XML")
 │
-MxPlot.UI.Avalonia/Views/
-├── PlotterConfigKeys.cs         ← Prefix, VisibleSystemKeys, IsReserved()
-├── MatrixPlotter.History.cs     ← HistoryMetaKey, AppendHistory()
-└── MatrixPlotter.InfoTab.cs     ← ResolveMetaKey(), IsDisplayKeyReadOnly(), RefreshMetaTab()
+MxPlot.UI.Avalonia/
+├── Metadata/
+│   ├── PlotterConfigKeys.cs           ← Prefix, VisibleSystemKeys, IsReserved()
+│   └── MatrixDataHistoryExtensions.cs ← HistoryMetaKey, AppendHistory() (extension on IMatrixData)
+└── Views/
+    └── MatrixPlotter.InfoTab.cs       ← ResolveMetaKey(), IsDisplayKeyReadOnly(), RefreshMetaTab()
 ```

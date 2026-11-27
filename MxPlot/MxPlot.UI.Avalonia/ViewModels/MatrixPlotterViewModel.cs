@@ -1,5 +1,5 @@
 ﻿using System;
-using CommunityToolkit.Mvvm.ComponentModel;
+using System.Collections.Generic;
 using MxPlot.Core;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Rendering;
@@ -7,19 +7,57 @@ using MxPlot.UI.Avalonia.Rendering;
 namespace MxPlot.UI.Avalonia.ViewModels
 {
     /// <summary>ViewModel for <see cref="MxPlot.UI.Avalonia.Views.MatrixPlotter"/>.</summary>
-    public partial class MatrixPlotterViewModel : ViewModelBase, IDisposable
+    public class MatrixPlotterViewModel : ViewModelBase, IDisposable
     {
-        [ObservableProperty]
         private IMatrixData? _matrixData;
-
-        [ObservableProperty]
         private LookupTable _lut = ColorThemes.Grayscale;
-
-        [ObservableProperty]
         private string _title = "MatrixPlotter";
-
-        [ObservableProperty]
         private string? _sourcePath;
+        private ValueRangeMode _rangeMode = ValueRangeMode.Current;
+        private bool _isFixedRange;
+        private bool _isInvertedColor;
+        private int _lutDepth = 256;   // matches MxView.LutDepthProperty's registered default
+        private double _fixedMin;
+        private double _fixedMax = 1.0;   // matches MxView.FixedMaxProperty's registered default
+
+        /// <summary>
+        /// The displayed data. Replacing it disposes the previous data if that requires disposal,
+        /// and resets <see cref="SourcePath"/> so the new data is not associated with the old
+        /// path; both happen before the new data is in place and before this property's own
+        /// change notification. The caller sets <see cref="SourcePath"/> to the correct value
+        /// afterward (as <see cref="Create"/> does).
+        /// </summary>
+        public IMatrixData? MatrixData
+        {
+            get => _matrixData;
+            set
+            {
+                if (EqualityComparer<IMatrixData?>.Default.Equals(_matrixData, value)) return;
+                if (_matrixData?.RequiresDisposal == true)
+                    _matrixData.Dispose();
+                SourcePath = null;
+                _matrixData = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public LookupTable Lut
+        {
+            get => _lut;
+            set => SetProperty(ref _lut, value);
+        }
+
+        public string Title
+        {
+            get => _title;
+            set => SetProperty(ref _title, value);
+        }
+
+        public string? SourcePath
+        {
+            get => _sourcePath;
+            set => SetProperty(ref _sourcePath, value);
+        }
 
         /// <summary>
         /// The value-range mode in effect. Unlike <see cref="IsFixedRange"/> — which only says
@@ -32,14 +70,23 @@ namespace MxPlot.UI.Avalonia.ViewModels
         /// The downgraded value is written back here, so this property always reports the mode
         /// actually in effect rather than the one that was requested.
         /// </remarks>
-        [ObservableProperty]
-        private ValueRangeMode _rangeMode = ValueRangeMode.Current;
+        public ValueRangeMode RangeMode
+        {
+            get => _rangeMode;
+            set => SetProperty(ref _rangeMode, value);
+        }
 
-        [ObservableProperty]
-        private bool _isFixedRange;
+        public bool IsFixedRange
+        {
+            get => _isFixedRange;
+            set => SetProperty(ref _isFixedRange, value);
+        }
 
-        [ObservableProperty]
-        private bool _isInvertedColor;
+        public bool IsInvertedColor
+        {
+            get => _isInvertedColor;
+            set => SetProperty(ref _isInvertedColor, value);
+        }
 
         /// <summary>
         /// LUT quantization level — the number of distinct colors the lookup table is resampled
@@ -47,14 +94,23 @@ namespace MxPlot.UI.Avalonia.ViewModels
         /// is passed through unclamped; anything of 1 or less means "use the LUT's own level
         /// count" (see <c>RenderSurface</c>'s <c>depth &gt; 1</c> test).
         /// </summary>
-        [ObservableProperty]
-        private int _lutDepth = 256;   // matches MxView.LutDepthProperty's registered default
+        public int LutDepth
+        {
+            get => _lutDepth;
+            set => SetProperty(ref _lutDepth, value);
+        }
 
-        [ObservableProperty]
-        private double _fixedMin;
+        public double FixedMin
+        {
+            get => _fixedMin;
+            set => SetProperty(ref _fixedMin, value);
+        }
 
-        [ObservableProperty]
-        private double _fixedMax = 1.0;   // matches MxView.FixedMaxProperty's registered default
+        public double FixedMax
+        {
+            get => _fixedMax;
+            set => SetProperty(ref _fixedMax, value);
+        }
 
         /// <summary>
         /// Sets <see cref="FixedMin"/> and <see cref="FixedMax"/> together and raises both
@@ -72,22 +128,8 @@ namespace MxPlot.UI.Avalonia.ViewModels
         }
 
         /// <summary>
-        /// Disposes the previous <see cref="MatrixData"/> when it is replaced, if it requires disposal.
-        /// Also resets <see cref="SourcePath"/> so the new data is not falsely associated with the old path.
-        /// The caller is responsible for setting <see cref="SourcePath"/> to the correct value afterward
-        /// (e.g. <see cref="Create"/> sets it after this call).
-        /// </summary>
-        partial void OnMatrixDataChanging(IMatrixData? oldValue, IMatrixData? newValue)
-        {
-            if (oldValue?.RequiresDisposal == true)
-                oldValue.Dispose();
-            if (oldValue != newValue)
-                SourcePath = null;
-        }
-
-        /// <summary>
         /// Disposes the current <see cref="MatrixData"/> if it requires disposal.
-        /// Called when the <see cref="MatrixPlotter"/> window is closed.
+        /// Called when the <see cref="MxPlot.UI.Avalonia.Views.MatrixPlotter"/> window is closed.
         /// </summary>
         public void Dispose()
         {

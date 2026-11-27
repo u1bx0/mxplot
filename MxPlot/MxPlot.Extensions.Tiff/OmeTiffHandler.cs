@@ -66,15 +66,21 @@ namespace MxPlot.Extensions.Tiff
                 var bad = dims.Axes.Select(a => a.Name)
                                 .Where(n => !new[] { "Channel", "Z", "Time", "FOV" }.Contains(n, StringComparer.OrdinalIgnoreCase))
                                 .ToArray();
-                string msg = bad switch
+                if (bad.Length > 0)
                 {
-                    [var x] => $"{x} is unsupported axis name.", // single unsupported axis
-                    _ => $"{string.Join(", ", bad)} are unsupported axis names." // multiple (or zero) unsupported axes
-                };
+                    // Written for the end user: the Save Failed dialog shows this text as is.
+                    string names = string.Join(", ", bad.Select(n => $"\"{n}\""));
+                    string has = bad.Length == 1 ? $"a {names} axis" : $"the axes {names}";
+                    string fix = bad.Length == 1
+                        ? "Rename that axis to Z or Time, or save in another format."
+                        : "Reduce the data to those axes, or save in another format that supports arbitrary axes.";
+                    throw new InvalidDataException(
+                        $"OME-TIFF supports only the Channel, Z, Time and FOV axes, but this data has {has}. {fix}");
+                }
 
                 throw new InvalidDataException(
                     $"Frame count expected: {cnum * znum * tnum * fovnum} " +
-                    $"(C:{cnum} × Z:{znum} × T:{tnum} × FOV:{fovnum}), but got {pageNum} frames. {msg}");
+                    $"(C:{cnum} × Z:{znum} × T:{tnum} × FOV:{fovnum}), but got {pageNum} frames.");
             }
 
             #region Index calculation for CZT sort order

@@ -420,6 +420,7 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Scale/Axis revert state ─────────────────────────────────────────
         private Button? _scaleRevertBtn;
         private CheckBox? _squarePixelsCheck;
+        private Button? _syncScalesBtn;
 
         /// <summary>
         /// Snapshot of X/Y scale and per-axis scale/unit captured when data is loaded or last saved.
@@ -1537,7 +1538,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// <see cref="RestoreViewSettings"/>) by writing directly to <c>_view</c>/<c>_rangeBar</c>,
         /// never through the VM. Without this, a freshly constructed <see cref="MatrixPlotter"/>'s
         /// ViewModel — and therefore the external-control Facade — would report stale
-        /// <c>[ObservableProperty]</c> defaults instead of the data's actual initial display state.
+        /// its own property defaults instead of the data's actual initial display state.
         /// </summary>
         private void SyncViewModelFromView()
         {
@@ -1657,6 +1658,10 @@ namespace MxPlot.UI.Avalonia.Views
 
             // Clearing removes children from the visual tree → OnDetachedFromVisualTree
             // stops any running animations cleanly.
+            // Deactivating here hides the side views without giving their room back to the window (only
+            // the freeze button's own handler shrinks it), so a view restored below finds the room still there.
+            bool orthoWasShowing = _orthoPanel.ShowRight;
+            int crosshairIX = _orthoController.CurrentIX, crosshairIY = _orthoController.CurrentIY;
             _orthoController.Deactivate();
             UnwireAllAxisSync();
             _trackerPanel.Children.Clear();
@@ -1671,7 +1676,7 @@ namespace MxPlot.UI.Avalonia.Views
             // If the new data has fewer frames than the current FrameIndex (e.g. single-frame
             // result of a "This frame only" crop replacing a multi-frame hyperstack),
             // the view would immediately attempt to render with the stale out-of-range index
-            // and throw in BitmapWriter.CheckValidity before the line below corrects it.
+            // and throw in the renderer before the line below corrects it.
 
             _view.FrameIndex = 0;
             _view.MatrixData = data;
@@ -1781,7 +1786,15 @@ namespace MxPlot.UI.Avalonia.Views
                     }
                 }
                 if (resume.FrozenAxisName != null && _axisTrackers.ContainsKey(resume.FrozenAxisName))
-                    SetOrthogonalView(resume.FrozenAxisName);
+                {
+                    _orthoViewRoomKept = orthoWasShowing;
+                    try { SetOrthogonalView(resume.FrozenAxisName); }
+                    finally { _orthoViewRoomKept = false; }
+                    // Activation puts the crosshair at the centre; a view that was on screen goes back
+                    // to the pixel it was on, clamped to the new data.
+                    if (orthoWasShowing && crosshairIX >= 0 && crosshairIY >= 0)
+                        _orthoController.MoveCrosshairTo(crosshairIX, crosshairIY);
+                }
             }
 
             RestoreViewSettings(data, restoreVR, isFirstLoad);
@@ -3229,7 +3242,17 @@ namespace MxPlot.UI.Avalonia.Views
 
             public TopLevel? Owner => _host;
 
+            public string Title => _host.Title ?? string.Empty;
+
             public IPlotWindowService WindowService => MatrixPlotterPluginRegistry.WindowService;
+
+            public IDisposable ShowSyncedMatrixPlotter(IMatrixData initial, string title,
+                Func<PlotSyncInput, CancellationToken, IMatrixData?> transform)
+            {
+                ArgumentNullException.ThrowIfNull(initial);
+                ArgumentNullException.ThrowIfNull(transform);
+                return _host.OpenPluginSyncedWindow(initial, title, transform);
+            }
 
             public int ActiveFrameIndex => _host._view.FrameIndex;
 

@@ -1,4 +1,5 @@
 ﻿using Avalonia.Media;
+using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
 using System;
 using System.Collections.Generic;
@@ -88,6 +89,12 @@ namespace MxPlot.UI.Avalonia.Overlays
                     json["p1y"] = l.P1.Y;
                     json["p2x"] = l.P2.X;
                     json["p2y"] = l.P2.Y;
+                    if (l.ProfileOrigin != LineProfileOrigin.LeftEnd)
+                        json["profileOrigin"] = l.ProfileOrigin.ToString();
+                    if (l.ProfileOrigin == LineProfileOrigin.Custom)
+                        json["originT"] = l.OriginT;
+                    if (l.ProfileInterpolation != LineProfileOption.Bilinear)
+                        json["profileInterp"] = l.ProfileInterpolation.ToString();
                     break;
 
                 case TextObject t:
@@ -123,6 +130,13 @@ namespace MxPlot.UI.Avalonia.Overlays
                 json["isFilled"] = true;
                 json["fillColor"] = FormatColor(bb.FillColor);
             }
+            if (bb is TargetingObject target)
+            {
+                if (target.Style != TargetStyle.Reticle)
+                    json["style"] = target.Style.ToString().ToLowerInvariant();
+                if (target.CenterGap != TargetingObject.DefaultCenterGap)
+                    json["centerGap"] = target.CenterGap;
+            }
         }
 
         // ── Single-object deserialization ─────────────────────────────────
@@ -153,15 +167,35 @@ namespace MxPlot.UI.Avalonia.Overlays
                 obj.SnapMode = Enum.TryParse<PixelSnapMode>(sm, true, out var sn) ? sn : PixelSnapMode.None;
             if (json["isScaledPenWidth"] != null) obj.IsScaledPenWidth = Bool(json, "isScaledPenWidth");
 
+            // Line profile settings
+            if (obj is LineObject line)
+            {
+                // The origin mode is set first: switching to Custom captures the current position,
+                // which the stored fraction then replaces.
+                if (Str(json, "profileOrigin") is { } po
+                    && Enum.TryParse<LineProfileOrigin>(po, true, out var origin))
+                    line.ProfileOrigin = origin;
+                if (json["originT"] != null) line.OriginT = Dbl(json, "originT");
+                if (Str(json, "profileInterp") is { } pi
+                    && Enum.TryParse<LineProfileOption>(pi, true, out var interp))
+                    line.ProfileInterpolation = interp;
+            }
+
             // BBox geometry
             if (obj is BoundingBoxBase bb)
             {
+                // Set before the geometry: a marker style squares the box about its centre.
+                if (bb is TargetingObject styled && Str(json, "style") is { } st
+                    && Enum.TryParse<TargetStyle>(st, true, out var targetStyle))
+                    styled.Style = targetStyle;
                 bb.X = Dbl(json, "x");
                 bb.Y = Dbl(json, "y");
                 bb.Width = Dbl(json, "w");
                 bb.Height = Dbl(json, "h");
                 if (json["isFilled"] != null) bb.IsFilled = Bool(json, "isFilled");
                 if (Str(json, "fillColor") is { } fc) bb.FillColor = ParseColor(fc);
+                if (bb is TargetingObject target && json["centerGap"] != null)
+                    target.CenterGap = Dbl(json, "centerGap");
             }
 
             // Analyzable flags

@@ -518,6 +518,52 @@ namespace MxPlot.UI.Avalonia.Controls
             }
         }
 
+        /// <summary>
+        /// Whether the axis indicator is drawn and can be dragged.
+        /// See <see cref="RenderSurface.ShowAxisIndicator"/>.
+        /// </summary>
+        public bool ShowAxisIndicator
+        {
+            get => _surface.ShowAxisIndicator;
+            set
+            {
+                _surface.ShowAxisIndicator = value;
+                _surface.InvalidateVisual();
+            }
+        }
+
+        /// <summary>
+        /// When set, draws a line at the given bitmap column, perpendicular to the axis indicator.
+        /// See <see cref="RenderSurface.CrossIndicatorPx"/>.
+        /// </summary>
+        public int? CrossIndicatorPx
+        {
+            get => _surface.CrossIndicatorPx;
+            set
+            {
+                _surface.CrossIndicatorPx = value;
+                _surface.InvalidateVisual();
+            }
+        }
+
+        /// <summary>Text label drawn near the cross indicator line (e.g. <c>"x=1.25 um"</c>).</summary>
+        public string? CrossIndicatorLabel
+        {
+            get => _surface.CrossIndicatorLabel;
+            set
+            {
+                _surface.CrossIndicatorLabel = value;
+                _surface.InvalidateVisual();
+            }
+        }
+
+        /// <summary>Fired when the user drags the cross indicator to a new bitmap-column index.</summary>
+        public event EventHandler<int>? CrossIndicatorDragged
+        {
+            add => _surface.CrossIndicatorDragged += value;
+            remove => _surface.CrossIndicatorDragged -= value;
+        }
+
         /// <summary>Text label drawn near the axis indicator line (e.g. <c>"Z=1.250 mm"</c>). Set by <see cref="OrthogonalViewController"/>.</summary>
         public string? AxisIndicatorLabel
         {

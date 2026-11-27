@@ -411,6 +411,12 @@ namespace MxPlot.Core
         (double Min, double Max) GetGlobalValueRange(out List<int> invalids, bool forceRefresh);
 
         /// <summary>
+        /// The same as <see cref="GetGlobalValueRange(out List{int}, bool)"/>, in the value mode
+        /// <paramref name="valueMode"/> (an index into <see cref="ElementType.ValueModes"/>).
+        /// </summary>
+        (double Min, double Max) GetGlobalValueRange(int valueMode, out List<int> invalids, bool forceRefresh = false);
+
+        /// <summary>
         /// Calculates the global minimum and maximum values for a specific slice of the hypercube
         /// (e.g., across all frames, but fixed to a specific index on the target axis).
         /// </summary>
@@ -486,6 +492,20 @@ namespace MxPlot.Core
         /// </param>
         /// <returns>The element value at the specified coordinates, cast to <c>double</c>.</returns>
         double GetValueAsDouble(double x, double y, int frameIndex = -1, bool interpolate = false);
+
+        /// <summary>
+        /// Returns the value at the physical position (x, y) as a double, read in the value mode
+        /// <paramref name="valueMode"/>. A primitive element type has one mode, so the mode does not matter for it.
+        /// Any other type is sampled in its own type first - interpolated by its registered interpolator when
+        /// <paramref name="interpolate"/> is <c>true</c>, the nearest element otherwise - and the mode is applied to
+        /// that result, as a line profile does.
+        /// </summary>
+        /// <param name="x">The physical X coordinate.</param>
+        /// <param name="y">The physical Y coordinate.</param>
+        /// <param name="frameIndex">The zero-based frame index. Pass <c>-1</c> to use <see cref="ActiveIndex"/>.</param>
+        /// <param name="interpolate">Whether to interpolate between the surrounding elements.</param>
+        /// <param name="valueMode">An index into <see cref="ElementType.ValueModes"/>.</param>
+        double GetValueAsDouble(double x, double y, int frameIndex, bool interpolate, int valueMode);
 
         /// <summary>
         /// Returns a read-only span containing the raw byte data for the specified frame.

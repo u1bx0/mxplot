@@ -1,0 +1,27 @@
+MxPlot for macOS (Apple Silicon) - How to launch
+================================================
+
+This app is not signed by Apple, so macOS may block it or say it is
+"damaged". Do the following once, and again after each update.
+
+1. In Finder, drag MxPlot.app into the "Applications" folder.
+   If it asks to replace an older MxPlot.app, choose "Replace".
+   (Quit MxPlot first if it is running.)
+
+2. Open Terminal.
+   (e.g. Press Cmd + Space, type "terminal", and press Return.)
+
+3. Copy the line below, paste it into Terminal, and press Return.
+
+   xattr -cr /Applications/MxPlot.app
+
+4. Open MxPlot from the Applications folder.
+
+Only do this for apps you downloaded from the official release page:
+https://github.com/u1bx0/mxplot/releases
+
+Note: Copy to /Applications is not mandatory. If you put it in a different folder, please execute "xattr -cr <location of MxPlot.app>".
+
+--------------------------------------------------
+Requirements: macOS 12.0 or later, Apple Silicon (M-series) Mac.
+No additional runtime is needed.

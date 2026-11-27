@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
@@ -324,14 +324,22 @@ namespace MxPlot.UI.Avalonia.Views
             btnRow.Children.Add(okBtn);
             btnRow.Children.Add(cancelBtn);
 
-            var panel = new StackPanel { Spacing = 4, Margin = new Thickness(16, 14, 16, 14) };
+            // The content is at the top and the buttons are at the bottom edge, so a taller dialog grows between them.
+            var top = new StackPanel { Spacing = 4 };
             if (_materializationWarning != null)
-                panel.Children.Add(_materializationWarning);
-            panel.Children.Add(mainContent);
-            panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
+                top.Children.Add(_materializationWarning);
+            top.Children.Add(mainContent);
+
+            var bottom = new StackPanel { Spacing = 4 };
+            bottom.Children.Add(ControlFactory.MakeSep(new Thickness(0, 4)));
             if (_showReplaceData)
-                panel.Children.Add(ReplaceDataCheckBox);
-            panel.Children.Add(btnRow);
+                bottom.Children.Add(ReplaceDataCheckBox);
+            bottom.Children.Add(btnRow);
+
+            var panel = new Grid { RowDefinitions = new RowDefinitions("Auto,*,Auto"), Margin = new Thickness(16, 14, 16, 14) };
+            panel.Children.Add(top);
+            Grid.SetRow(bottom, 2);
+            panel.Children.Add(bottom);
             Content = panel;
         }
     }

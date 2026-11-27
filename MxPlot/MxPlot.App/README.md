@@ -28,7 +28,7 @@ It is more than a demo. While it naturally showcases `MatrixData<T>` and the `Ma
 
 ### 📂 File Management
 - **Drag & drop** files onto the dashboard to open them instantly
-- Supports all formats registered via the plugin system: `.mxd`, `.ome.tif`, `.tif`, `.h5`, `.csv`, `.fits`, and more
+- Supports all formats registered via the plugin system: `.mxd`, `.ome.tif`, `.tif`, `.h5`, `.csv`, `.fits`, images including animated GIF / WebP, and more
 - Large file (>500 MB) dialog automatically offers **Virtual (MMF) loading** to keep memory usage low
 
 ### 🪟 Multi-Window Dashboard
@@ -66,8 +66,17 @@ It is more than a demo. While it naturally showcases `MatrixData<T>` and the `Ma
 - Paste any image from the clipboard directly as a new `MatrixData<byte>` window
 - Choose between **Grayscale** or **Color Channels** (R/G/B decomposed)
 
+### 🧮 Create Data
+- **Create Data…** in the main menu builds a new window from a formula such as `sin(x) * cos(y)`; the grid and the axes are set in the dialog
+- Add other open windows as references (`m1`, `m2`) to compute across them, e.g. `m1 - m2`; select two or more windows first to start with them as references
+- After **Create** the button becomes **Update**: change the formula, references or grid and make the same window again until it is right, then **Close**
+- **Keep updated** makes the result one frame that follows the reference windows. It is marked **fx** in the list, its inputs are tinted while it is selected, and **Edit Formula…** in its context menu changes it. It stops following when it or a reference is closed, and stays as an ordinary window
+- For a formula of one window's own data, use **Processing > Calculator** in that window; with "Sync source data" the result follows its source, and **Data > View > Edit Formula…** changes the formula afterwards
+- See the [Calculator and Formula Guide](../../docs/Calculator_Formula_Guide.md) for the syntax and examples
+
 ### 🔌 Plugin System
-- Drop a `*.dll` implementing `IMxPlotAppPlugin` next to `MxPlot.exe` — it appears in **Tools** automatically
+- Drop a `*.dll` implementing `IMxPlotAppPlugin` into a `plugins` folder — it appears in **Tools** automatically
+- **Tools → Open Add-ons Folder** shows where plugins and file-format extensions (`plugins`) and custom LUTs (`LUTs`) go: next to `MxPlot.exe` on Windows, `~/Library/Application Support/MxPlot` on macOS
 - Plugins receive the full `IMxPlotAppContext` (open datasets, selected datasets, window service)
 
 ### 🎛️ Per-Window MatrixPlotter Features
@@ -82,31 +91,40 @@ Each open window is a full `MatrixPlotter` instance from `MxPlot.UI.Avalonia`:
 | Save As | Write back to `.mxd`, `.ome.tif`, or any registered format |
 | Export PNG | Save current view as a full-resolution PNG |
 | Duplicate | Open an independent deep copy in a new window |
-| Undo / History | Step back through data modifications |
+| Calculator | New values from a formula of the window's data; optionally follows the source |
+| History / Revert | Processing steps are recorded in the metadata; a crop that replaced the data, and display and scale settings, can be reverted |
 
 ---
 
 ## Getting Started
 
-### Download (no installation required)
+### Download (no installer)
 
 Grab the latest archive from the [Releases page](https://github.com/u1bx0/mxplot/releases):
 
-| Platform | File |
-|---|---|
-| Windows x64 | `MxPlot_vX_Y_Z-win-x64.zip` |
-| macOS Apple Silicon | `MxPlot_vX_Y_Z-osx-arm64.zip` |
+| Platform | File | Requirement |
+|---|---|---|
+| Windows x64 | `MxPlot-vX_Y_Z-win-x64.zip` | [.NET 10 Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) |
+| macOS Apple Silicon | `MxPlot-vX_Y_Z-osx-arm64.zip` | None (the runtime is included) |
 
-**Windows:** Extract and double-click `MxPlot.exe`.
+**Windows:** Extract the zip and double-click `MxPlot.exe`.
 
-**macOS:** Extract the zip, then:
+> `MxPlot.exe` is not code-signed. If **Smart App Control** is on (Windows 11), it may be
+> blocked, and Windows offers no exception for individual apps. Running it then requires turning
+> Smart App Control off (Windows Security > App & browser control), which lowers protection for
+> the whole PC, so decide whether that is acceptable. See Microsoft's
+> [Smart App Control FAQ](https://support.microsoft.com/en-us/windows/smart-app-control-frequently-asked-questions-285ea03d-fa88-4d56-882e-6698afdb7003),
+> including when it can be turned on again.
 
-1. Right-click **MxPlot.app** → **Open**
-2. Click **Open** in the Gatekeeper dialog
+**macOS:** The app is not notarized by Apple, so macOS may block it or report it as damaged.
+Extract the zip, then do the following once, and again after each update:
 
-> The app is ad-hoc signed and not notarized by Apple.  
-> On first launch, use right-click → Open to bypass the Gatekeeper warning.  
-> Subsequent launches work normally via double-click.
+1. Drag `MxPlot.app` into the **Applications** folder.
+2. In Terminal, run `xattr -cr /Applications/MxPlot.app`
+3. Open MxPlot from the Applications folder.
+
+The same steps are in `READ ME FIRST - How to launch on macOS.txt` in the zip. Only do this for a copy
+downloaded from the official [Releases page](https://github.com/u1bx0/mxplot/releases).
 
 ---
 
@@ -114,10 +132,11 @@ Grab the latest archive from the [Releases page](https://github.com/u1bx0/mxplot
 
 ```bash
 git clone https://github.com/u1bx0/mxplot.git
+cd mxplot/MxPlot
 dotnet build MxPlot.App/MxPlot.App.csproj -c Release
 ```
 
-Or open `MxPlot.sln` in Visual Studio 2022/2026 and run `MxPlot.App`.
+Or open `MxPlot/MxPlot.slnx` in Visual Studio 2022/2026 and run `MxPlot.App`.
 
 ---
 
@@ -143,7 +162,7 @@ public class MyPlugin : IMxPlotAppPlugin
 }
 ```
 
-Drop the compiled `.dll` next to `MxPlot.exe` — the plugin appears under **Tools → My Analysis** automatically.
+Put the compiled `.dll` in a `plugins` folder (**Tools → Open Add-ons Folder**) and restart the app — the plugin appears under **Tools → My Analysis**.
 
 ---
 

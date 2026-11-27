@@ -15,11 +15,13 @@
     <Platforms>AnyCPU</Platforms>
   </PropertyGroup>
 
-	<ItemGroup>
-		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
-	</ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Imaging\**" />
+    <EmbeddedResource Remove="Imaging\**" />
+    <None Remove="Imaging\**" />
+  </ItemGroup>
 
 	<ItemGroup>
-	  <Folder Include="Imaging\" />
+		<None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
 	</ItemGroup>
 </Project>

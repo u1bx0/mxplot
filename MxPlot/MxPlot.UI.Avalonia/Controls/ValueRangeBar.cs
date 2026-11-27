@@ -134,9 +134,21 @@ namespace MxPlot.UI.Avalonia.Controls
         public double DisplayedMaxValue => _lastMax;
 
         /// <summary>
-        /// The actual component width to the right edge of SerachMaxButton
+        /// The distance from the left edge of the bar to the right edge of the Max search button as it lies
+        /// once both value boxes have reached <see cref="BoxWidth"/>. It does not depend on the width the bar
+        /// has now, so a host can align something with that edge however far the boxes have shrunk.
+        /// <c>NaN</c> until the bar has been laid out.
         /// </summary>
-        public double EffectiveUIComponentWidth => _searchMaxBtn is not null ? _searchMaxBtn.Bounds.Right : double.NaN;
+        public double EffectiveUIComponentWidth
+        {
+            get
+            {
+                if (_searchMaxBtn is null || _searchMaxBtn.Bounds.Width <= 0 || Content is not Control grid)
+                    return double.NaN;
+                double boxShrink = 2 * BoxWidth - (_minBox.Bounds.Width + _maxBox.Bounds.Width);
+                return grid.Margin.Left + _searchMaxBtn.Bounds.Right + boxShrink;
+            }
+        }
 
         // ── Constructor ───────────────────────────────────────────────────────
 

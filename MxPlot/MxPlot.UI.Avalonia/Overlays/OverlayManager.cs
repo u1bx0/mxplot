@@ -63,6 +63,17 @@ namespace MxPlot.UI.Avalonia.Overlays
         private Point _lastDragSnappedPos;
         private Point _dragBodyStartWorldPos;
         private Point _appliedBodyDelta;
+        // Unsnapped pointer position and snap-anchor position at the start of a body drag.
+        private Point _dragBodyStartRawPos;
+        private Point? _dragBodyStartAnchor;
+
+        private void BeginBodyDrag(OverlayObjectBase obj, Point rawWorld)
+        {
+            _dragBodyStartWorldPos = _lastMouseWorldPos;
+            _dragBodyStartRawPos = rawWorld;
+            _dragBodyStartAnchor = obj.GetSnapAnchor();
+            _appliedBodyDelta = default;
+        }
 
         /// <summary>Sticky Shift/Ctrl modifier state as tracked by OnKeyDown/OnKeyUp. Exposed for diagnostic display.</summary>
         public KeyModifiers TrackedModifiers =>
@@ -397,7 +408,9 @@ namespace MxPlot.UI.Avalonia.Overlays
                         {
                             _lastMouseWorldPos = _snap.Snap(rawWorld, obj.SnapMode);
                             _isDragging = true;
-                            if (handle != HandleType.Body)
+                            if (handle == HandleType.Body)
+                                BeginBodyDrag(obj, rawWorld);
+                            else
                                 obj.BeginResize();
                         }
                     }
@@ -418,8 +431,7 @@ namespace MxPlot.UI.Avalonia.Overlays
                     if (!obj.IsLocked)
                     {
                         _lastMouseWorldPos = _snap.Snap(rawWorld, obj.SnapMode);
-                        _dragBodyStartWorldPos = _lastMouseWorldPos;
-                        _appliedBodyDelta = default;
+                        BeginBodyDrag(obj, rawWorld);
                         _isDragging = true;
                     }
                     InvalidateVisual();
@@ -437,10 +449,7 @@ namespace MxPlot.UI.Avalonia.Overlays
                     _lastMouseWorldPos = _snap.Snap(rawWorld, obj.SnapMode);
                     _lastDragSnappedPos = _lastMouseWorldPos;
                     if (handle == HandleType.Body)
-                    {
-                        _dragBodyStartWorldPos = _lastMouseWorldPos;
-                        _appliedBodyDelta = default;
-                    }
+                        BeginBodyDrag(obj, rawWorld);
                     _isDragging = true;
 
                     if (handle != HandleType.Body)
@@ -498,6 +507,17 @@ namespace MxPlot.UI.Avalonia.Overlays
                         // This prevents axis drift when Shift-constraining with incremental deltas.
                         double totalDx = current.X - _dragBodyStartWorldPos.X;
                         double totalDy = current.Y - _dragBodyStartWorldPos.Y;
+                        if (_dragBodyStartAnchor is { } anchor0 && _activeObj.SnapMode != PixelSnapMode.None)
+                        {
+                            // Snap the anchor itself (not the pointer): where it would land if it
+                            // followed the unsnapped pointer, rounded to the grid.
+                            var wanted = new Point(
+                                anchor0.X + rawWorld.X - _dragBodyStartRawPos.X,
+                                anchor0.Y + rawWorld.Y - _dragBodyStartRawPos.Y);
+                            var snappedAnchor = _snap.Snap(wanted, _activeObj.SnapMode);
+                            totalDx = snappedAnchor.X - anchor0.X;
+                            totalDy = snappedAnchor.Y - anchor0.Y;
+                        }
 
                         double targetDx, targetDy;
                         if (_isShiftDown)
@@ -856,6 +876,17 @@ namespace MxPlot.UI.Avalonia.Overlays
         {
             var vp = GetViewport?.Invoke() ?? default;
             const double threshPx = 2.0;
+
+            // A target is created about its centre (the click), so a plain click grows it in place.
+            if (obj is TargetingObject target)
+            {
+                double w = target.Width < vp.ScreenToWorldDistX(threshPx)
+                    ? vp.ScreenToWorldDistX(DefaultCreationScreenPx) : target.Width;
+                double h = target.Height < vp.ScreenToWorldDistY(threshPx)
+                    ? vp.ScreenToWorldDistY(DefaultCreationScreenPx) : target.Height;
+                target.ResizeAboutCenter(w, h);
+                return;
+            }
 
             if (obj is BoundingBoxBase bbox)
             {

@@ -244,6 +244,33 @@ namespace MxPlot.UI.Avalonia.Views
         /// </remarks>
         public bool AutoUpdateWindowIcon { get; set; } = true;
 
+        /// <summary>
+        /// Gets or sets whether saving this window's data only writes a copy. <c>false</c> by default.
+        /// </summary>
+        /// <remarks>
+        /// Normally a successful Save As binds the window to the new file: the title becomes the file
+        /// name, the file becomes the source path, and the unsaved-changes state is cleared. With
+        /// this set the file is written and the window stays as it was. Intended for a host that
+        /// repurposes a <see cref="MatrixPlotter"/> as a live viewer (e.g. a camera preview), whose
+        /// data never belongs to a file; like <see cref="AllowDataReplace"/>, it is a per-window,
+        /// UI-level setting.
+        /// </remarks>
+        public bool AlwaysSaveAsCopy { get; set; }
+
+        /// <summary>
+        /// Gets or sets the file extension (e.g. <c>".tif"</c>) of the format that the Save As dialog
+        /// offers first until a file has been saved. <see langword="null"/> by default, which chooses
+        /// by the axes of the data: ImageJ-compatible TIFF when they fit an ImageJ hyperstack, then
+        /// OME-TIFF, then <c>.mxd</c>. Applies to all windows in the process.
+        /// </summary>
+        /// <remarks>
+        /// This only seeds the choice. After a file has been saved, the format of that file is offered
+        /// first in every window, so a type picked by the user wins over this value. A window whose
+        /// title ends with a known extension (a file opened or saved in that window) offers that
+        /// file's format first. An extension that no writer is registered for is ignored.
+        /// </remarks>
+        public static string? DefaultSaveFormat { get; set; }
+
         // ActiveIndex is deliberately NOT mirrored here: MatrixData.ActiveIndex already is the
         // canonical Model-layer source of truth (bounds-checked, has its own ActiveIndexChanged
         // event) — see MatrixPlotter_ExternalBinding_Design.md. Use plotter.MatrixData.ActiveIndex

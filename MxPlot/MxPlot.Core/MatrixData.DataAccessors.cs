@@ -646,6 +646,17 @@ namespace MxPlot.Core
         }
 
 
+        /// <inheritdoc/>
+        public double GetValueAsDouble(double x, double y, int frameIndex, bool interpolate, int valueMode)
+        {
+            // A primitive type has one value mode.
+            if (_isSupportedPrimitive) return GetValueAsDouble(x, y, frameIndex, interpolate);
+
+            // Any other type is sampled in T - interpolated by the registered interpolator, as GetValue does -
+            // and the value mode is applied to that result, as in a line profile.
+            return NumericConverter.ToDouble(GetValue(x, y, frameIndex, interpolate), valueMode);
+        }
+
         /// <summary>
         /// Set the value at the point close to the specified (x, y) coordinate.
         /// </summary>

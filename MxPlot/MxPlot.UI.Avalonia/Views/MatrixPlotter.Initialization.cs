@@ -101,7 +101,48 @@ namespace MxPlot.UI.Avalonia.Views
                 Orientation = Orientation.Vertical,
                 IsVisible = false,
                 Margin = new Thickness(0, 1, 0, 1),
+                // Its width is set explicitly (see UpdateTrackerWidth), so it must not stretch.
+                HorizontalAlignment = HorizontalAlignment.Left,
             };
+        }
+
+        /// <summary>The widest the LUT selector's combo box gets; it shrinks first when the window is narrow.</summary>
+        private const double LutComboMaxWidth = 97;
+
+        // Until the LUT header has been laid out and measured: the width at which the Freeze button's right
+        // edge meets the right edge of the value range bar's Max search button.
+        private double _trackerMaxWidth = 490;
+
+        /// <summary>
+        /// Sets the width of the axis trackers: the window's width, but no wider than
+        /// <see cref="_trackerMaxWidth"/>, so the Freeze button does not drift far from the controls above it.
+        /// </summary>
+        private void UpdateTrackerWidth()
+        {
+            double available = _orthoPanel.Bounds.Width;
+            if (available <= 0) return;
+            _trackerPanel.Width = Math.Min(available, _trackerMaxWidth);
+        }
+
+        /// <summary>
+        /// Derives <see cref="_trackerMaxWidth"/> from the LUT header: where the right edge of the value range
+        /// bar's Max search button lies once the header has all the room it can use (the LUT combo and the value
+        /// boxes at full width), plus the tracker's own edge margin, so the Freeze button's right edge lines up
+        /// with it. Skipped while the header is not shown (Composite mode); the last measured value stays.
+        /// </summary>
+        private void MeasureTrackerMaxWidth()
+        {
+            // IsEffectivelyVisible is false once the bar has left the visual tree, and TranslatePoint
+            // then has no common ancestor with the panel and returns null.
+            if (!_rangeBar.IsEffectivelyVisible || _rangeBar.Bounds.Width <= 0) return;
+            double barEdge = _rangeBar.EffectiveUIComponentWidth;
+            if (double.IsNaN(barEdge)) return;
+            if (_rangeBar.TranslatePoint(default, _orthoPanel) is not { } origin) return;
+
+            double maxWidth = origin.X + (LutComboMaxWidth - _lutSelector.ComboWidth) + barEdge + AxisTracker.EdgeMargin;
+            if (Math.Abs(maxWidth - _trackerMaxWidth) < 0.5) return;
+            _trackerMaxWidth = maxWidth;
+            UpdateTrackerWidth();
         }
 
         /// <summary>
@@ -113,7 +154,7 @@ namespace MxPlot.UI.Avalonia.Views
             _lutSelector = new LutSelector
             {
                 CompactMode = true,
-                ComboWidth = 97,
+                ComboWidth = LutComboMaxWidth,
             };
         }
 
@@ -393,7 +434,7 @@ namespace MxPlot.UI.Avalonia.Views
                 const double fixedW = 26 + 22 + 22 + 4;
                 const double labelW = 42;
                 const double rangeMin = 240;
-                double comboW = Math.Clamp(e.NewSize.Width - fixedW - labelW - rangeMin, 0, 97);
+                double comboW = Math.Clamp(e.NewSize.Width - fixedW - labelW - rangeMin, 0, LutComboMaxWidth);
                 _lutSelector.ComboWidth = comboW;
             };
 
@@ -535,6 +576,10 @@ namespace MxPlot.UI.Avalonia.Views
             dock.Children.Add(_orthoPanel);
 
             _orthoPanel.SetTopPanel(_trackerPanel);
+            _orthoPanel.SizeChanged += (_, _) => UpdateTrackerWidth();
+            // The header's controls settle after the window's size changes (the LUT combo and the value
+            // boxes shrink first), so measure once each layout pass has finished.
+            _rangeBar.LayoutUpdated += (_, _) => MeasureTrackerMaxWidth();
             //_contentBorder = new Border { Child = dock };
 
             var root = new Grid();
@@ -1023,37 +1068,36 @@ namespace MxPlot.UI.Avalonia.Views
                 if (WindowState == WindowState.Normal) Height += delta;
             };
 
-            _orthoPanel.AutoResizeBottomRequested += () =>
+            // Expand and shrink share one target (OrthogonalPanel.BottomFitHeight / RightFitWidth).
+            // Growth is clamped to the screen; shrinking only ever moves toward the target.
+            void FitBottom(bool shrink)
             {
                 if (WindowState != WindowState.Normal) return;
-                var (_, bmpH) = _orthoPanel.BottomView.GetEffectiveBmpDims();
-                int zCount = _orthoPanel.BottomView.MatrixData?.YCount ?? 1;
-                double oneDip = zCount > 0 ? bmpH / zCount : 50.0;
-                double margin = Math.Max(oneDip, 50.0);
-                double delta = bmpH + margin - _orthoPanel.BottomView.Bounds.Height;
-                if (delta <= 0.5) return;
+                double delta = _orthoPanel.BottomFitHeight - _orthoPanel.BottomView.Bounds.Height;
+                if (shrink ? delta >= -0.5 : delta <= 0.5) return;
                 double newH = Height + delta;
                 var screen = Screens?.ScreenFromWindow(this);
-                if (screen != null)
+                if (screen != null && delta > 0)
                     newH = Math.Min(newH, (screen.WorkingArea.Bottom - Position.Y) / screen.Scaling);
                 Height = newH;
-            };
+            }
 
-            _orthoPanel.AutoResizeRightRequested += () =>
+            void FitRight(bool shrink)
             {
                 if (WindowState != WindowState.Normal) return;
-                var (bmpW, _) = _orthoPanel.RightView.GetEffectiveBmpDims();
-                int zCount = _orthoPanel.RightView.MatrixData?.YCount ?? 1;
-                double oneDip = zCount > 0 ? bmpW / zCount : 50.0;
-                double margin = Math.Max(oneDip, 50.0);
-                double delta = bmpW + margin - _orthoPanel.RightView.Bounds.Width;
-                if (delta <= 0.5) return;
+                double delta = _orthoPanel.RightFitWidth - _orthoPanel.RightView.Bounds.Width;
+                if (shrink ? delta >= -0.5 : delta <= 0.5) return;
                 double newW = Width + delta;
                 var screen = Screens?.ScreenFromWindow(this);
-                if (screen != null)
+                if (screen != null && delta > 0)
                     newW = Math.Min(newW, (screen.WorkingArea.Right - Position.X) / screen.Scaling);
                 Width = newW;
-            };
+            }
+
+            _orthoPanel.AutoResizeBottomRequested += () => FitBottom(false);
+            _orthoPanel.AutoResizeRightRequested += () => FitRight(false);
+            _orthoPanel.AutoShrinkBottomRequested += () => FitBottom(true);
+            _orthoPanel.AutoShrinkRightRequested += () => FitRight(true);
 
             _orthoPanel.AutoResizeMainRequested += () =>
             {

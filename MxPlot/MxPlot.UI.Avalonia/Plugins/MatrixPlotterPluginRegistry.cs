@@ -3,6 +3,7 @@ using MxPlot.Core;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 
 namespace MxPlot.UI.Avalonia.Plugins
@@ -72,26 +73,44 @@ namespace MxPlot.UI.Avalonia.Plugins
             if (!Directory.Exists(pluginsDir)) return;
             foreach (var dll in Directory.GetFiles(pluginsDir, "*.dll", SearchOption.AllDirectories))
             {
-                try
-                {
-                    var asm = Assembly.LoadFrom(dll);
-                    foreach (var type in asm.GetExportedTypes())
-                    {
-                        if (!type.IsClass || type.IsAbstract) continue;
-                        if (typeof(IMatrixPlotterPlugin).IsAssignableFrom(type)
-                            && Activator.CreateInstance(type) is IMatrixPlotterPlugin plugin)
-                        {
-                            AddPlugin(plugin);
-                        }
-                        if (typeof(IRenderExportPlugin).IsAssignableFrom(type)
-                            && Activator.CreateInstance(type) is IRenderExportPlugin ep)
-                        {
-                            AddExportPlugin(ep);
-                        }
-                    }
-                }
+                try { LoadFromAssembly(Assembly.LoadFrom(dll)); }
                 catch { /* skip unloadable / incompatible DLLs */ }
             }
+        }
+
+        /// <summary>
+        /// Instantiates every exported class of <paramref name="assembly"/> that implements
+        /// <see cref="IMatrixPlotterPlugin"/> or <see cref="IRenderExportPlugin"/>, and registers it.
+        /// A type that is already registered is not registered again, so the same assembly can be
+        /// offered more than once. An incompatible assembly is silently skipped.
+        /// </summary>
+        /// <returns>The number of plugins registered by this call.</returns>
+        public static int LoadFromAssembly(Assembly assembly)
+        {
+            int count = 0;
+            try
+            {
+                foreach (var type in assembly.GetExportedTypes())
+                {
+                    if (!type.IsClass || type.IsAbstract) continue;
+                    if (typeof(IMatrixPlotterPlugin).IsAssignableFrom(type)
+                        && !_plugins.Any(p => p.GetType() == type)
+                        && Activator.CreateInstance(type) is IMatrixPlotterPlugin plugin)
+                    {
+                        AddPlugin(plugin);
+                        count++;
+                    }
+                    if (typeof(IRenderExportPlugin).IsAssignableFrom(type)
+                        && !_exportPlugins.Any(p => p.GetType() == type)
+                        && Activator.CreateInstance(type) is IRenderExportPlugin ep)
+                    {
+                        AddExportPlugin(ep);
+                        count++;
+                    }
+                }
+            }
+            catch { /* skip an unloadable / incompatible assembly */ }
+            return count;
         }
 
         // ── Default IPlotWindowService ────────────────────────────────────────

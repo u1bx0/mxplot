@@ -59,6 +59,9 @@ namespace MxPlot.UI.Avalonia.Views
             // Refresh Scale tab to reflect any changes from sync operations
             // (RefreshScaleTab is lighter than RefreshInfoTab as it skips metadata tab refresh)
             RefreshScaleTab();
+            // A window whose data is replaced on every update shows metadata of an instance that is long
+            // gone unless the Metadata tab is rebuilt too.
+            if (ReceivesNewDataInstances) RefreshMetaTab();
 
             _menuPanel.IsVisible = true;
             hamburgerBtn.Background = Brushes.LightGray;
@@ -309,7 +312,7 @@ namespace MxPlot.UI.Avalonia.Views
         /// (already translated into the OverlayLayer's coordinate space), backed by
         /// <paramref name="expanders"/> -- a supplier rather than a fixed list, since the flyout
         /// is shared across tabs and a caller's own expander list may still be growing (or be
-        /// cleared and refilled, e.g. by RebuildPluginsGroup) after this call.
+        /// cleared and refilled, e.g. by RebuildPluginsTab) after this call.
         /// </summary>
         private void ShowGroupsFlyout(Point overlayPosition, Func<IEnumerable<Action<bool>>> expanders)
         {
@@ -616,6 +619,14 @@ namespace MxPlot.UI.Avalonia.Views
                     + "It keeps its own display settings, so you can, for example, show a Complex image's phase next to its magnitude.",
                     icon: MenuIcons.Link),
             };
+            // A window that follows its source with editable settings (e.g. a Calculator formula).
+            if (LinkedViewPropertiesLabel is { } linkedPropertiesLabel)
+            {
+                viewItems.Add(ControlFactory.MakeChildMenuItem(linkedPropertiesLabel,
+                    ActAsync(() => EditLinkedViewPropertiesAsync()),
+                    "Changes what this window computes from its source. The window is recomputed at once.",
+                    icon: MenuIcons.Edit));
+            }
             dataItems.Children.Add(ControlFactory.MakeMenuGroup("View", [.. viewItems], out var setViewExpanded, icon: MenuIcons.Eye));
             dataGroupExpanders.Add(setViewExpanded);
 
@@ -634,9 +645,9 @@ namespace MxPlot.UI.Avalonia.Views
             //NOTE: These are placeholders for potential future features, currently disabled until implemented
             if (_currentData?.FrameCount > 1)
             {
-                processingItems.Add(ControlFactory.MakeChildMenuItem("Reorder", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));
-                processingItems.Add(ControlFactory.MakeChildMenuItem("Extract", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));
-                processingItems.Add(ControlFactory.MakeChildMenuItem("Select", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.AutoFix, enabled:false));
+                processingItems.Add(ControlFactory.MakeChildMenuItem("Reorder", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.Wand, enabled:false));
+                processingItems.Add(ControlFactory.MakeChildMenuItem("Extract", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.Wand, enabled:false));
+                processingItems.Add(ControlFactory.MakeChildMenuItem("Select", Act(() => { }), "(Not yet implemented)", icon: MenuIcons.Wand, enabled:false));
             }
             */
 
@@ -668,8 +679,8 @@ namespace MxPlot.UI.Avalonia.Views
             // custom _groupsFlyout (OverlayLayer + OnMenuLightDismiss), not Avalonia's own
             // ContextMenu/Popup, which does not coordinate with this panel's own dismiss handling
             // (see the "Groups flyout" section's own remarks). expanders is a supplier rather than
-            // a fixed list so a caller (the Processing tab) can back it with a list that's still
-            // being appended to (or cleared and refilled, e.g. by RebuildPluginsGroup) after this
+            // a fixed list so a caller (the Plugins tab) can back it with a list that's still
+            // being appended to (or cleared and refilled, e.g. by RebuildPluginsTab) after this
             // is wired. PointerReleased (not Pressed) mirrors the hamburger button's own Click:
             // OnMenuLightDismiss reacts to PointerPressed, so opening on Released avoids the flyout
             // dismissing itself on the very click that opened it, before layout gives it real bounds.
@@ -720,14 +731,10 @@ namespace MxPlot.UI.Avalonia.Views
 
             // ── Processing tab ───────────────────────────────────────────────────
             var processingTabBody = new StackPanel { Spacing = 1, Margin = new Thickness(4, 6, 4, 4) };
-            // Split in two: the four groups below are built once, but the Plugins group is rebuilt
-            // (RebuildPluginsGroup) whenever the plugin registry changes, so its own expanders must
-            // be cleared and refilled in step rather than appended forever.
-            var processingStaticExpanders = new List<Action<bool>>();
-            var processingPluginExpanders = new List<Action<bool>>();
+            var processingExpanders = new List<Action<bool>>();
             processingTabBody.Children.Add(
                 ControlFactory.MakeMenuGroup("Geometry & Dimensions", [.. processingItems], out var setGeometryExpanded, icon: MenuIcons.Processing));
-            processingStaticExpanders.Add(setGeometryExpanded);
+            processingExpanders.Add(setGeometryExpanded);
 
             // Groups of commands from the catalog: the menu only wires an item to its command.
             Control[] CommandItems(string group) => CommandCatalog.InGroup(group, this)
@@ -737,51 +744,29 @@ namespace MxPlot.UI.Avalonia.Views
 
             processingTabBody.Children.Add(
                 ControlFactory.MakeMenuGroup("Filters", CommandItems("Filters"), out var setFiltersExpanded, icon: MenuIcons.Processing));
-            processingStaticExpanders.Add(setFiltersExpanded);
+            processingExpanders.Add(setFiltersExpanded);
 
             processingTabBody.Children.Add(
                 ControlFactory.MakeMenuGroup("Intensity", CommandItems("Intensity"), out var setIntensityExpanded, icon: MenuIcons.Processing));
-            processingStaticExpanders.Add(setIntensityExpanded);
+            processingExpanders.Add(setIntensityExpanded);
 
             processingTabBody.Children.Add(
                 ControlFactory.MakeMenuGroup("Frequency", CommandItems("Frequency"), out var setFrequencyExpanded, icon: MenuIcons.Processing));
-            processingStaticExpanders.Add(setFrequencyExpanded);
+            processingExpanders.Add(setFrequencyExpanded);
 
-            var pluginsContainer = new StackPanel();
-            void RebuildPluginsGroup()
+            // The Calculator is a feature of its own rather than one more operation, so it is not in a group.
+            var standaloneCommands = CommandCatalog.InGroup("Calculator", this).ToList();
+            if (standaloneCommands.Count > 0)
             {
-                pluginsContainer.Children.Clear();
-                processingPluginExpanders.Clear();
-                var plugs = MatrixPlotterPluginRegistry.Plugins;
-                if (plugs.Count == 0) return;
-
-                Action PlugRun(IMatrixPlotterPlugin p) => () =>
+                processingTabBody.Children.Add(ControlFactory.MakeSep(new Thickness(4, 6, 4, 2)));
+                foreach (var c in standaloneCommands)
                 {
-                    HideMenuPanel();
-                    try   { p.Run(CreatePluginContext()); }
-                    catch { /* silently absorb plugin errors */ }
-                };
-
-                var items = new List<Control>();
-                foreach (var plugin in plugs.Where(p => string.IsNullOrEmpty(p.GroupName)))
-                {
-                    var mi = ControlFactory.MakeChildMenuItem(plugin.CommandName, PlugRun(plugin),
-                        plugin.Description, icon: MenuIcons.AutoFix);
-                    items.Add(mi);
+                    var item = ControlFactory.MakeMenuItem(c.Label, ActAsync(() => c.Command.RunAsync(this)), icon: c.Icon);
+                    ToolTip.SetTip(item, c.Hint);
+                    processingTabBody.Children.Add(item);
                 }
-                foreach (var grp in plugs.Where(p => !string.IsNullOrEmpty(p.GroupName)).GroupBy(p => p.GroupName!))
-                {
-                    var gi = grp.Select(p => (Control)ControlFactory.MakeChildMenuItem(
-                        p.CommandName, PlugRun(p), p.Description, icon: MenuIcons.AutoFix)).ToArray();
-                    items.Add(ControlFactory.MakeMenuGroup(grp.Key, gi, out var setSubgroupExpanded));
-                    processingPluginExpanders.Add(setSubgroupExpanded);
-                }
-                pluginsContainer.Children.Add(
-                    ControlFactory.MakeMenuGroup("Plugins", [.. items], out var setPluginsExpanded, icon: MenuIcons.Plugin));
-                processingPluginExpanders.Add(setPluginsExpanded);
             }
-            RebuildPluginsGroup();
-            processingTabBody.Children.Add(pluginsContainer);
+
             var processingTabItem = new TabItem
             {
                 Header  = TabHdr("Processing", MenuIcons.Processing),
@@ -793,9 +778,61 @@ namespace MxPlot.UI.Avalonia.Views
                     HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 },
             };
-            WireGroupsFlyout(processingTabItem, () => processingStaticExpanders.Concat(processingPluginExpanders));
+            WireGroupsFlyout(processingTabItem, () => processingExpanders);
             tabControl.Items.Add(processingTabItem);
-            void onPluginsChanged() => RebuildPluginsGroup();
+
+            // ── Plugins tab ──────────────────────────────────────────────────────
+            // Present only while at least one plugin is registered. The group inside is rebuilt
+            // The content is rebuilt (RebuildPluginsTab) whenever the plugin registry changes, so the
+            // group expanders are cleared and refilled in step rather than appended forever.
+            var pluginsTabBody = new StackPanel { Spacing = 1, Margin = new Thickness(4, 6, 4, 4) };
+            var pluginExpanders = new List<Action<bool>>();
+            var pluginsTabItem = new TabItem
+            {
+                Header  = TabHdr("Plugins", MenuIcons.Plugin),
+                Padding = new Thickness(0),
+                Content = new ScrollViewer
+                {
+                    Content = pluginsTabBody,
+                    VerticalScrollBarVisibility   = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                },
+            };
+            WireGroupsFlyout(pluginsTabItem, () => pluginExpanders);
+            void RebuildPluginsTab()
+            {
+                pluginsTabBody.Children.Clear();
+                pluginExpanders.Clear();
+                var plugs = MatrixPlotterPluginRegistry.Plugins;
+                pluginsTabItem.IsVisible = plugs.Count > 0;
+                if (plugs.Count == 0) return;
+
+                Action PlugRun(IMatrixPlotterPlugin p) => () =>
+                {
+                    HideMenuPanel();
+                    try   { p.Run(CreatePluginContext()); }
+                    catch { /* silently absorb plugin errors */ }
+                };
+
+                // Ungrouped plugins sit directly in the tab; a GroupName makes a group of its own.
+                foreach (var plugin in plugs.Where(p => string.IsNullOrEmpty(p.GroupName)))
+                {
+                    var mi = ControlFactory.MakeMenuItem(plugin.CommandName, PlugRun(plugin), icon: MenuIcons.Wand);
+                    if (!string.IsNullOrEmpty(plugin.Description)) ToolTip.SetTip(mi, plugin.Description);
+                    pluginsTabBody.Children.Add(mi);
+                }
+                foreach (var grp in plugs.Where(p => !string.IsNullOrEmpty(p.GroupName)).GroupBy(p => p.GroupName!))
+                {
+                    var gi = grp.Select(p => (Control)ControlFactory.MakeChildMenuItem(
+                        p.CommandName, PlugRun(p), p.Description, icon: MenuIcons.Wand)).ToArray();
+                    pluginsTabBody.Children.Add(
+                        ControlFactory.MakeMenuGroup(grp.Key, gi, out var setGroupExpanded, icon: MenuIcons.Plugin));
+                    pluginExpanders.Add(setGroupExpanded);
+                }
+            }
+            RebuildPluginsTab();
+            tabControl.Items.Add(pluginsTabItem);
+            void onPluginsChanged() => RebuildPluginsTab();
             MatrixPlotterPluginRegistry.PluginsChanged += onPluginsChanged;
             void onExportPluginsChanged() { InvalidateMenuPanel(); }
             MatrixPlotterPluginRegistry.ExportPluginsChanged += onExportPluginsChanged;
@@ -876,8 +913,8 @@ namespace MxPlot.UI.Avalonia.Views
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
                 Padding = new Thickness(3, 0, 0, 0),
-                Width = 380,
-                Height = 410,
+                Width = 420,
+                Height = 440,
                 MinWidth = 220,
                 MinHeight = 120,
                 ClipToBounds = true,

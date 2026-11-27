@@ -1,4 +1,4 @@
-# MxPlot.App.Plugins
+﻿# MxPlot.App.Plugins
 
 **Plugin contract for extending MxPlot.App's Tools menu**
 
@@ -47,8 +47,8 @@ collected under a shared submenu in the Tools menu instead of sitting at the top
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="MxPlot" Version="0.6.0" />
-  <PackageReference Include="MxPlot.App.Plugins" Version="0.6.0" />
+  <PackageReference Include="MxPlot" Version="0.7.0" />
+  <PackageReference Include="MxPlot.App.Plugins" Version="0.7.0" />
 </ItemGroup>
 ```
 

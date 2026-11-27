@@ -110,23 +110,24 @@ namespace MxPlot.UI.Avalonia.Rendering
             int magenta = 0xFF00FF; // Magenta for missing values
             //int black = 0x000000; // Black for missing values
             int brawn = 0x13458B; // Brown for missing values
+            int gray = 0x323232; // Dim gray for missing values
 
             // Create built-in LUTs
-            Grayscale = new LookupTable("Grayscale", CreateGrayscale(DefaultLevels), red);
+            Grayscale = new LookupTable("Grayscale", CreateGrayscale(DefaultLevels), brawn);
             Hot = new LookupTable("Hot", CreateHot(DefaultLevels), blue);
             OrangeHot = new LookupTable("OrangeHot", CreateOrangeHot(DefaultLevels), blue);
             GreenHot = new LookupTable("GreenHot", CreateGreenHot(DefaultLevels), red);
-            Profiler = new LookupTable("Profiler", CreateProfiler(DefaultLevels), red);
+            Profiler = new LookupTable("Profiler", CreateProfiler(DefaultLevels), brawn);
             Spectrum = new LookupTable("Spectrum", CreateSpectrum(DefaultLevels), brawn);
             Cold = new LookupTable("Cold", CreateCold(DefaultLevels), red);
-            Jet = new LookupTable("Jet", CreateJet(DefaultLevels), magenta);
-            Turbo = new LookupTable("Turbo", CreateTurbo(DefaultLevels), magenta);
-            CoolWarm = new LookupTable("CoolWarm", CreateCoolWarm(DefaultLevels), green);
-            Phase = new LookupTable("Phase", CreatePhase(DefaultLevels), green);
-            Viridis = new LookupTable("Viridis", CreateViridis(DefaultLevels), magenta);
+            Jet = new LookupTable("Jet", CreateJet(DefaultLevels), gray);
+            Turbo = new LookupTable("Turbo", CreateTurbo(DefaultLevels), gray);
+            CoolWarm = new LookupTable("CoolWarm", CreateCoolWarm(DefaultLevels), gray);
+            Phase = new LookupTable("Phase", CreatePhase(DefaultLevels), gray);
+            Viridis = new LookupTable("Viridis", CreateViridis(DefaultLevels), gray);
             var hilo = CreateGrayscale(DefaultLevels);
             hilo[0] = blue; hilo[hilo.Length - 1] = red;
-            HiLo = new LookupTable("HiLo", hilo, green);
+            HiLo = new LookupTable("HiLo", hilo, brawn);
 
             // Register them in the dictionary
             Register(Grayscale);
@@ -244,10 +245,10 @@ namespace MxPlot.UI.Avalonia.Rendering
         /// </summary>
         /// <remarks>Empty lines and lines starting with '#' are ignored before processing. The first line is regarded as the name of LUT. The second 
         /// line must specify the number of color levels and may include an optional missing color value in hexadecimal
-        /// format.
+        /// RRGGBB format, read the same way as a hex color line.
         /// <code>
         /// Name
-        /// 256 [, optional missingColor] # color is int32
+        /// 256 [, optional missingColor] # missingColor is RRGGBB hex
         /// 0, 0, 0
         /// ....
         /// </code>
@@ -275,7 +276,7 @@ namespace MxPlot.UI.Avalonia.Rendering
                 // Header: levels, optional missingColor
                 var header = lines[1].Split(',', StringSplitOptions.TrimEntries);
                 int levels = int.Parse(header[0]);
-                int missingColor = header.Length > 1 ? Convert.ToInt32(header[1], 16) : 0;
+                int missingColor = header.Length > 1 ? ParseHexRgb(header[1]) : 0;
 
                 // Read color lines (may be fewer or more)
                 int colorLines = lines.Length - 2;
@@ -319,12 +320,19 @@ namespace MxPlot.UI.Avalonia.Rendering
             }
             else
             {
-                int rgb = Convert.ToInt32(s, 16);
-                int r = (rgb >> 16) & 0xFF;
-                int g = (rgb >> 8) & 0xFF;
-                int b = rgb & 0xFF;
-                return r | (g << 8) | (b << 16);
+                return ParseHexRgb(s);
             }
+        }
+
+        // Reads "RRGGBB" text and packs it the way the LookupTable constructor expects
+        // (R | (G << 8) | (B << 16)), so a color reads the same wherever it appears in a .mlut.
+        private static int ParseHexRgb(string s)
+        {
+            int rgb = Convert.ToInt32(s.Trim(), 16);
+            int r = (rgb >> 16) & 0xFF;
+            int g = (rgb >> 8) & 0xFF;
+            int b = rgb & 0xFF;
+            return r | (g << 8) | (b << 16);
         }
 
         // -------------------------

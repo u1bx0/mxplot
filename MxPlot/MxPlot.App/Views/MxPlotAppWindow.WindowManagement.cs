@@ -3,6 +3,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.VisualTree;
 using MxPlot.App.ViewModels;
+using MxPlot.UI.Avalonia.Views;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -163,6 +164,37 @@ namespace MxPlot.App.Views
                 var renameItem = new MenuItem { Header = "Rename" };
                 renameItem.Click += (_, _) => clicked.RenameCommand.Execute(null);
                 menu.Items.Add(renameItem);
+            }
+
+            // ── Edit what a window that follows its source computes (e.g. a Calculator formula) ──
+            if (!multi && clicked.IsWindowVisible
+                && clicked.Window is MatrixPlotter { LinkedViewPropertiesLabel: { } editLabel } follower)
+            {
+                var editItem = new MenuItem { Header = editLabel };
+                editItem.Click += async (_, _) => await follower.EditLinkedViewPropertiesAsync();
+                menu.Items.Add(editItem);
+            }
+
+            // ── Edit the formula of a result that is kept up to date from other windows ──
+            if (!multi && clicked.IsWindowVisible
+                && clicked.Window is MatrixPlotter liveResult && _liveCalculations.TryGetValue(liveResult, out var liveCalc))
+            {
+                var editLive = new MenuItem { Header = "Edit Formula…" };
+                editLive.Click += (_, _) => OpenCreateDataDialog(null, liveCalc);
+                menu.Items.Add(editLive);
+            }
+
+            // ── Create Data from the selected windows (m1, m2, ...) ────────────────
+            if (multi)
+            {
+                var plotters = selected.Select(m => m.Window).OfType<MatrixPlotter>().ToList();
+                if (plotters.Count >= 2)
+                {
+                    var createItem = new MenuItem { Header = "Create Data from Selected…" };
+                    createItem.Click += (_, _) => OpenCreateDataDialog(plotters);
+                    menu.Items.Add(createItem);
+                    menu.Items.Add(new Separator());
+                }
             }
 
             // ── Sort by Name (scoped to the clicked item's sibling group only) ─────

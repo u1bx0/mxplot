@@ -614,6 +614,15 @@ namespace MxPlot.UI.Avalonia.Controls
 
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
             _panel.ProjectionSelector.SelectionChanged += OnProjectionSelectionChanged;
+            _panel.ProjectionSelector.ShowCrosshairLinesChanged -= OnShowCrosshairLinesChanged;
+            _panel.ProjectionSelector.ShowCrosshairLinesChanged += OnShowCrosshairLinesChanged;
+            _panel.ProjectionSelector.ShowAxisIndicatorChanged -= OnShowAxisIndicatorChanged;
+            _panel.ProjectionSelector.ShowAxisIndicatorChanged += OnShowAxisIndicatorChanged;
+            ApplyAxisIndicatorVisibility();
+            _panel.BottomView.CrossIndicatorDragged -= OnBottomCrossIndicatorDragged;
+            _panel.BottomView.CrossIndicatorDragged += OnBottomCrossIndicatorDragged;
+            _panel.RightView.CrossIndicatorDragged -= OnRightCrossIndicatorDragged;
+            _panel.RightView.CrossIndicatorDragged += OnRightCrossIndicatorDragged;
 
             _panel.MainView.ShowCrosshair = true;
             ApplyCrosshairVisibility();
@@ -664,6 +673,12 @@ namespace MxPlot.UI.Avalonia.Controls
             _axisIndicatorDragEndedHandlerBottom = null;
             _axisIndicatorDragEndedHandlerRight  = null;
             _panel.ProjectionSelector.SelectionChanged -= OnProjectionSelectionChanged;
+            _panel.ProjectionSelector.ShowCrosshairLinesChanged -= OnShowCrosshairLinesChanged;
+            _panel.ProjectionSelector.ShowAxisIndicatorChanged -= OnShowAxisIndicatorChanged;
+            _panel.BottomView.CrossIndicatorDragged -= OnBottomCrossIndicatorDragged;
+            _panel.RightView.CrossIndicatorDragged -= OnRightCrossIndicatorDragged;
+            _panel.BottomView.CrossIndicatorPx = null;
+            _panel.RightView.CrossIndicatorPx = null;
             _panel.ProjectionSelector.UpdateProjectedDataAvailability(false);
             _panel.MainView.ShowCrosshair = false;
             _panel.MainView.AxisIndicatorPx = null;
@@ -858,6 +873,12 @@ namespace MxPlot.UI.Avalonia.Controls
         }
 
         /// <summary>
+        /// Moves the crosshair to the pixel (<paramref name="ix"/>, <paramref name="iy"/>), clamped to the
+        /// data, and refreshes the side views. Has no effect while the orthogonal view is not active.
+        /// </summary>
+        public void MoveCrosshairTo(int ix, int iy) => MoveCrosshairToIndex(ix, iy);
+
+        /// <summary>
         /// Re-anchors the crosshair to the current data scale after XY or axis scale changes.
         /// Clamps the stored pixel indices to the current data dimensions, recomputes the
         /// data-space crosshair position, refreshes the axis indicator labels on the side views,
@@ -882,6 +903,7 @@ namespace MxPlot.UI.Avalonia.Controls
 
             _currentIX = ix;
             _currentIY = iy;
+            UpdateCrossIndicators();
             UpdateFrameIndicator();
             UpdateSlicesAsync(xChanged: true, yChanged: true);
         }
@@ -1143,6 +1165,78 @@ namespace MxPlot.UI.Avalonia.Controls
             bool yChanged = iy != _currentIY;
             _currentIX = ix;
             _currentIY = iy;
+            UpdateCrossIndicators();
+            UpdateSlicesAsync(xChanged, yChanged);
+        }
+
+        private void OnShowCrosshairLinesChanged(object? sender, bool show) => UpdateCrossIndicators();
+
+        private void OnShowAxisIndicatorChanged(object? sender, bool show) => ApplyAxisIndicatorVisibility();
+
+        // "Show axis indicator" governs every indicator line of the side views, the crosshair ones included.
+        private void ApplyAxisIndicatorVisibility()
+        {
+            bool show = _panel.ProjectionSelector.ShowAxisIndicator;
+            _panel.BottomView.ShowAxisIndicator = show;
+            _panel.RightView.ShowAxisIndicator = show;
+            UpdateCrossIndicators();
+        }
+
+        // The XZ view's columns run along X and the ZY view's columns along Y (array order,
+        // YMin first), so the crosshair's pixel indices are the column indices directly.
+        private void UpdateCrossIndicators()
+        {
+            var md = _data;
+            bool enabled = md != null && _currentIX >= 0 && _currentIY >= 0
+                        && _panel.ProjectionSelector.ShowAxisIndicator
+                        && _panel.ProjectionSelector.ShowCrosshairLines;
+            // Same rule as the main-view crosshair: the X-Z projection collapses Y, so the Y line
+            // (Right view) has no meaning; the Z-Y projection collapses X, so the X line (Bottom
+            // view) has none.
+            bool showBottom = enabled && _yzProjectionMode == null;
+            bool showRight = enabled && _xzProjectionMode == null;
+            _panel.BottomView.CrossIndicatorPx = showBottom ? _currentIX : null;
+            _panel.RightView.CrossIndicatorPx = showRight ? _currentIY : null;
+            if (md == null || !enabled)
+            {
+                _panel.BottomView.CrossIndicatorLabel = null;
+                _panel.RightView.CrossIndicatorLabel = null;
+                return;
+            }
+
+            // Same text as the main-view crosshair labels.
+            string xu = md.XUnit.Length > 0 ? $" {md.XUnit}" : "";
+            string yu = md.YUnit.Length > 0 ? $" {md.YUnit}" : "";
+            double x = md.XStep != 0 ? md.XMin + _currentIX * md.XStep : _currentIX;
+            double y = md.YStep != 0 ? md.YMax - (md.YCount - 1 - _currentIY) * md.YStep : _currentIY;
+            _panel.BottomView.CrossIndicatorLabel = $"x={x:G4}{xu}";
+            _panel.RightView.CrossIndicatorLabel = $"y={y:G4}{yu}";
+        }
+
+        private void OnBottomCrossIndicatorDragged(object? sender, int ix) => MoveCrosshairToIndex(ix, null);
+
+        private void OnRightCrossIndicatorDragged(object? sender, int iy) => MoveCrosshairToIndex(null, iy);
+
+        // Moves the XY crosshair from a side-view drag. Works on pixel indices directly (rather than
+        // going through OnCrosshairMoved) so the index is exact and not subject to rounding of a
+        // data-space round trip.
+        private void MoveCrosshairToIndex(int? newIX, int? newIY)
+        {
+            var md = _data;
+            if (md == null || _currentIX < 0 || _currentIY < 0) return;
+
+            int ix = newIX.HasValue ? Math.Clamp(newIX.Value, 0, md.XCount - 1) : _currentIX;
+            int iy = newIY.HasValue ? Math.Clamp(newIY.Value, 0, md.YCount - 1) : _currentIY;
+            bool xChanged = ix != _currentIX;
+            bool yChanged = iy != _currentIY;
+            if (!xChanged && !yChanged) return;
+
+            _currentIX = ix;
+            _currentIY = iy;
+            double cx = md.XStep != 0 ? md.XMin + ix * md.XStep : ix;
+            double cy = md.YStep != 0 ? md.YMax - (md.YCount - 1 - iy) * md.YStep : iy;
+            _panel.MainView.SetCrosshairDataPosition(new Point(cx, cy));
+            UpdateCrossIndicators();
             UpdateSlicesAsync(xChanged, yChanged);
         }
 
@@ -1455,6 +1549,7 @@ namespace MxPlot.UI.Avalonia.Controls
         {
             _panel.MainView.ShowCrosshairH = _xzProjectionMode == null;
             _panel.MainView.ShowCrosshairV = _yzProjectionMode == null;
+            UpdateCrossIndicators();
         }
 
         /// <summary>

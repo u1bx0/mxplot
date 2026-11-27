@@ -28,7 +28,7 @@ MxPlot は 3 種類の外部拡張ポイントを持っています。
 | `MatrixPlotterPluginRegistry.LoadFromDirectory()` | ✅ 動作 | 起動時に自動実行 |
 | `MxPlotAppPluginRegistry.LoadFromDirectory()` | ✅ 動作 | 起動時に自動実行 |
 | `FormatRegistry` の起動時自動スキャン | ✅ 動作 | `MxPlot.Extensions.*.dll` を自動検出 |
-| Plugin Registry の起動時自動スキャン | ✅ 動作 | `App.axaml.cs` から `plugins/` を自動スキャン |
+| Plugin Registry の起動時自動スキャン | ✅ 動作 | MxPlot.App が、すべての Add-on ルートの `plugins/` を自動スキャン（8 節） |
 
 ---
 
@@ -448,6 +448,42 @@ public string? GroupName => "Deconvolution";
 public string CommandName => "Richardson-Lucy";
 ```
 
+#### source に追従する Window を開く（Synced）
+
+`ctx.WindowService.ShowMatrixPlotter` が開くのは、固定の結果を表示する Window です。source の Window に追従して
+更新され続ける Window を開くには、`ctx.ShowSyncedMatrixPlotter` を呼びます。source のアクティブな frame が
+変わるか、データが Refresh されるたびに、渡した transform で再計算され、source を閉じると一緒に閉じます。
+
+```csharp
+public void Run(IMatrixPlotterContext ctx)
+{
+    var initial = new MatrixData<double>(ctx.Data.XCount, ctx.Data.YCount);
+
+    IDisposable handle = ctx.ShowSyncedMatrixPlotter(initial, "Doubled", (input, ct) =>
+    {
+        // input.Frame  : アクティブな frame（source が Composite の間は channel cube 全体）
+        // input.Source : source の全データ。ほかの frame も参照したい transform 用
+        var frame = input.Frame;
+        var result = new MatrixData<double>(frame.XCount, frame.YCount);
+        var src = frame.GetFrameAsDoubleSpan(frame.ActiveIndex);
+        var dst = result.GetArray(0);
+        for (int i = 0; i < dst.Length; i++) dst[i] = src[i] * 2;
+        return result;
+    });
+}
+```
+
+- transform はバックグラウンドスレッドで動きます。実行中に source がまた変わると、その呼び出しは `ct` で
+  キャンセルされるので、長い計算では `ct` を見てください。`ShowSyncedMatrixPlotter` 自体は UI スレッドで呼びます。
+- `input` は読み取り専用として扱ってください。
+- `null` を返すと、その変更では Window をそのままにします。
+- 結果の型や shape は、`initial` と違っていてかまいません。
+- `double` のアクセサ（`GetFrameAsDoubleSpan` など）で書いた transform は、`MatrixData<double>` を返します。
+  source の要素型を保ちたい場合は、アルゴリズムが型を知っている必要があるので、`IMatrixDataOperation`
+  経由で実行します（`MxPlot.Core/IOperation.cs` を参照）。
+- 返された handle を Dispose すると、Window が閉じて追従も終わります。
+- 使えるのは `IMatrixPlotterPlugin` だけです。`IMxPlotAppPlugin` には、追従する source の Window がありません。
+
 ### 4.4 登録方法
 
 #### 方法 A：プログラムからの直接登録
@@ -475,10 +511,10 @@ plugins/
   MyCompany.MxPlotPlugin.Deconvolution.dll
 ```
 
-`LoadFromDirectory()` は `MxPlot.App` の `App.axaml.cs`（`OnFrameworkInitializationCompleted`）から
-自動的に呼ばれます。MxPlot.App をそのまま使う場合、アプリ開発者は何もする必要はなく、プラグイン DLL を
-`plugins/` フォルダに置くだけで動作します。方法 A の直接登録は、MxPlot.App を使わず自前のホストアプリを
-作る場合など、この自動スキャンに乗らないケースで使います。
+MxPlot.App は起動時にプラグインを自動的に読み込みます。MxPlot.App をそのまま使う場合、アプリ開発者は
+何もする必要はなく、プラグイン DLL を Add-on ルートの `plugins/` フォルダに置くだけで動作します（8 節）。
+方法 A の直接登録は、MxPlot.App を使わず自前のホストアプリを作る場合など、この自動スキャンに乗らない
+ケースで使います。
 
 ---
 
@@ -597,13 +633,13 @@ public async void Run(IMxPlotAppContext ctx)
 // 直接登録
 MxPlotAppPluginRegistry.AddPlugin(new BatchCsvExportPlugin());
 
-// ディレクトリスキャン（App.axaml.cs から自動的に呼ばれる）
+// ディレクトリスキャン（MxPlot.App が起動時に、すべての Add-on ルートに対して行う）
 MxPlotAppPluginRegistry.LoadFromDirectory(
     Path.Combine(AppContext.BaseDirectory, "plugins"));
 ```
 
-`LoadFromDirectory()` は `App.axaml.cs` から自動的に呼ばれます。MxPlot.App をそのまま使う場合、
-プラグイン DLL を `plugins/` フォルダに置くだけで動作し、他に何もする必要はありません。
+MxPlot.App は起動時にプラグインを自動的に読み込みます。MxPlot.App をそのまま使う場合、
+プラグイン DLL を Add-on ルートの `plugins/` フォルダに置くだけで動作し、他に何もする必要はありません（8 節）。
 直接登録（`AddPlugin`）は、MxPlot.App を使わず `MatrixPlotter`/`MxPlot.UI.Avalonia` を組み込んだ
 自前のホストアプリを作る場合や、プラグインを別 DLL ではなくホストに直接コンパイルして組み込む場合に使います。
 
@@ -612,8 +648,10 @@ MxPlotAppPluginRegistry.LoadFromDirectory(
 ## 6. 1 DLL に複数の拡張を混在させる
 
 1 つの DLL に複数の拡張タイプを含めることができます。
-各 Registry の `LoadFromDirectory()` はそれぞれ自分のインターフェイスを持つ型だけを
-選んで登録するため、混在しても問題ありません。
+各 Registry はそれぞれ自分のインターフェイスを持つ型だけを選んで登録するため、
+混在しても問題ありません。MxPlot.App は `plugins/` フォルダのすべての DLL を、これらすべて
+（ファイルフォーマット、MatrixPlotter プラグインとエクスポート用プラグイン、MxPlot.App プラグイン）の
+対象として読み込むので、混在した DLL は、名前を問わず、そこに置くだけで動作します。
 
 ```csharp
 // 1 つの DLL に複数含めた例
@@ -660,8 +698,32 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 
 ## 8. 配置まとめ
 
+### Add-on ルート
+
+MxPlot.App は、すべての *Add-on ルート* から、近いものの順に Add-on を読み込みます。
+どのルートも、中の構成は同じです。
+
+| 種別 | ルート内の場所 | 命名 |
+|---|---|---|
+| ファイルフォーマット拡張 | ルート直下、または `plugins/` フォルダ | ルートでは `MxPlot.Extensions.{Name}.dll`、`plugins/` では任意の名前 |
+| プラグイン（MatrixPlotter / MxPlot.App） | `plugins/` フォルダ | 任意（`*.dll`） |
+| カスタム LUT | `LUTs/` フォルダ | `*.mlut`（ファイル形式は[カスタム LUT](./MxPlotUIAvalonia_Overview_ja.md#カスタム-lut)） |
+
+| ルート | 場所 |
+|---|---|
+| アプリのフォルダ | `MxPlot.App.exe` の隣（macOS ではバンドル内の `Contents/MacOS`） |
+| ユーザーごとのフォルダ | macOS のみ: `~/Library/Application Support/MxPlot`。macOS での Add-on の置き場所はここです。アプリのバンドルは読み取り専用の扱いで（変更すると署名が壊れ、Finder から見えず、更新のたびに置き換わります）、この場所はアプリをどこに置いても変わりません |
+| `MxPlot.app` を置いたフォルダ | macOS のみ: おまけの機能で、推奨しません。フォルダは人によって違い、ダウンロードしたままの場所で実行すると、読み取り専用の別の場所にコピーされて実行され（translocation）、隣のフォルダが見えないことがあります |
+
+**Tools → Open Add-ons Folder** は、使うフォルダを開きます。Windows ではアプリのフォルダ、macOS では
+ユーザーごとのフォルダです（無ければ作成します。その中には何も作りません）。フォルダ名の大文字小文字は
+区別しません。Add-on は起動時に読み込まれるので、追加したら MxPlot.App を再起動してください。
+
+同じアセンブリが複数のルートにある場合は、近いルートのものが優先されます。アプリ自身が同梱している DLL の
+コピー（たとえばプラグインのビルド出力に混ざった共有ライブラリ）は、無視されます。
+
 ```
-[アプリ実行ディレクトリ]
+[アプリ実行ディレクトリ]                      （Windows）
 │
 ├─ MxPlot.App.exe                         ← アプリ本体
 ├─ MxPlot.Core.dll
@@ -672,19 +734,29 @@ MxPlot の拡張 API は「**許可リスト型コンテキスト**」の原則�
 ├─ MxPlot.Extensions.Hdf5.dll             ← 同上
 ├─ MxPlot.Extensions.MyPropFormat.dll     ← 同上（命名規約を守れば自動）
 │
-└─ plugins/                               ← MxPlot.App が起動時に自動スキャン
-   ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
-   └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
+├─ plugins/                               ← MxPlot.App が起動時に自動スキャン
+│  ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
+│  └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
+└─ LUTs/
+   └─ MyPalette.mlut
+
+~/Library/Application Support/MxPlot/         （macOS、構成は同じ）
+├─ MxPlot.Extensions.MyPropFormat.dll
+├─ plugins/
+│  └─ MyCompany.MxPlotPlugin.GaussianFit.dll
+└─ LUTs/
+   └─ MyPalette.mlut
 ```
 
 ### 命名規約まとめ
 
 | 種別 | 規約 | 自動検出 |
 |---|---|---|
-| ファイルフォーマット DLL | `MxPlot.Extensions.{Name}.dll` | ✅ `AppContext.BaseDirectory` から `FormatRegistry` が自動スキャン |
-| MatrixPlotter プラグイン DLL | 任意（`*.dll`） | ✅ `plugins/` を MxPlot.App が起動時に自動スキャン |
+| ファイルフォーマット DLL | ルートでは `MxPlot.Extensions.{Name}.dll`、`plugins/` では任意の名前 | ✅ Add-on ルート直下（`FormatRegistry` が自動スキャン）、または `plugins/` フォルダ |
+| MatrixPlotter プラグイン DLL | 任意（`*.dll`） | ✅ Add-on ルートの `plugins/` を MxPlot.App が起動時に自動スキャン |
 | MxPlot.App プラグイン DLL | 任意（`*.dll`） | ✅ 同上 |
 
-`LoadFromDirectory()` 自体はディレクトリを引数に取る汎用 API で、`plugins/` に固定されているわけでは
-ありません。MxPlot.App がその引数に `plugins/` を渡して起動時に呼んでいるだけなので、MxPlot.App を
-そのまま使う場合はこのフォルダに置くだけで自動検出されます（詳しくは 4.4 / 5.4 節）。
+`LoadFromDirectory()` と `LoadFromAssembly()` は汎用 API で、`plugins/` に固定されているわけではありません。
+MxPlot.App が、起動時に各 Add-on ルートの `plugins/` に対して呼んでいるだけなので、MxPlot.App をそのまま
+使う場合はこのフォルダに置くだけで自動検出されます（詳しくは 4.4 / 5.4 節）。独自にスキャンするホストは、
+`AddOnFolders`（`MxPlot.UI.Avalonia.AddOns`）で同じルートを取得できます。

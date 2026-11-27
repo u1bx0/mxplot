@@ -139,12 +139,21 @@ namespace MxPlot.UI.Avalonia.Helpers
         internal static readonly StreamGeometry Gear = StreamGeometry.Parse(
             "M12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10M10,22C9.75,22 9.54,21.82 9.5,21.58L9.13,18.93C8.5,18.68 7.96,18.34 7.44,17.94L4.95,18.95C4.73,19.03 4.46,18.95 4.34,18.73L2.34,15.27C2.21,15.05 2.27,14.78 2.46,14.63L4.57,12.97C4.53,12.65 4.5,12.33 4.5,12C4.5,11.67 4.53,11.34 4.57,11L2.46,9.37C2.27,9.22 2.21,8.95 2.34,8.73L4.34,5.27C4.46,5.05 4.73,4.96 4.95,5.05L7.44,6.05C7.96,5.66 8.5,5.32 9.13,5.07L9.5,2.42C9.54,2.18 9.75,2 10,2H14C14.25,2 14.46,2.18 14.5,2.42L14.87,5.07C15.5,5.32 16.04,5.66 16.56,6.05L19.05,5.05C19.27,4.96 19.54,5.05 19.66,5.27L21.66,8.73C21.78,8.95 21.73,9.22 21.54,9.37L19.43,11C19.47,11.34 19.5,11.67 19.5,12C19.5,12.33 19.47,12.65 19.43,12.97L21.54,14.63C21.73,14.78 21.78,15.05 21.66,15.27L19.66,18.73C19.54,18.95 19.27,19.03 19.05,18.95L16.56,17.94C16.04,18.34 15.5,18.68 14.87,18.93L14.5,21.58C14.46,21.82 14.25,22 14,22H10Z");
 
+        // MDI "wrench" (verbatim)
+        internal static readonly StreamGeometry Wrench = StreamGeometry.Parse(
+            "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.6,20.4C23.1,20 23.1,19.3 22.7,19Z");
+
         // From MDI "auto-fix" - lower sparkle moved down
-        internal static readonly StreamGeometry AutoFix = StreamGeometry.Parse(
+        internal static readonly StreamGeometry Wand = StreamGeometry.Parse(
             "M7.5,5.6L5,7L6.4,4.5L5,2L7.5,3.4L10,2L8.6,4.5L10,7L7.5,5.6M19.5,17.6L22,16L20.6,18.5L22,21L19.5,19.6L17,21L18.4,18.5L17,16L19.5,17.6M22,2L20.6,4.5L22,7L19.5,5.6L17,7L18.4,4.5L17,2L19.5,3.4L22,2M13.34,12.78L15.78,10.34L13.66,8.22L11.22,10.66L13.34,12.78M14.37,7.29L16.71,9.63C17.1,10 17.1,10.65 16.71,11.04L5.04,22.71C4.65,23.1 4,23.1 3.63,22.71L1.29,20.37C0.9,20 0.9,19.35 1.29,18.96L12.96,7.29C13.35,6.9 14,6.9 14.37,7.29Z");
 
+        /// <summary>"f(x)" icon for the Calculator command (Material Design Icons "function-variant", Apache 2.0). 24×24 coordinate space.</summary>
+        // MDI "function-variant" (verbatim)
+        internal static readonly StreamGeometry Function = StreamGeometry.Parse(
+            "M12.42,5.29C11.32,5.19 10.35,6 10.25,7.11L10,10H12.82V12H9.82L9.38,17.07C9.18,19.27 7.24,20.9 5.04,20.7C3.79,20.59 2.66,19.9 2,18.83L3.5,17.33C3.83,18.38 4.96,18.97 6,18.63C6.78,18.39 7.33,17.7 7.4,16.89L7.82,12H4.82V10H8L8.27,6.93C8.46,4.73 10.39,3.1 12.6,3.28C13.86,3.39 15,4.09 15.66,5.17L14.16,6.67C13.91,5.9 13.23,5.36 12.42,5.29M22,13.65L20.59,12.24L17.76,15.07L14.93,12.24L13.5,13.65L16.35,16.5L13.5,19.31L14.93,20.72L17.76,17.89L20.59,20.72L22,19.31L19.17,16.5L22,13.65Z");
+
         /// <summary>Crop-marks / viewfinder icon (two overlapping corner guides) for the "Crop"
-        /// action, replacing the generic <see cref="AutoFix"/> placeholder there specifically
+        /// action, replacing the generic <see cref="Wand"/> placeholder there specifically
         /// (Material Design "crop", Apache 2.0). 24×24 coordinate space.</summary>
         // From MDI "crop" - subpaths reordered, one arc rewritten as a curve
         internal static readonly StreamGeometry Crop = StreamGeometry.Parse(
@@ -307,7 +316,9 @@ namespace MxPlot.UI.Avalonia.Helpers
             [Database] = new SolidColorBrush(Color.Parse("#5C6BC0")),  // Indigo 400
             [Processing] = new SolidColorBrush(Color.Parse("#8D6E63")),  // Brown 400
             [Gear] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400 -- conventional neutral "settings" tone
-            [AutoFix] = new SolidColorBrush(Color.Parse("#CE93D8")),  // Purple 200
+            [Wrench] = new SolidColorBrush(Color.Parse("#78909C")),  // Blue Grey 400, like Gear
+            [Wand] = new SolidColorBrush(Color.Parse("#CE93D8")),  // Purple 200
+            [Function] = new SolidColorBrush(Color.Parse("#FFA726")),  // Orange 400
             // Amber 700, not the crop ROI's plain Colors.Yellow (#FFFF00) accent it echoes --
             // pure yellow reads as barely-there against a light menu background.
             [Crop] = new SolidColorBrush(Color.Parse("#FFA000")),  // Amber 700

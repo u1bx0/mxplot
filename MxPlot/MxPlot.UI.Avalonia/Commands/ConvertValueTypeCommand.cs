@@ -1,6 +1,7 @@
 ﻿using MxPlot.Core;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Views;
+using MxPlot.UI.Avalonia.Metadata;
 using System;
 using System.Threading.Tasks;
 
@@ -42,7 +43,7 @@ namespace MxPlot.UI.Avalonia.Commands
             string detail = doScale
                 ? $"{typeDesc}; scale [{srcMin:G6}, {srcMax:G6}] → [{tgtMin:G6}, {tgtMax:G6}]"
                 : $"{typeDesc}; direct cast";
-            MatrixPlotter.AppendHistory(converted, "Convert Type", host.Title, detail);
+            converted.AppendHistory("Convert Type", host.Title, detail);
 
             if (replaceData)
                 host.ReplaceData(converted, null);

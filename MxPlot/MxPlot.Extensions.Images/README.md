@@ -8,13 +8,14 @@
 
 ## 📦 About this Package
 This package provides a simple image loader for `MatrixData<T>`, utilizing **SkiaSharp** as the decoding engine. 
-It enables seamless conversion of standard image formats (PNG, JPEG, BMP, TIFF, etc.) into mathematical matrices, supporting various numeric types including `double`, `float`, and even `System.Numerics.Complex`.
+It enables seamless conversion of standard image formats (PNG, JPEG, BMP, GIF, WebP) into mathematical matrices, supporting various numeric types including `double`, `float`, and even `System.Numerics.Complex`.
 
 It is designed for scientific analysis, signal processing, and visualization workflows within the MxPlot ecosystem.
 
 ## 🔍 Key Features
-- **Broad Format Support**: Powered by SkiaSharp, supporting PNG, JPEG, BMP, WEBP, and TIFF.
+- **Format Support**: Powered by SkiaSharp, reading PNG, JPEG, BMP, WebP and GIF. For TIFF, use `MxPlot.Extensions.Tiff`.
 - **Multi-Channel Decomposition**: Easily load images as Grayscale or decomposed RGB channels.
+- **Animated Images**: A GIF or animated WebP loads as a series of frames along a `Time` axis in seconds, after the color axis for a color image. The step of the axis is the duration of the first frame (0.1 s when the file stores none), which is the rate MatrixPlotter plays it at. Expanding every frame can take far more memory than the file size suggests, so `BitmapImageFormat.AnimationMode` (default `Auto`) reads only the first frame, with a note in the metadata, when the expanded pixel data would exceed `MaxAnimationBytes` (default 1 GB); `AllFrames` and `FirstFrameOnly` override that, and `ImageLoader.InspectAnimation(path)` reports the size from the header alone. A read can be canceled through `CancellationToken`.
 - **Flexible Data Types**: Direct loading into `byte`, `int`, `float`, or `double` matrices.
 - **Complex Number Integration**: Specialized support for `Complex` type (pixel values mapped to the real part), ideal for immediate FFT processing.
 - **Normalization Control**: Built-in `NormalizationDivisor` to scale pixel values (e.g., 0-255 to 0.0-1.0) during the loading process.
@@ -26,14 +27,14 @@ The `BitmapImageFormat` class integrates directly with the `MatrixData<T>.Load` 
 
 ### Loading as Normalized RGB (Double)
 ```csharp
-using MxPlot;
+using MxPlot.Core;
 using MxPlot.Extensions.Images;
 
 // Load an image, decompose to RGB, and normalize to 0.0 - 1.0
-var format = new BitmapImageFormat 
-{ 
-    Mode = BitmapReadMode.RGBDecomposed, 
-    NormalizationDivisor = 255.0 
+var format = new ImageLoader.BitmapImageFormat
+{
+    Mode = ImageLoader.BitmapReadMode.RGBDecomposed,
+    NormalizationDivisor = 255.0
 };
 
 var md = MatrixData<double>.Load("photo.png", format);
@@ -43,7 +44,7 @@ var md = MatrixData<double>.Load("photo.png", format);
 ### Loading for Frequency Analysis (Complex)
 ```csharp
 // Pixel values (0-255) are stored in the Real part of the Complex numbers
-var format = new BitmapImageFormat { Mode = BitmapReadMode.GrayScale };
+var format = new ImageLoader.BitmapImageFormat { Mode = ImageLoader.BitmapReadMode.GrayScale };
 var complexMatrix = MatrixData<Complex>.Load("signal.bmp", format);
 
 ```

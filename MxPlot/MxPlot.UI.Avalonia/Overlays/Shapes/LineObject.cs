@@ -2,6 +2,7 @@
 using Avalonia.Input;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using System;
 using System.Collections.Generic;
@@ -9,6 +10,17 @@ using System.Linq;
 
 namespace MxPlot.UI.Avalonia.Overlays.Shapes
 {
+    /// <summary>Where the position axis of a line profile is zero.</summary>
+    public enum LineProfileOrigin
+    {
+        /// <summary>The end the profile starts from (the left end of the line; see <see cref="LineObject.RunsFromP1"/>).</summary>
+        LeftEnd,
+        /// <summary>The midpoint of the line.</summary>
+        Center,
+        /// <summary>A point on the line chosen by <see cref="LineObject.OriginT"/>.</summary>
+        Custom,
+    }
+
     public sealed class LineObject : OverlayObjectBase
     {
         public Point P1 { get; set; }
@@ -16,12 +28,138 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         private Point _originalP1;
         private Point _originalP2;
+        private Point _originalOrigin;
         private bool _hasResizeState;
+
+        private LineProfileOrigin _profileOrigin = LineProfileOrigin.LeftEnd;
+        private double _originT = 0.5;
+        private LineProfileOption _profileInterpolation = LineProfileOption.Bilinear;
+
+        // Direction in which the physical X / Y coordinate grows with the world X / Y coordinate
+        // (+1 or -1). The host sets them from the source view, since the profile runs from the
+        // smaller physical X (then smaller physical Y) to the larger one.
+        private int _profileXSign = 1;
+        private int _profileYSign = -1;
+
+        // Physical length of one world unit along X / Y. Distances along the line are measured in
+        // these units, the units of the profile axis, so that they stay meaningful when the data
+        // has different X and Y steps (e.g. an XZ view).
+        private double _profileXScale = 1.0;
+        private double _profileYScale = 1.0;
+
+        /// <summary>
+        /// Where the position axis of the line profile is zero. Switching to
+        /// <see cref="LineProfileOrigin.Custom"/> keeps the origin where it currently is.
+        /// </summary>
+        public LineProfileOrigin ProfileOrigin
+        {
+            get => _profileOrigin;
+            set
+            {
+                if (_profileOrigin == value) return;
+                if (value == LineProfileOrigin.Custom) _originT = EffectiveOriginT;
+                _profileOrigin = value;
+                NotifyChanged();
+            }
+        }
+
+        /// <summary>
+        /// Position of the <see cref="LineProfileOrigin.Custom"/> origin as a fraction of the way from
+        /// <see cref="P1"/> (0) to <see cref="P2"/> (1). Dragging one end of the line recomputes it so
+        /// the origin keeps its distance from the other end.
+        /// </summary>
+        public double OriginT
+        {
+            get => _originT;
+            set
+            {
+                value = Math.Clamp(value, 0.0, 1.0);
+                if (_originT == value) return;
+                _originT = value;
+                if (_profileOrigin == LineProfileOrigin.Custom) NotifyChanged();
+            }
+        }
+
+        /// <summary>How a profile value between pixels is obtained.</summary>
+        public LineProfileOption ProfileInterpolation
+        {
+            get => _profileInterpolation;
+            set
+            {
+                if (_profileInterpolation == value) return;
+                _profileInterpolation = value;
+                NotifyChanged();
+            }
+        }
+
+        /// <summary>
+        /// <c>true</c> while a profile of this line is shown. The host sets it. The profile origin is
+        /// drawn only then, and Ctrl-dragging an end rotates the line about that origin.
+        /// </summary>
+        public bool IsProfileActive { get; set; }
+
+        /// <summary>
+        /// Sets how the physical axes of the source view run (see <see cref="RunsFromP1"/>) and the
+        /// physical length of one world unit along each of them.
+        /// </summary>
+        internal void SetProfileAxes(int xSign, int ySign, double xScale, double yScale)
+        {
+            _profileXSign = xSign < 0 ? -1 : 1;
+            _profileYSign = ySign < 0 ? -1 : 1;
+            _profileXScale = xScale > 0 ? xScale : 1.0;
+            _profileYScale = yScale > 0 ? yScale : 1.0;
+        }
+
+        /// <summary>The distance between two world points in physical units.</summary>
+        private double PhysicalDistance(Point a, Point b)
+        {
+            double dx = (b.X - a.X) * _profileXScale;
+            double dy = (b.Y - a.Y) * _profileYScale;
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        /// <summary>
+        /// <c>true</c> when the profile starts at <see cref="P1"/>. The profile starts at the end with the
+        /// smaller physical X, and at the one with the smaller physical Y when the X values are equal.
+        /// </summary>
+        public bool RunsFromP1
+        {
+            get
+            {
+                double dx = _profileXSign * (P2.X - P1.X);
+                if (dx != 0) return dx > 0;
+                return _profileYSign * (P2.Y - P1.Y) >= 0;
+            }
+        }
+
+        /// <summary>
+        /// The origin of the profile as a fraction of the way from <see cref="P1"/> to <see cref="P2"/>,
+        /// whichever <see cref="ProfileOrigin"/> is in force.
+        /// </summary>
+        public double EffectiveOriginT => _profileOrigin switch
+        {
+            LineProfileOrigin.Center => 0.5,
+            LineProfileOrigin.Custom => _originT,
+            _ => RunsFromP1 ? 0.0 : 1.0,
+        };
+
+        /// <summary>The origin of the profile in world coordinates.</summary>
+        public Point OriginPoint
+        {
+            get
+            {
+                double t = EffectiveOriginT;
+                return new Point(P1.X + t * (P2.X - P1.X), P1.Y + t * (P2.Y - P1.Y));
+            }
+        }
+
+        private void NotifyChanged() => GeometryChanged?.Invoke(this, (P1, P2));
 
         public override void BeginResize()
         {
             _originalP1 = P1;
             _originalP2 = P2;
+            _originalOrigin = OriginPoint;
             _hasResizeState = true;
         }
 
@@ -132,42 +270,19 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
 
         public override void Resize(HandleType handle, Point worldNewPos)
         {
-            if (CurrentModifiers.HasFlag(KeyModifiers.Control))
-            {
-                // Symmetric around the original midpoint so the center stays fixed
-                var center = _hasResizeState
-                    ? new Point((_originalP1.X + _originalP2.X) / 2, (_originalP1.Y + _originalP2.Y) / 2)
-                    : new Point((P1.X + P2.X) / 2, (P1.Y + P2.Y) / 2);
-                var mirror = new Point(2 * center.X - worldNewPos.X, 2 * center.Y - worldNewPos.Y);
-                if (handle == HandleType.TopLeft) { P1 = worldNewPos; P2 = mirror; }
-                else                              { P2 = worldNewPos; P1 = mirror; }
-            }
-            else
-            {
-                // Ctrl released mid-drag: restore the non-dragged endpoint to its pre-drag position
-                if (handle == HandleType.TopLeft)
-                {
-                    P1 = worldNewPos;
-                    if (_hasResizeState) P2 = _originalP2;
-                }
-                else
-                {
-                    P2 = worldNewPos;
-                    if (_hasResizeState) P1 = _originalP1;
-                }
-            }
-            GeometryChanged?.Invoke(this, (P1, P2));
+            if (handle == HandleType.Origin) MoveOriginTo(worldNewPos);
+            else DragEnd(handle, worldNewPos);
         }
 
         /// <summary>
         /// Shift: constrains the dragged endpoint along the <em>original</em> line direction
         /// (direction at drag start, not the current direction at the moment Shift is pressed).
-        /// Ctrl: also moves the opposite endpoint symmetrically around the original midpoint.
-        /// Ctrl released mid-drag: restores the non-dragged endpoint to its pre-drag position.
-        /// Shift+Ctrl: both constraints combined.
+        /// Combines with the Ctrl behavior of <see cref="DragEnd"/>.
         /// </summary>
         public override void ResizeConstrained(HandleType handle, Point worldNewPos)
         {
+            if (handle == HandleType.Origin) { MoveOriginTo(worldNewPos); return; }
+
             // Shift: project onto the original line direction (locked at drag start)
             Point refP1 = _hasResizeState ? _originalP1 : P1;
             Point refP2 = _hasResizeState ? _originalP2 : P2;
@@ -175,39 +290,90 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             double ldx = refP2.X - refP1.X;
             double ldy = refP2.Y - refP1.Y;
             double len2 = ldx * ldx + ldy * ldy;
-            if (len2 < 1e-10) { Resize(handle, worldNewPos); return; }
+            if (len2 < 1e-10) { DragEnd(handle, worldNewPos); return; }
 
             double tx = worldNewPos.X - anchor.X;
             double ty = worldNewPos.Y - anchor.Y;
             double t = (tx * ldx + ty * ldy) / len2;
-            var projected = new Point(anchor.X + t * ldx, anchor.Y + t * ldy);
+            DragEnd(handle, new Point(anchor.X + t * ldx, anchor.Y + t * ldy));
+        }
+
+        /// <summary>
+        /// Moves the end named by <paramref name="handle"/> to <paramref name="dragged"/>. Every call
+        /// starts again from the geometry at <see cref="BeginResize"/>, so a modifier released
+        /// mid-drag restores the other end.
+        /// <list type="bullet">
+        /// <item>Plain drag: the other end stays. A <see cref="LineProfileOrigin.Custom"/> origin keeps its
+        /// distance from that end, so lengthening the dragged side extends the profile without moving the origin.</item>
+        /// <item>Ctrl: the line turns and stretches about a pivot - the profile origin while a profile is
+        /// shown, otherwise the midpoint. The other end moves to the opposite side of the pivot and keeps
+        /// its distance ratio, so a <see cref="LineProfileOrigin.Custom"/> origin stays where it is.
+        /// With the pivot on the dragged end there is nothing to turn about, and the drag is a plain one.</item>
+        /// </list>
+        /// </summary>
+        private void DragEnd(HandleType handle, Point dragged)
+        {
+            bool dragP1 = handle == HandleType.TopLeft;
+            Point p1 = _hasResizeState ? _originalP1 : P1;
+            Point p2 = _hasResizeState ? _originalP2 : P2;
+            Point origin0 = _hasResizeState ? _originalOrigin : OriginPoint;
+            Point fixedEnd = dragP1 ? p2 : p1;
+            Point dragged0 = dragP1 ? p1 : p2;
 
             if (CurrentModifiers.HasFlag(KeyModifiers.Control))
             {
-                // Ctrl: symmetric around the original midpoint (after axis constraint)
-                var center = _hasResizeState
-                    ? new Point((_originalP1.X + _originalP2.X) / 2, (_originalP1.Y + _originalP2.Y) / 2)
-                    : new Point((P1.X + P2.X) / 2, (P1.Y + P2.Y) / 2);
-                var mirror = new Point(2 * center.X - projected.X, 2 * center.Y - projected.Y);
-                if (handle == HandleType.TopLeft) { P1 = projected; P2 = mirror; }
-                else                              { P2 = projected; P1 = mirror; }
-                GeometryChanged?.Invoke(this, (P1, P2));
+                Point pivot = IsProfileActive
+                    ? origin0
+                    : new Point((p1.X + p2.X) / 2, (p1.Y + p2.Y) / 2);
+                double arm0 = Distance(dragged0, pivot);
+                if (arm0 > 1e-9)
+                {
+                    double ratio = Distance(fixedEnd, pivot) / arm0;
+                    var other = new Point(pivot.X - (dragged.X - pivot.X) * ratio,
+                                          pivot.Y - (dragged.Y - pivot.Y) * ratio);
+                    if (dragP1) { P1 = dragged; P2 = other; }
+                    else        { P2 = dragged; P1 = other; }
+                    if (_profileOrigin == LineProfileOrigin.Custom && IsProfileActive)
+                        _originT = FractionOf(pivot);
+                    NotifyChanged();
+                    return;
+                }
             }
-            else
+
+            if (dragP1) { P1 = dragged; P2 = fixedEnd; }
+            else        { P2 = dragged; P1 = fixedEnd; }
+
+            if (_profileOrigin == LineProfileOrigin.Custom)
             {
-                // Ctrl released mid-drag: restore the non-dragged endpoint to its pre-drag position
-                if (handle == HandleType.TopLeft)
-                {
-                    P1 = projected;
-                    if (_hasResizeState) P2 = _originalP2;
-                }
-                else
-                {
-                    P2 = projected;
-                    if (_hasResizeState) P1 = _originalP1;
-                }
-                GeometryChanged?.Invoke(this, (P1, P2));
+                // Physical distances: the profile axis is physical, and the line turns while it is dragged.
+                double newLen = PhysicalDistance(dragged, fixedEnd);
+                double fromFixed = newLen > 1e-12
+                    ? Math.Min(PhysicalDistance(origin0, fixedEnd) / newLen, 1.0)
+                    : 0.0;
+                _originT = dragP1 ? 1.0 - fromFixed : fromFixed;
             }
+            NotifyChanged();
+        }
+
+        /// <summary>Moves a <see cref="LineProfileOrigin.Custom"/> origin to the point of the line nearest <paramref name="world"/>.</summary>
+        private void MoveOriginTo(Point world)
+        {
+            if (_profileOrigin != LineProfileOrigin.Custom) return;
+            _originT = FractionOf(world);
+            NotifyChanged();
+        }
+
+        /// <summary>
+        /// The fraction of the way from <see cref="P1"/> to <see cref="P2"/> of the point of the line
+        /// nearest <paramref name="world"/>, nearest in physical units.
+        /// </summary>
+        private double FractionOf(Point world)
+        {
+            double dx = (P2.X - P1.X) * _profileXScale, dy = (P2.Y - P1.Y) * _profileYScale;
+            double len2 = dx * dx + dy * dy;
+            if (len2 < 1e-24) return _originT;
+            double wx = (world.X - P1.X) * _profileXScale, wy = (world.Y - P1.Y) * _profileYScale;
+            return Math.Clamp((wx * dx + wy * dy) / len2, 0.0, 1.0);
         }
 
         public override void Draw(AvaloniaOverlayGraphics g)
@@ -221,6 +387,12 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
                 // When P1==P2 (zero-length line), draw only one handle to avoid invisible stacking
                 if (P1 != P2)
                     g.DrawHandle(Colors.White, Colors.Black, P2.X, P2.Y);
+            }
+
+            if (IsProfileActive && !g.SuppressHandles)
+            {
+                var o = OriginPoint;
+                g.DrawCircleHandle(Colors.Yellow, Colors.Black, o.X, o.Y);
             }
 #if DEBUG
             if (IsSelected)
@@ -237,6 +409,11 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
             var sP2 = vp.WorldToScreen(P2);
             if (Distance(location, sP1) <= HandleSize) return HandleType.TopLeft;
             if (Distance(location, sP2) <= HandleSize) return HandleType.BottomRight;
+            // Where the origin sits on an end, that end's handle wins (see above); move the origin
+            // from the Properties dialog in that case.
+            if (IsProfileActive && _profileOrigin == LineProfileOrigin.Custom
+                && Distance(location, vp.WorldToScreen(OriginPoint)) <= HandleSize)
+                return HandleType.Origin;
             if (DistanceToSegment(location, sP1, sP2) <= 5.0) return HandleType.Body;
             return HandleType.None;
         }
@@ -260,6 +437,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         public override Cursor GetCursor(HandleType handle, AvaloniaViewport vp)
         {
             if (handle == HandleType.Body) return new Cursor(StandardCursorType.SizeAll);
+            if (handle == HandleType.Origin) return new Cursor(StandardCursorType.Hand);
             var sP1 = vp.WorldToScreen(P1);
             var sP2 = vp.WorldToScreen(P2);
             Point dir = new(sP2.X - sP1.X, sP2.Y - sP1.Y);

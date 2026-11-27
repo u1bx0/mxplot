@@ -1,7 +1,8 @@
 ﻿# MxPlot.UI.Avalonia — Overview
 
 **Created**: 2026-04-22  
-**Updated**: 2026-08-31  
+**Updated**: 2026-10-26  
+**Japanese**: [MxPlotUIAvalonia_Overview_ja.md](./MxPlotUIAvalonia_Overview_ja.md)  
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 ---
@@ -33,7 +34,7 @@ A full-featured `Window` subclass. One window per `IMatrixData`.
 | Frame navigation | `AxisTracker` controls for each `Axis` |
 | Value range control | `ValueRangeBar` + inline settings panel (Auto / Fixed / All / ROI modes) |
 | Overlays | Rectangles, lines, ROI — drawn on Skia surface via `OverlayManager` |
-| Orthogonal views | Right (XZ) and Bottom (ZX) slices via `OrthogonalPanel` |
+| Orthogonal views | Bottom (XZ) and Right (YZ) slices via `OrthogonalPanel` |
 | Status bar | Data type, memory size, zoom %, progress, notice/toast |
 | Linked plotters | `LinkRefresh` for synchronized multi-window display |
 | Composite mode | Multi-channel color compositing — see [Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md) |
@@ -209,7 +210,10 @@ public interface IMatrixPlotterContext
     double DisplayMinValue { get; set; }   // setting this also switches to fixed-range mode
     double DisplayMaxValue { get; set; }   // setting this also switches to fixed-range mode
     TopLevel? Owner { get; }
+    string Title { get; }                  // title of the host window
     IPlotWindowService WindowService { get; }
+    IDisposable ShowSyncedMatrixPlotter(IMatrixData initial, string title,
+        Func<PlotSyncInput, CancellationToken, IMatrixData?> transform);
     int ActiveFrameIndex { get; }
     LookupTable? CurrentLut { get; }
     bool IsLutInverted { get; }
@@ -224,6 +228,12 @@ public interface IMatrixPlotterContext
 the plotter's current (or an overridden) LUT and value range, returning a caller-owned
 `WriteableBitmap` at the data's native resolution. Looping it over every frame index produces the
 sequence needed for video/GIF export.
+
+`ShowSyncedMatrixPlotter` opens a window that follows the host: it first shows `initial`, and is then
+recomputed by `transform` (on a background thread, with a cancellation token) whenever the host's active
+frame changes or its data is refreshed. The window closes together with the host, and disposing the returned
+handle closes it earlier. `PlotSyncInput` carries the displayed `Frame` and the host's complete `Source`;
+both are read-only. Call it on the UI thread.
 
 ### `IMatrixPlotterPlugin`
 
@@ -261,7 +271,8 @@ menus when the list changes. Also provides the `IPlotWindowService` used by `IMa
 
 ```
 MxPlot.UI.Avalonia
-    ├── MxPlot.Core          (IMatrixData, MatrixData<T>, LookupTable, Axis, ...)
+    ├── MxPlot.Core          (IMatrixData, MatrixData<T>, Axis, ...)
+    ├── MxPlot.Extensions.Fft (Processing > FFT; brings Math.NET Numerics)
     └── Avalonia 11          (Window, Controls, Skia rendering)
 ```
 
@@ -271,14 +282,28 @@ MxPlot.UI.Avalonia
 
 ## Custom Lookup Tables (LUTs)
 
-`MatrixPlotter` uses `LookupTable` instances to map data values to colors. Several built-in themes are available via `ColorThemes` (Grayscale, Hot, Jet, Turbo, Viridis, etc.), but users can add custom LUTs in two ways:
+`MatrixPlotter` maps data values to colors with a `LookupTable` (namespace `MxPlot.UI.Avalonia.Rendering`). The built-in themes are properties of the static `ColorThemes` class (Grayscale, Hot, OrangeHot, GreenHot, Cold, Profiler, Spectrum, Jet, Turbo, Viridis, CoolWarm, Phase, HiLo). Every theme, built-in or custom, is also registered under its name (`ColorThemes.Get(name)`, `ColorThemes.Names`), and that registry is what the LUT selector lists. Custom LUTs can be added in two ways:
 
 ### Method 1: External `.mlut` Files (Automatic Loading)
 
-Place custom `.mlut` files in a `LUTs/` subdirectory next to the application executable.  
-`LutSelector` automatically discovers and registers all `.mlut` files on first use.
+Place `.mlut` files in the `LUTs/` folder of an add-on root. The roots are the same ones used for plugins and file-format extensions (see `AddOnFolders` and [Extensions Guide § Deployment Summary](./MxPlot_Extensions_Guide.md#8-deployment-summary)):
 
-**File Format:**
+| Root | Where |
+|---|---|
+| The application folder | Next to `MxPlot.App.exe` (on macOS, `Contents/MacOS` inside the bundle) |
+| The per-user folder | macOS only: `~/Library/Application Support/MxPlot`, the recommended place on macOS |
+| The folder that holds `MxPlot.app` | macOS only, not recommended |
+| The working directory | Searched as well, so a script can keep its own `LUTs/` folder |
+
+How the files are picked up:
+
+- `LutSelector` scans these folders **once**, the first time a selector is created in the process. A file added while the application is running is not seen until the next start.
+- Subfolders are scanned too. The `LUTs` folder name and the `.mlut` extension are matched case-insensitively on every platform.
+- A file that cannot be parsed is skipped; the other files still load.
+- A LUT whose name matches one that is already registered replaces it, built-in themes included.
+- Only `LutSelector` triggers the scan. Code that uses `ColorThemes` without any selector (for example a headless tool) must call `ColorThemes.LoadFromDirectory(...)` itself.
+
+**File format:**
 
 ```
 <LUT Name>
@@ -289,15 +314,15 @@ Place custom `.mlut` files in a `LUTs/` subdirectory next to the application exe
 ```
 
 - **Line 1**: LUT name (displayed in the selector)
-- **Line 2**: Number of color levels, optionally followed by a missing-value color in hexadecimal (e.g., `256, FF00FF`)
-- **Lines 3+**: RGB triplets (0-255) or hex color values (e.g., `FF8800`)
+- **Line 2**: Number of color levels, optionally followed by the missing-value color as hexadecimal `RRGGBB` (e.g., `5, 0000FF` for blue)
+- **Lines 3+**: one color per line, as an RGB triplet (0-255) or as a hex value in `RRGGBB` order (e.g., `FF8800`).
 - Empty lines and lines starting with `#` are ignored
 
-**Example (`CustomHot.mlut`):**
+The file is not interpolated when it is read: if fewer color lines than `Levels` are provided, the last color is repeated for the remaining levels, and extra lines are ignored. Interpolation happens at display time instead. The LUT is resampled to the plotter's Level setting (`LutDepth`, 256 by default) by linear interpolation in RGB, so a short file is enough to describe a gradient. For example, this five-level file (`CustomHot.mlut`) is shown as a smooth gradient at the default Level, and as five flat bands if the Level is lowered to 5:
 
 ```
 CustomHot
-256, 0000FF
+5, 0000FF
 0, 0, 0
 128, 0, 0
 255, 128, 0
@@ -305,22 +330,23 @@ CustomHot
 255, 255, 255
 ```
 
-If fewer color lines are provided than the declared level count, the last color is repeated.  
-If more lines are provided, extra lines are ignored.
-
 ### Method 2: Programmatic Registration
 
 Load and register a LUT at runtime:
 
 ```csharp
-using MxPlot.Core.Imaging;
+using MxPlot.UI.Avalonia.Rendering;
 
 // From file
 var lut = ColorThemes.LoadFromFile("path/to/custom.mlut");
 if (lut != null)
     ColorThemes.Register(lut);
 
-// Or create manually
+// From a folder (recursive by default); returns how many LUTs were registered
+int count = ColorThemes.LoadFromDirectory("path/to/luts");
+
+// Or create manually: the constructor takes colors packed as R | (G << 8) | (B << 16),
+// so 0xFF0000 is blue here (unlike the RRGGBB text in a .mlut file)
 int[] colors = new int[256];
 for (int i = 0; i < 256; i++)
 {
@@ -333,6 +359,8 @@ var customLut = new LookupTable("MyCustomLUT", colors, missingColor: 0xFF00FF);
 ColorThemes.Register(customLut);
 ```
 
+`LoadFromFile` returns `null` for a file whose header cannot be parsed, and throws `ArgumentException` for a file with fewer than three lines (name, header, at least one color). A registered LUT can be assigned with `plotter.Lut = customLut`, or looked up by name with `ColorThemes.Get("MyCustomLUT")`.
+
 ---
 
 ## Related Documents
@@ -341,3 +369,4 @@ ColorThemes.Register(customLut);
 - [MatrixPlotter Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md)
 - [WinForms / WPF Integration Guide](./MatrixPlotter_NonAvalonia_Integration_Guide.md)
 - [MatrixPlotter Metadata Format Guide](./MatrixPlotter_MetadataFormat_Guide.md)
+- [MxPlot Extensions Guide](./MxPlot_Extensions_Guide.md)

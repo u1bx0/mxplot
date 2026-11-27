@@ -151,8 +151,12 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         {
             yield return Edit;
             yield return OverlayMenuEntry.Separator();
+            // Edit… already covers text, font, colors and options, so the generic pen editor is not offered.
             foreach (var item in base.GetContextMenuItems() ?? [])
+            {
+                if (ReferenceEquals(item, PenEdit)) continue;
                 yield return item;
+            }
         }
     }
 }

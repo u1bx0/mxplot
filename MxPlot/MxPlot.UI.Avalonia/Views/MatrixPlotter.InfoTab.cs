@@ -8,6 +8,7 @@ using MxPlot.Core;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Utils;
+using MxPlot.UI.Avalonia.Metadata;
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -96,7 +97,35 @@ namespace MxPlot.UI.Avalonia.Views
             (squarePixelsCheck.Parent as Panel)?.Children.Remove(squarePixelsCheck);
             _scaleTabBody.Children.Add(squarePixelsCheck);
             UpdateSquarePixelsCheck();
+
+            var syncScalesBtn = EnsureSyncScalesButton();
+            (syncScalesBtn.Parent as Panel)?.Children.Remove(syncScalesBtn);
+            _scaleTabBody.Children.Add(syncScalesBtn);
             UpdateScaleRevertButton();
+        }
+
+        // Shown only while the window belongs to a sync group.
+        private Button EnsureSyncScalesButton()
+        {
+            if (_syncScalesBtn != null)
+                return _syncScalesBtn;
+
+            var button = new Button
+            {
+                Content = "Sync scales",
+                FontSize = 11,
+                Height = 22,
+                MinHeight = 0,
+                Padding = new Thickness(10, 1),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 8, 4, 0),
+                IsVisible = IsInSyncGroup,
+            };
+            ToolTip.SetTip(button, "Apply this window's scales to the other synced windows.");
+            button.Click += (_, _) => PushScalesToSyncGroup();
+            _syncScalesBtn = button;
+            return button;
         }
 
         private CheckBox EnsureSquarePixelsCheck()

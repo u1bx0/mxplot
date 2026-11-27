@@ -34,6 +34,8 @@ It runs on **Windows, macOS, and Linux** via Avalonia UI and requires no WinForm
 | `ProfilePlotter` | Live line-profile plot window, auto-updated on geometry change |
 | `OverlayPropertyDialog` | Per-object pen/geometry editor |
 | `OrthogonalPanel` | Side-by-side orthogonal slice views for 3-D / multi-frame data |
+| Calculator | **Processing > Calculator** computes new values from a formula — see the [Calculator and Formula Guide](https://github.com/u1bx0/mxplot/blob/master/docs/Calculator_Formula_Guide.md) |
+| `CreateDataDialog` | Generates data from a formula, optionally reading the windows the host passes to it |
 
 ---
 
@@ -117,7 +119,7 @@ plotter.MainView.OverlayManager.Add(roi);
 Embedding Avalonia UI controls inside a WinForms or WPF host requires additional setup.
 Please refer to the integration guide in the repository:
 
-👉 [Non-Avalonia Integration Guide](https://github.com/u1bx0/mxplot/blob/main/docs/NonAvalonia_Integration_Guide.md) *(documentation in progress)*
+👉 [WinForms / WPF Integration Guide](https://github.com/u1bx0/mxplot/blob/master/docs/MatrixPlotter_NonAvalonia_Integration_Guide.md)
 
 ---
 

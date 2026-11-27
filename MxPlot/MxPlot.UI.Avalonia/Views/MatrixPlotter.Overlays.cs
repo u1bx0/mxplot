@@ -84,6 +84,7 @@ namespace MxPlot.UI.Avalonia.Views
                 line.PlotProfile.Handler = null;
                 line.CalibrateScale.Handler = null;
                 line.GeometryChanged -= OnLineGeometryChanged;
+                line.IsProfileActive = false;
                 if (_lineProfileWindows.Remove(line, out var entry))
                     entry.Window.Close();
             }
@@ -154,8 +155,11 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void OnLineGeometryChanged(object? sender, (global::Avalonia.Point P1, global::Avalonia.Point P2) _)
         {
-            if (sender is LineObject line && line.IsSelected)
-                UpdateNoticeFromOverlay(line);
+            if (sender is LineObject line)
+            {
+                if (line.IsSelected) UpdateNoticeFromOverlay(line);
+                UpdateLineProfile(line);
+            }
             SetDirty(DirtyFlags.Overlay, true);
         }
 
@@ -544,33 +548,26 @@ namespace MxPlot.UI.Avalonia.Views
             var win = new ProfilePlotter(
                 //[new PlotSeries(profile, "Profile", PlotStyle.Line)],
                 series,
-                xAxisLabel: $"Distance ({md.XUnit})",
+                // The distance mixes X and Y extents, so a unit is only meaningful when both agree.
+                xAxisLabel: string.IsNullOrWhiteSpace(md.XUnit) || md.XUnit != md.YUnit
+                    ? "Distance"
+                    : $"Distance ({md.XUnit})",
                 yAxisLabel: "Value",
-                title: "Line Profile (Bilinear)");
+                title: LineProfileTitle(line));
             _lineProfileWindows[line] = (win, sourceView, groupAxisName);
-            // Default behaviour: initialize the Y axis to whatever value range is currently
-            // displayed for the image -- the header ValueRangeBar (LUT mode) or the shared
-            // Composite range (Global scope). This must NOT be gated on IsFixedRange: that flag
-            // only governs whether the *rendered image* rescales per frame (false in Current
-            // mode), it is not "what range is currently shown" -- DisplayedMinValue/Max already
-            // tracks that correctly across Fixed/Current/All/Roi.
-            var (vrMin, vrMax) = GetCurrentDisplayedValueRange();
-            if (!double.IsNaN(vrMin) && !double.IsNaN(vrMax))
-            {
-                win.Plot.YAxisFixed = true;
-                win.Plot.YFixedMin = vrMin;
-                win.Plot.YFixedMax = vrMax;
-            }
-            else
-            {
-                win.Plot.YAxisFixed = false;
-            }
-            
-            // Dynamic tracking: update on geometry change
-            line.GeometryChanged += (_, _) => UpdateLineProfile(line);
+            line.IsProfileActive = true;
+            sourceView.OverlayManager.InvalidateVisual.Invoke();
 
-            // Untrack if user closes the profile window directly
-            win.Closed += (_, _) => _lineProfileWindows.Remove(line);
+            // Untrack if user closes the profile window directly. A window replaced by a newer one
+            // for the same line must not untrack its successor.
+            win.Closed += (_, _) =>
+            {
+                if (!_lineProfileWindows.TryGetValue(line, out var current) || !ReferenceEquals(current.Window, win))
+                    return;
+                _lineProfileWindows.Remove(line);
+                line.IsProfileActive = false;
+                sourceView.OverlayManager.InvalidateVisual.Invoke();
+            };
 
             // Highlight the corresponding line while the profile window is active
             win.Activated += (_, _) =>
@@ -618,6 +615,14 @@ namespace MxPlot.UI.Avalonia.Views
         {
             var result = new List<PlotSeries>();
             var dims = md.Dimensions;
+
+            // Tell the line which way the physical axes run in this view, so that the profile's
+            // start end (and with it the origin) is the one the extraction below uses, and how long
+            // a world unit is, so that it measures distances along the profile axis.
+            line.SetProfileAxes(
+                md.XStep < 0 ? -1 : 1,
+                (sourceView.FlipY ? -1 : 1) * (md.YStep < 0 ? -1 : 1),
+                Math.Abs(md.XStep), Math.Abs(md.YStep));
 
             // Complex data (including Composite) has no natural double value -- read it in the value
             // mode currently shown in sourceView's bitmap, so the profile matches what the user sees.
@@ -684,26 +689,6 @@ namespace MxPlot.UI.Avalonia.Views
             double gain = maxLuma / luma;
             byte Dim(byte v) => (byte)Math.Clamp(v * gain, 0, 255);
             return Color.FromRgb(Dim(c.R), Dim(c.G), Dim(c.B));
-        }
-
-        /// <summary>
-        /// Returns the value range currently displayed for the image: the header
-        /// <see cref="ValueRangeBar"/> in LUT mode (correct across Fixed/Current/All/Roi, since
-        /// <see cref="ValueRangeBar.DisplayedMinValue"/>/<see cref="ValueRangeBar.DisplayedMaxValue"/>
-        /// always track what is shown, unlike <c>IsFixedRange</c> which only says whether the
-        /// rendered image rescales per frame), or the shared Composite range in Global scope.
-        /// Returns <c>NaN</c> when no single range applies (Composite Channel-wise scope, where
-        /// each channel owns its own range) -- callers should fall back to auto-fit in that case.
-        /// </summary>
-        private (double Min, double Max) GetCurrentDisplayedValueRange()
-        {
-            if (_isCompositeMode)
-            {
-                return _compositeScope == CompositeRangeScope.Global && _compositeRecipes.Count > 0
-                    ? (_compositeRecipes[0].ValueMin, _compositeRecipes[0].ValueMax)
-                    : (double.NaN, double.NaN);
-            }
-            return (_rangeBar.DisplayedMinValue, _rangeBar.DisplayedMaxValue);
         }
 
         /// <summary>
@@ -824,7 +809,20 @@ namespace MxPlot.UI.Avalonia.Views
             var series = BuildProfileSeries(line, md, entry.SourceView, entry.GroupAxisName);
             for (int i = 0; i < series.Count; i++)
                 entry.Window.Plot.UpdatePointsAndFit(i, series[i].Points);
+
+            // Follow the interpolation in the title, unless the user has retitled the plot.
+            string title = LineProfileTitle(line);
+            if (entry.Window.Plot.PlotTitle == entry.Window.Title && entry.Window.Title != title)
+            {
+                entry.Window.Title = title;
+                entry.Window.Plot.PlotTitle = title;
+            }
         }
+
+        private static string LineProfileTitle(LineObject line) =>
+            line.ProfileInterpolation == LineProfileOption.NearestNeighbor
+                ? "Line Profile (Nearest)"
+                : "Line Profile (Bilinear)";
 
         private void UpdateAllLineProfiles()
         {
@@ -896,34 +894,34 @@ namespace MxPlot.UI.Avalonia.Views
                 (line.P1.Y > md.YCount - 1 && line.P2.Y > md.YCount - 1))
                 return [];
 
-            // ── 2. Clamp endpoints to pixel centres [0, Count-1] ─────────────────────
-            static double Clamp(double v, int n) => Math.Clamp(v, 0.0, n - 1.0);
-            double wx1 = Clamp(line.P1.X, md.XCount), wy1 = Clamp(line.P1.Y, md.YCount);
-            double wx2 = Clamp(line.P2.X, md.XCount), wy2 = Clamp(line.P2.Y, md.YCount);
+            // ── 2. World → physical coords ─────────────────────────────────────────────
+            // The endpoints are not clamped to the data: GetLineProfile clips the segment itself,
+            // which keeps its direction, so only the part of the line over the data is sampled.
+            // flipY = true  (main / YZ): LutBitmapWriter flipped → row 0 = YMax → Y = YMax − wy × YStep
+            // flipY = false (XZ bottom): no LutBitmapWriter flip  → row 0 = YMin → Y = YMin + wy × YStep
+            double px1 = md.XMin + line.P1.X * md.XStep;
+            double py1 = flipY ? md.YMax - line.P1.Y * md.YStep : md.YMin + line.P1.Y * md.YStep;
+            double px2 = md.XMin + line.P2.X * md.XStep;
+            double py2 = flipY ? md.YMax - line.P2.Y * md.YStep : md.YMin + line.P2.Y * md.YStep;
 
-            // ── 3. World → physical coords ─────────────────────────────────────────────
-            // flipY = true  (main / YZ): BitmapWriter flipped → row 0 = YMax → Y = YMax − wy × YStep
-            // flipY = false (XZ bottom): no BitmapWriter flip  → row 0 = YMin → Y = YMin + wy × YStep
-            double px1 = md.XMin + wx1 * md.XStep;
-            double py1 = flipY ? md.YMax - wy1 * md.YStep : md.YMin + wy1 * md.YStep;
-            double px2 = md.XMin + wx2 * md.XStep;
-            double py2 = flipY ? md.YMax - wy2 * md.YStep : md.YMin + wy2 * md.YStep;
-
-            // ── 4. Order p1→p2 from visual bottom-left toward top-right ───────────────
-            // Primary  : smaller physical X  = left  (no X-inversion in any view).
-            // Secondary: smaller physical Y  = visual bottom
-            //            (YMin is the visual bottom in BOTH flipY modes, so this is uniform).
-            if (px1 > px2 || (px1 == px2 && py1 > py2))
+            // ── 3. Order the ends from visual bottom-left toward top-right ─────────────
+            // The rule lives in LineObject.RunsFromP1 (smaller physical X first, then smaller
+            // physical Y), the same one that places the profile origin on the line.
+            bool fromP1 = line.RunsFromP1;
+            if (!fromP1)
                 (px1, py1, px2, py2) = (px2, py2, px1, py1);
+
+            // The origin as a fraction of the way from the profile's start to its end.
+            double originT = fromP1 ? line.EffectiveOriginT : 1.0 - line.EffectiveOriginT;
 
             (double[] pos, double[] values) = md is MatrixData<Complex> typedMd
                 ? typedMd.GetLineProfile(
                     (X: px1, Y: py1), (X: px2, Y: py2),
-                    frameIndex: frameIndex, option: LineProfileOption.Bilinear,
-                    valueMode: (int)complexValueMode)
+                    frameIndex: frameIndex, option: line.ProfileInterpolation,
+                    valueMode: (int)complexValueMode, originT: originT)
                 : md.GetLineProfile(
                     (X: px1, Y: py1), (X: px2, Y: py2),
-                    frameIndex: frameIndex, option: LineProfileOption.Bilinear);
+                    frameIndex: frameIndex, option: line.ProfileInterpolation, originT: originT);
             var points = new List<(double X, double Y)>(pos.Length);
             for (int i = 0; i < pos.Length; i++)
                 points.Add((pos[i], values[i]));

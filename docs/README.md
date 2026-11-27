@@ -1,6 +1,6 @@
 ﻿# MxPlot Documentation
 
-**Last Updated**: 2026-08-20
+**Last Updated**: 2026-11-26
 
 - Detailed guides and technical references for the MxPlot library stack.
 - Content may be updated as the library evolves
@@ -33,6 +33,9 @@
 - **[VolumeAccessor Guide](./VolumeAccessor_Guide.md)** ([日本語](./VolumeAccessor_Guide_ja.md))  
   3D volume operations: MIP/MinIP/AIP projections, orthogonal views, and performance optimization.
 
+- **[Spatial Filter Operations Guide](./SpatialFilter_Guide.md)** ([日本語](./SpatialFilter_Guide_ja.md))  
+  Spatial filtering in `MxPlot.Core.Processing`: built-in kernels, usage and examples.
+
 - **[Custom Value Types Guide](./CustomValueTypes_Guide.md)**  
   Complex and custom unmanaged structs: element types, value modes, registering a struct (with templates), processing and saving structured data. Core API stable; UI support for custom structs is partial.
 
@@ -40,11 +43,14 @@
 
 ## MxPlot.UI.Avalonia — UI Components
 
-- **[MxPlot.UI.Avalonia Overview](./MxPlotUIAvalonia_Overview.md)**  
-  Overview of the Avalonia UI layer: `MatrixPlotter`, `MxView`, `MxPlotHostApplication`, and the plugin / action model.
+- **[MxPlot.UI.Avalonia Overview](./MxPlotUIAvalonia_Overview.md)** ([日本語](./MxPlotUIAvalonia_Overview_ja.md))  
+  Overview of the Avalonia UI layer: `MatrixPlotter`, `MxView`, `MxPlotHostApplication`, the plugin / action model, and custom LUTs (`.mlut`).
 
 - **[MatrixPlotter Basic Usage Guide](./MatrixPlotter_Usage_Guide.md)**  
   How to open a `MatrixPlotter` window and drive it from code: host setup for Avalonia / WinForms / WPF / console apps, refreshing and replacing data, the three external-control entry points (Facade properties, ViewModel, `MainView`), frame and orthogonal-view control, linked plotters, events, and export.
+
+- **[Calculator and Formula Guide](./Calculator_Formula_Guide.md)** ([日本語](./Calculator_Formula_Guide_ja.md))  
+  Computing data from formulas with the Calculator and Create Data: examples, variables, ways to read data, functions, and results that follow their source.
 
 - **[MatrixPlotter Composite Rendering Guide](./MatrixPlotter_Composite_Guide.md)**  
   Multi-channel composite display: entry points, `BlendRecipe` per-channel settings, blend modes, Global vs Channel-wise value ranges, RGB auto-composite and grayscale conversion, and how Composite interacts with Extract / projections / persistence.

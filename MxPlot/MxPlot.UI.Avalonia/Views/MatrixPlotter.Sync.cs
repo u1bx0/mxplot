@@ -78,6 +78,47 @@ namespace MxPlot.UI.Avalonia.Views
         /// <summary>Fired when a Replace crop is reverted via the Processing menu on this plotter.</summary>
         internal event EventHandler? SyncCropReverted;
 
+        // ── Sync group membership ────────────────────────────────────────────
+
+        private bool _isInSyncGroup;
+
+        /// <summary>
+        /// Whether a <see cref="MatrixPlotterSyncGroup"/> holds this window; set by the group.
+        /// </summary>
+        internal bool IsInSyncGroup
+        {
+            get => _isInSyncGroup;
+            set
+            {
+                _isInSyncGroup = value;
+                if (_syncScalesBtn != null) _syncScalesBtn.IsVisible = value;
+            }
+        }
+
+        /// <summary>
+        /// Sends the current scales - X, Y and every axis that has a physical scale - to the other
+        /// members of the sync group, whether or not they have changed here. Units are not sent.
+        /// </summary>
+        internal void PushScalesToSyncGroup()
+        {
+            var data = _currentData;
+            if (data == null) return;
+
+            void Send(string target, double min, double max)
+            {
+                SyncScaleChanged?.Invoke(this, (target, ScaleParameter.Min, min));
+                SyncScaleChanged?.Invoke(this, (target, ScaleParameter.Max, max));
+            }
+
+            Send("X", data.XMin, data.XMax);
+            Send("Y", data.YMin, data.YMax);
+            foreach (var axis in data.Axes)
+            {
+                if (!axis.IsIndexBased && axis.Count > 1)
+                    Send(axis.Name, axis.Min, axis.Max);
+            }
+        }
+
         // ── Snapshot capture / restore ───────────────────────────────────────
 
         /// <summary>
@@ -272,10 +313,13 @@ namespace MxPlot.UI.Avalonia.Views
         /// When Step is applied, Max is recalculated as: newMax = Min + Step × (Count - 1).
         /// This matches the existing behavior in MatrixPlotter.InfoTab.cs.
         /// </summary>
-        /// <returns><c>true</c> if the scale was actually applied; <c>false</c> if skipped (e.g., axis not found).</returns>
+        /// <returns>
+        /// <c>true</c> if the scale changed; <c>false</c> if skipped (e.g., axis not found) or already
+        /// at that value, in which case the window is not marked as modified.
+        /// </returns>
         internal bool SyncApplyScale(string targetAxis, ScaleParameter parameter, double value)
         {
-            if (_currentData == null) return false;
+            if (_currentData == null || HasScaleValue(targetAxis, parameter, value)) return false;
 
             using var _ = _reentrancy.Begin(GuardContext.SyncApply);
 
@@ -301,7 +345,36 @@ namespace MxPlot.UI.Avalonia.Views
             return applied;
         }
 
-        private void ApplyXYScale(string axis, ScaleParameter parameter, double value)
+        /// <summary>Whether the target's <paramref name="parameter"/> already is <paramref name="value"/>.</summary>
+        private bool HasScaleValue(string targetAxis, ScaleParameter parameter, double value)
+        {
+            var data = _currentData!;
+            double current;
+            if (targetAxis == "X" || targetAxis == "Y")
+            {
+                bool x = targetAxis == "X";
+                current = parameter switch
+                {
+                    ScaleParameter.Min => x ? data.XMin : data.YMin,
+                    ScaleParameter.Max => x ? data.XMax : data.YMax,
+                    _ => x ? data.XStep : data.YStep,
+                };
+            }
+            else
+            {
+                var axis = data.Axes.FindAxis(targetAxis);
+                if (axis == null) return false;
+                current = parameter switch
+                {
+                    ScaleParameter.Min => axis.Min,
+                    ScaleParameter.Max => axis.Max,
+                    _ => axis.Step,
+                };
+            }
+            return current.Equals(value);
+        }
+
+        private void ApplyXYScale(string axis,ScaleParameter parameter, double value)
         {
             if (_currentData == null) return;
 

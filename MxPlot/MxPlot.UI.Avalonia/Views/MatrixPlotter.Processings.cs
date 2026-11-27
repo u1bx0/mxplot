@@ -3,6 +3,7 @@ using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Tools;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Overlays;
+using MxPlot.UI.Avalonia.Metadata;
 using System;
 using System.Linq;
 using System.Threading;
@@ -262,7 +263,7 @@ namespace MxPlot.UI.Avalonia.Views
                 CropMode.Volume => "3D Crop",
                 _ => "Crop",
             };
-            AppendHistory(result, opLabel, Title,
+            result.AppendHistory(opLabel, Title,
                 $"X={p.X} Y={p.Y} W={p.Width} H={p.Height}{zNote}{frameNote}");
 
             // Overlays are not copied to the crop result. Remove overlay metadata so that
@@ -579,7 +580,7 @@ namespace MxPlot.UI.Avalonia.Views
 
                 var result = BuildXZ(null);
                 string frameLabel = BuildOrthoLabel("X", capturedAxis, "Y", capturedIY, capturedData, channelAxisName);
-                AppendHistory(result, "Extract Frame (XZ)", Title,
+                result.AppendHistory("Extract Frame (XZ)", Title,
                     BuildOrthoHistoryDetail("XZ", "Y", capturedIY, capturedData, capturedAxis, channelAxisName));
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
                 if (useComposite) SeedChildCompositeMode(child, result, channelAxisName!);
@@ -672,7 +673,7 @@ namespace MxPlot.UI.Avalonia.Views
 
                 var result = BuildYZ(null);
                 string frameLabel = BuildOrthoLabel("Y", capturedAxis, "X", capturedIX, capturedData, channelAxisName);
-                AppendHistory(result, "Extract Frame (YZ)", Title,
+                result.AppendHistory("Extract Frame (YZ)", Title,
                     BuildOrthoHistoryDetail("YZ", "X", capturedIX, capturedData, capturedAxis, channelAxisName));
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}", linkRefresh: false);
                 if (useComposite) SeedChildCompositeMode(child, result, channelAxisName!);
@@ -741,7 +742,7 @@ namespace MxPlot.UI.Avalonia.Views
                     historyLabel = "Extract Frame" + (isDeepCopy ? "(deep copy)" : "");
                     historyDetail = data.FrameCount > 1 ? BuildFrameHistoryDetail(data, frameIndex) : null;
                 }
-                AppendHistory(result, historyLabel, Title, historyDetail);
+                result.AppendHistory(historyLabel, Title, historyDetail);
                 var child = CreateLinked(result, _view.Lut, $"{Title} {frameLabel}");
                 if (compositeCube != null) SeedChildCompositeMode(child, result, compositeCube.Value.ChannelAxisName);
                 child.Show();

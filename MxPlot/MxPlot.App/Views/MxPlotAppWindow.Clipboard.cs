@@ -13,6 +13,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 
@@ -340,6 +341,44 @@ namespace MxPlot.App.Views
         }
 
         /// <summary>
+        /// Splits one CSV line into fields. A field that starts with a double quote runs to the
+        /// closing quote (a doubled quote is a literal quote) and may contain separators; any text
+        /// between the closing quote and the next separator is appended as is. Other fields are
+        /// read up to the next separator unchanged. An unterminated quote takes the rest of the line.
+        /// </summary>
+        private static List<string> SplitCsvLine(string line, string sep)
+        {
+            var fields = new List<string>();
+            var sb = new StringBuilder();
+            int i = 0;
+            while (true)
+            {
+                sb.Clear();
+                if (i < line.Length && line[i] == '"')
+                {
+                    i++;
+                    while (i < line.Length)
+                    {
+                        if (line[i] == '"')
+                        {
+                            if (i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i += 2; continue; }
+                            i++;
+                            break;
+                        }
+                        sb.Append(line[i++]);
+                    }
+                }
+                while (i < line.Length && string.CompareOrdinal(line, i, sep, 0, sep.Length) != 0)
+                    sb.Append(line[i++]);
+
+                fields.Add(sb.ToString());
+                if (i >= line.Length) break;
+                i += sep.Length;
+            }
+            return fields;
+        }
+
+        /// <summary>
         /// Parses CSV lines with the given separator and extracts header labels if present.
         /// Returns null if parsing fails or data is insufficient.
         /// </summary>
@@ -359,7 +398,7 @@ namespace MxPlot.App.Views
                     .FirstOrDefault();
                 if (firstLine != null)
                 {
-                    headerLabels = firstLine.Split(new[] { sep }, StringSplitOptions.None)
+                    headerLabels = SplitCsvLine(firstLine, sep)
                         .Select(s => s.Trim())
                         .ToArray();
                 }

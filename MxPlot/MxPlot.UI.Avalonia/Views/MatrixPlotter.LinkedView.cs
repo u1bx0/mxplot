@@ -97,6 +97,9 @@ namespace MxPlot.UI.Avalonia.Views
             /// <summary>How a recomputed result is pushed into the follower.</summary>
             internal LinkedViewCommit Commit => _commit;
 
+            /// <summary>The settings of the recompute the user can edit, or <c>null</c> when it has none.</summary>
+            internal ILinkedViewProperties? Properties { get; }
+
             /// <param name="follower">The window being kept up to date.</param>
             /// <param name="source">The window driving it.</param>
             /// <param name="recompute">Produces the follower's new content.</param>
@@ -113,13 +116,18 @@ namespace MxPlot.UI.Avalonia.Views
             /// Transforms that re-read <see cref="MatrixData"/> on every tick do not need this -
             /// they simply follow the new instance.
             /// </param>
+            /// <param name="properties">
+            /// The settings of <paramref name="recompute"/> the user can edit from the follower, or
+            /// <c>null</c> when there are none. See <see cref="EditLinkedViewPropertiesAsync"/>.
+            /// </param>
             internal LinkedView(
                 MatrixPlotter follower,
                 MatrixPlotter source,
                 LinkedViewRecompute recompute,
                 LinkedViewCommit commit = LinkedViewCommit.UpdateView,
                 bool trackActiveIndex = true,
-                bool closeOnSourceDataReplaced = false)
+                bool closeOnSourceDataReplaced = false,
+                ILinkedViewProperties? properties = null)
             {
                 _follower = follower ?? throw new ArgumentNullException(nameof(follower));
                 _source = source ?? throw new ArgumentNullException(nameof(source));
@@ -127,8 +135,11 @@ namespace MxPlot.UI.Avalonia.Views
                 _commit = commit;
 
                 source._syncFollowers.Add(follower);
+                Properties = properties;
                 follower._linkedView = this;
                 follower.UpdateFreezeButtonVisibility();
+                // The follower's menu offers the settings; it may have been built before this link existed.
+                if (properties != null) follower.InvalidateMenuPanel();
 
                 _refreshedHandler = (_, _) => Fire();
                 source.Refreshed += _refreshedHandler;
@@ -319,6 +330,35 @@ namespace MxPlot.UI.Avalonia.Views
         internal bool IsReplaceDataBlocked => IsSyncFollower || !AllowDataReplace;
 
         /// <summary>
+        /// The menu text for editing what this window computes from its source, e.g. <c>Edit Formula…</c>,
+        /// or <see langword="null"/> when the window is not a follower with editable settings.
+        /// </summary>
+        public string? LinkedViewPropertiesLabel => _linkedView?.Properties?.MenuLabel;
+
+        /// <summary>
+        /// Lets the user edit what this window computes from its source (see
+        /// <see cref="LinkedViewPropertiesLabel"/>) and recomputes the window when the settings changed.
+        /// Returns whether they changed; <see langword="false"/> when the window has no such settings.
+        /// Must be called on the UI thread.
+        /// </summary>
+        public async Task<bool> EditLinkedViewPropertiesAsync()
+        {
+            var link = _linkedView;
+            if (link?.Properties is not { } properties) return false;
+            if (!await properties.EditAsync(this)) return false;
+            _refreshMetaTabOnLinkedUpdate = true;
+            link.RequestRecompute();
+            return true;
+        }
+
+        /// <summary>
+        /// Set when the settings of this follower's link were edited: the next result carries a different
+        /// history, so the Metadata tab is rebuilt once when that result arrives. Ordinary updates do not
+        /// rebuild it - their metadata says the same, and a rebuild would reset the tab under the reader.
+        /// </summary>
+        private bool _refreshMetaTabOnLinkedUpdate;
+
+        /// <summary>
         /// Closes every window recomputed from this one, cascading down any chain. Call wherever
         /// this window's own <see cref="_currentData"/> is replaced in place.
         /// </summary>
@@ -369,6 +409,12 @@ namespace MxPlot.UI.Avalonia.Views
             else
             {
                 SyncCurrentDataFromView();
+            }
+
+            if (_refreshMetaTabOnLinkedUpdate)
+            {
+                _refreshMetaTabOnLinkedUpdate = false;
+                RefreshMetaTab();
             }
         }
     }

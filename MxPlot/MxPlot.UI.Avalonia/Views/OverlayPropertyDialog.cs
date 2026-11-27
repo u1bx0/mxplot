@@ -4,6 +4,7 @@ using Avalonia.Controls.Primitives;
 using Avalonia.Layout;
 using Avalonia.Media;
 using MxPlot.Core;
+using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Helpers;
 using MxPlot.UI.Avalonia.Overlays;
 using MxPlot.UI.Avalonia.Overlays.Shapes;
@@ -15,6 +16,8 @@ namespace MxPlot.UI.Avalonia.Views
     /// Tabbed property editor for overlay objects.
     /// <list type="bullet">
     ///   <item><b>Geometry</b> — position / size in Pixel (data-index) or Scale (physical) coordinates.</item>
+    ///   <item><b>Target</b> — style and centre gap (<see cref="TargetingObject"/> only).</item>
+    ///   <item><b>Profile</b> — origin and interpolation of the line profile (<see cref="LineObject"/> only).</item>
     ///   <item><b>Pen</b> — colour, stroke width, dash style, fill.</item>
     /// </list>
     /// All changes are applied live; close the window to dismiss.
@@ -28,6 +31,10 @@ namespace MxPlot.UI.Avalonia.Views
         // Geometry tab state
         private readonly NumericUpDown[] _geoNuds;
         private readonly TextBlock[] _geoUnits;
+        private readonly TextBlock[] _geoLabels;
+        private readonly Control[] _geoRows;
+        // Target tab: hosts the style selector and the rows (e.g. Gap) that belong to it.
+        private StackPanel? _targetPanel;
         private readonly FieldKind[] _geoKinds;
         private bool _isPixelMode = true;
         private bool _suppressSync;
@@ -35,7 +42,15 @@ namespace MxPlot.UI.Avalonia.Views
         // a zero-length line without losing orientation.
         private double _lastLineAngleRad;
 
-        private enum FieldKind { PosX, PosY, SizeX, SizeY, Length }
+        // Profile tab state (LineObject only)
+        private RadioButton? _originLeftRadio;
+        private RadioButton? _originCenterRadio;
+        private RadioButton? _originCustomRadio;
+        private NumericUpDown? _originNud;
+        private ComboBox? _interpCombo;
+        private bool _suppressProfileSync;
+
+        private enum FieldKind { PosX, PosY, CenterX, CenterY, SizeX, SizeY, Length, Gap }
 
         public OverlayPropertyDialog(OverlayObjectBase target, IMatrixData? data, Action redraw)
         {
@@ -49,6 +64,11 @@ namespace MxPlot.UI.Avalonia.Views
                 labels = ["P1 X:", "P1 Y:", "P2 X:", "P2 Y:", "Len:"];
                 _geoKinds = [FieldKind.PosX, FieldKind.PosY, FieldKind.PosX, FieldKind.PosY, FieldKind.Length];
             }
+            else if (target is TargetingObject)
+            {
+                labels = ["X:", "Y:", "W:", "H:", "Gap:"];
+                _geoKinds = [FieldKind.CenterX, FieldKind.CenterY, FieldKind.SizeX, FieldKind.SizeY, FieldKind.Gap];
+            }
             else if (target is BoundingBoxBase)
             {
                 labels = ["X:", "Y:", "W:", "H:"];
@@ -61,6 +81,8 @@ namespace MxPlot.UI.Avalonia.Views
             }
             _geoNuds = new NumericUpDown[labels.Length];
             _geoUnits = new TextBlock[labels.Length];
+            _geoLabels = new TextBlock[labels.Length];
+            _geoRows = new Control[labels.Length];
 
             Title = target switch
             {
@@ -80,7 +102,9 @@ namespace MxPlot.UI.Avalonia.Views
             ShowInTaskbar = false;
 
             Content = BuildContent(labels);
+            ApplyTargetLayout();
             SyncFromOverlay();
+            SyncProfileTab();
             SubscribeGeometryChanges();
             Closed += (_, _) => UnsubscribeGeometryChanges();
         }
@@ -102,6 +126,20 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     Header = new TextBlock { Text = "Geometry", FontSize = 11, Margin = new Thickness(0, 0, 0, -10) },
                     Content = BuildGeometryTab(labels),
+                });
+
+            if (_targetPanel != null)
+                tabControl.Items.Add(new TabItem
+                {
+                    Header = new TextBlock { Text = "Target", FontSize = 11, Margin = new Thickness(0, 0, 0, -10) },
+                    Content = BuildTargetTab(),
+                });
+
+            if (_target is LineObject)
+                tabControl.Items.Add(new TabItem
+                {
+                    Header = new TextBlock { Text = "Profile", FontSize = 11, Margin = new Thickness(0, 0, 0, -10) },
+                    Content = BuildProfileTab(),
                 });
 
             tabControl.Items.Add(new TabItem
@@ -155,6 +193,8 @@ namespace MxPlot.UI.Avalonia.Views
             panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 2)));
 
             // ── NUD rows ──────────────────────────────────────────────────
+            if (_target is TargetingObject)
+                _targetPanel = new StackPanel { Margin = new Thickness(10, 8), Spacing = 4 };
             bool isBBox = _target is BoundingBoxBase;
             const double labelW = 42;
             for (int i = 0; i < labels.Length; i++)
@@ -163,7 +203,7 @@ namespace MxPlot.UI.Avalonia.Views
                 if (i == 0 && isBBox)
                     panel.Children.Add(new TextBlock
                     {
-                        Text = "Origin (bottom-left)",
+                        Text = _target is TargetingObject ? "Center" : "Origin (bottom-left)",
                         FontSize = 10, Opacity = 0.5,
                     });
                 if (_geoKinds[i] == FieldKind.SizeX && isBBox)
@@ -190,14 +230,17 @@ namespace MxPlot.UI.Avalonia.Views
                 nud.ValueChanged += (_, _) => OnNudChanged(idx);
 
                 var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
-                row.Children.Add(new TextBlock
+                var labelTb = new TextBlock
                 {
                     Text = labels[i], FontSize = 11,
                     Width = labelW, VerticalAlignment = VerticalAlignment.Center,
-                });
+                };
+                _geoLabels[i] = labelTb;
+                _geoRows[i] = row;
+                row.Children.Add(labelTb);
                 row.Children.Add(nud);
                 row.Children.Add(unitTb);
-                panel.Children.Add(row);
+                (_geoKinds[i] == FieldKind.Gap ? _targetPanel! : panel).Children.Add(row);
             }
 
             // ── Wire mode switch ──────────────────────────────────────────
@@ -211,6 +254,140 @@ namespace MxPlot.UI.Avalonia.Views
             };
 
             return panel;
+        }
+
+        private Control BuildTargetTab()
+        {
+            var t = (TargetingObject)_target;
+            var combo = new ComboBox
+            {
+                FontSize = 11, MinHeight = 0, Height = 22, Width = 100,
+                Padding = new Thickness(6, 0),
+                ItemsSource = new[] { "Reticle", "Marker (+)", "Marker (x)" },
+                SelectedIndex = (int)t.Style,
+            };
+            combo.SelectionChanged += (_, _) =>
+            {
+                if (_suppressSync || combo.SelectedIndex < 0) return;
+                t.Style = (TargetStyle)combo.SelectedIndex;
+                ApplyTargetLayout();
+                // Zero-delta move raises GeometryChanged so the Geometry rows resync.
+                _target.Move(0, 0);
+                _redraw();
+            };
+
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            row.Children.Add(new TextBlock
+            {
+                Text = "Type:", FontSize = 11, Width = 42, VerticalAlignment = VerticalAlignment.Center,
+            });
+            row.Children.Add(combo);
+            _targetPanel!.Children.Insert(0, row);
+            return _targetPanel;
+        }
+
+        private Control BuildProfileTab()
+        {
+            var line = (LineObject)_target;
+            var panel = new StackPanel { Margin = new Thickness(10, 8), Spacing = 4 };
+
+            panel.Children.Add(new TextBlock { Text = "Origin", FontSize = 10, Opacity = 0.5 });
+
+            RadioButton MakeOriginRadio(string text, LineProfileOrigin mode)
+            {
+                var radio = new RadioButton
+                {
+                    Content = text, GroupName = "ProfileOrigin",
+                    FontSize = 11, MinHeight = 0, Height = 20,
+                };
+                radio.Classes.Add("compact");
+                radio.IsCheckedChanged += (_, _) =>
+                {
+                    if (_suppressProfileSync || radio.IsChecked != true) return;
+                    line.ProfileOrigin = mode;
+                    _redraw();
+                };
+                return radio;
+            }
+
+            _originLeftRadio = MakeOriginRadio("Left end", LineProfileOrigin.LeftEnd);
+            _originCenterRadio = MakeOriginRadio("Center", LineProfileOrigin.Center);
+            _originCustomRadio = MakeOriginRadio("Custom", LineProfileOrigin.Custom);
+
+            // The fraction runs along the profile: 0 at the left end, 1 at the other end.
+            _originNud = ControlFactory.MakeNumericUpDown(0.5m, 0m, 1m, 0.05m, width: 72);
+            _originNud.FormatString = "F3";
+            global::Avalonia.Controls.ToolTip.SetTip(_originNud, "Origin position along the line: 0 at the left end, 1 at the other end.");
+            _originNud.ValueChanged += (_, _) =>
+            {
+                if (_suppressProfileSync || _originNud.Value is not { } v) return;
+                double fraction = (double)v;
+                line.OriginT = line.RunsFromP1 ? fraction : 1.0 - fraction;
+                _redraw();
+            };
+
+            var customRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            customRow.Children.Add(_originCustomRadio);
+            customRow.Children.Add(_originNud);
+
+            panel.Children.Add(_originLeftRadio);
+            panel.Children.Add(_originCenterRadio);
+            panel.Children.Add(customRow);
+            panel.Children.Add(ControlFactory.MakeSep(new Thickness(0, 2)));
+
+            _interpCombo = new ComboBox
+            {
+                Width = 90, Height = 20, MinHeight = 0,
+                FontSize = 11, Padding = new Thickness(4, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+            _interpCombo.Items.Add("Bilinear");
+            _interpCombo.Items.Add("Nearest");
+            _interpCombo.SelectionChanged += (_, _) =>
+            {
+                if (_suppressProfileSync || _interpCombo.SelectedIndex < 0) return;
+                line.ProfileInterpolation = _interpCombo.SelectedIndex == 1
+                    ? LineProfileOption.NearestNeighbor
+                    : LineProfileOption.Bilinear;
+                _redraw();
+            };
+            var interpRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+            interpRow.Children.Add(new TextBlock
+            {
+                Text = "Interp:", FontSize = 11, Width = 44, VerticalAlignment = VerticalAlignment.Center,
+            });
+            interpRow.Children.Add(_interpCombo);
+            panel.Children.Add(interpRow);
+
+            return panel;
+        }
+
+        private void SyncProfileTab()
+        {
+            if (_target is not LineObject line || _originNud == null) return;
+            _suppressProfileSync = true;
+            try
+            {
+                _originLeftRadio!.IsChecked = line.ProfileOrigin == LineProfileOrigin.LeftEnd;
+                _originCenterRadio!.IsChecked = line.ProfileOrigin == LineProfileOrigin.Center;
+                _originCustomRadio!.IsChecked = line.ProfileOrigin == LineProfileOrigin.Custom;
+                _originNud.IsEnabled = line.ProfileOrigin == LineProfileOrigin.Custom;
+
+                double t = line.EffectiveOriginT;
+                _originNud.Value = (decimal)Math.Round(line.RunsFromP1 ? t : 1.0 - t, 4);
+                _interpCombo!.SelectedIndex = line.ProfileInterpolation == LineProfileOption.NearestNeighbor ? 1 : 0;
+            }
+            finally { _suppressProfileSync = false; }
+        }
+
+        // A marker is a square defined by one size, and has no centre gap.
+        private void ApplyTargetLayout()
+        {
+            if (_target is not TargetingObject t) return;
+            bool marker = t.IsMarker;
+            _geoLabels[2].Text = marker ? "Size:" : "W:";
+            _geoRows[3].IsVisible = !marker;
+            _geoRows[4].IsEnabled = !marker;
         }
 
         private Control BuildPenTab()
@@ -314,6 +491,7 @@ namespace MxPlot.UI.Avalonia.Views
         private double[] ReadPixelValues() => _target switch
         {
             LineObject l => [l.P1.X, FlipY(l.P1.Y), l.P2.X, FlipY(l.P2.Y), LinePixelLength(l)],
+            TargetingObject t => [t.X + t.Width / 2, FlipY(t.Y + t.Height / 2), t.Width, t.Height, t.CenterGap],
             // Origin = world bottom-left (X, Y+H) → FlipY gives data-index Y of bottom-left
             BoundingBoxBase bb => [bb.X, FlipY(bb.Origin.Y), bb.Width, bb.Height],
             _ => [],
@@ -351,6 +529,18 @@ namespace MxPlot.UI.Avalonia.Views
                                 line.P1.X + pixelValue * Math.Cos(angleRad),
                                 line.P1.Y + pixelValue * Math.Sin(angleRad));
                             break;
+                    }
+                }
+                else if (_target is TargetingObject tg)
+                {
+                    // Edits are about the centre so that size changes keep the target point fixed.
+                    switch (idx)
+                    {
+                        case 0: tg.X = pixelValue - tg.Width / 2; break;
+                        case 1: tg.Y = FlipY(pixelValue) - tg.Height / 2; break;
+                        case 2: tg.ResizeAboutCenter(pixelValue, tg.Height); break;
+                        case 3: tg.ResizeAboutCenter(tg.Width, pixelValue); break;
+                        case 4: tg.CenterGap = pixelValue; break;
                     }
                 }
                 else if (_target is BoundingBoxBase bb)
@@ -433,8 +623,8 @@ namespace MxPlot.UI.Avalonia.Views
             string yu = _data?.YUnit ?? "";
             return kind switch
             {
-                FieldKind.PosX or FieldKind.SizeX => xu,
-                FieldKind.PosY or FieldKind.SizeY => yu,
+                FieldKind.PosX or FieldKind.CenterX or FieldKind.SizeX or FieldKind.Gap => xu,
+                FieldKind.PosY or FieldKind.CenterY or FieldKind.SizeY => yu,
                 FieldKind.Length => xu == yu ? xu : "",
                 _ => "",
             };
@@ -442,7 +632,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private double GetScaleIncrement(FieldKind kind) => kind switch
         {
-            FieldKind.PosX or FieldKind.SizeX => Math.Abs(_data?.XStep ?? 1),
+            FieldKind.PosX or FieldKind.CenterX or FieldKind.SizeX or FieldKind.Gap => Math.Abs(_data?.XStep ?? 1),
             FieldKind.Length => PhysicalLengthPerPixel(),
             _ => Math.Abs(_data?.YStep ?? 1),
         };
@@ -451,9 +641,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         private double PixelToScale(FieldKind kind, double pixel) => kind switch
         {
-            FieldKind.PosX => _data!.XMin + pixel * Math.Abs(_data.XStep),
-            FieldKind.PosY => _data!.YMin + pixel * Math.Abs(_data.YStep),
-            FieldKind.SizeX => pixel * Math.Abs(_data!.XStep),
+            FieldKind.PosX or FieldKind.CenterX => _data!.XMin + pixel * Math.Abs(_data.XStep),
+            FieldKind.PosY or FieldKind.CenterY => _data!.YMin + pixel * Math.Abs(_data.YStep),
+            FieldKind.SizeX or FieldKind.Gap => pixel * Math.Abs(_data!.XStep),
             FieldKind.SizeY => pixel * Math.Abs(_data!.YStep),
             FieldKind.Length => pixel * PhysicalLengthPerPixel(),
             _ => pixel,
@@ -461,9 +651,9 @@ namespace MxPlot.UI.Avalonia.Views
 
         private double ScaleToPixel(FieldKind kind, double scale) => kind switch
         {
-            FieldKind.PosX when _data?.XStep != 0 => (scale - _data.XMin) / Math.Abs(_data.XStep),
-            FieldKind.PosY when _data?.YStep != 0 => (scale - _data.YMin) / Math.Abs(_data.YStep),
-            FieldKind.SizeX when _data?.XStep != 0 => scale / Math.Abs(_data.XStep),
+            FieldKind.PosX or FieldKind.CenterX when _data?.XStep != 0 => (scale - _data.XMin) / Math.Abs(_data.XStep),
+            FieldKind.PosY or FieldKind.CenterY when _data?.YStep != 0 => (scale - _data.YMin) / Math.Abs(_data.YStep),
+            FieldKind.SizeX or FieldKind.Gap when _data?.XStep != 0 => scale / Math.Abs(_data.XStep),
             FieldKind.SizeY when _data?.YStep != 0 => scale / Math.Abs(_data.YStep),
             FieldKind.Length => PhysicalLengthPerPixel() is > 1e-10 and var pp ? scale / pp : scale,
             _ => scale,
@@ -511,7 +701,11 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
-        private void OnExtLine(object? s, (Point, Point) _) => SyncFromOverlay();
+        private void OnExtLine(object? s, (Point, Point) _)
+        {
+            SyncFromOverlay();
+            SyncProfileTab();
+        }
         private void OnExtBBox(object? s, (Point, double, double) _) => SyncFromOverlay();
         private void OnExtBounds(object? s, EventArgs _) => SyncFromOverlay();
     }

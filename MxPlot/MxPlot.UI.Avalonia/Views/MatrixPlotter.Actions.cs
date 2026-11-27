@@ -19,6 +19,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using MxPlot.Core.IO.Formats;
+using MxPlot.UI.Avalonia.Metadata;
 
 namespace MxPlot.UI.Avalonia.Views
 {
@@ -126,13 +127,133 @@ namespace MxPlot.UI.Avalonia.Views
         /// </summary>
         private async Task SaveDataAsync() => await SaveAsAsync();
 
+        // FormatName of the writer used by the last successful save in this process; shared by all
+        // windows so that the file type chosen once is offered first everywhere.
+        private static string? _lastSaveFormatName;
+
+        /// <summary>
+        /// Index of the descriptor whose longest extension ends <paramref name="fileName"/>
+        /// (case-insensitive), or -1 when none matches.
+        /// </summary>
+        private static int FindWriterIndex(IReadOnlyList<IFileFormatDescriptor> descriptors, string fileName)
+        {
+            int bestIdx = -1;
+            int bestLen = 0;
+            for (int i = 0; i < descriptors.Count; i++)
+            {
+                foreach (var ext in descriptors[i].Extensions)
+                {
+                    if (ext.Length > bestLen && fileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase))
+                    {
+                        bestIdx = i;
+                        bestLen = ext.Length;
+                    }
+                }
+            }
+            return bestIdx;
+        }
+
+        /// <summary>
+        /// True when the axes fit an ImageJ hyperstack (channels, slices, frames): Channel, Z and
+        /// Time/Timelapse take their own dimension, and any other axis with more than one position
+        /// takes a free one of slices and frames. Mirrors the layout the ImageJ-compatible TIFF
+        /// writer applies, so a file of such data keeps its axes.
+        /// </summary>
+        internal static bool FitsImageJTiffLayout(IEnumerable<Axis> axes)
+        {
+            bool hasZ = false, hasT = false;
+            int others = 0;
+            foreach (var axis in axes)
+            {
+                string name = axis.Name;
+                if (name == "Channel") continue;
+                if (name == "Z") hasZ = true;
+                else if ((name == "Time" || name == "Timelapse") && !hasT) hasT = true;
+                else if (axis.Count > 1) others++;
+            }
+            int free = (hasZ ? 0 : 1) + (hasT ? 0 : 1);
+            return others <= free;
+        }
+
+        /// <summary>
+        /// True when every axis is one OME-TIFF stores: Channel, Z, Time or FOV (any letter case).
+        /// </summary>
+        internal static bool FitsOmeTiffLayout(IEnumerable<Axis> axes)
+        {
+            foreach (var axis in axes)
+            {
+                string name = axis.Name;
+                if (!(name.Equals("Channel", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("Z", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("Time", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("FOV", StringComparison.OrdinalIgnoreCase)))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Index of the writer whose file type the Save As dialog offers first, or -1 when
+        /// <paramref name="descriptors"/> has none of the formats the last rule looks for.
+        /// First match wins:
+        /// <list type="number">
+        ///   <item>the extension of <paramref name="title"/> (the file the window was opened from or saved to),</item>
+        ///   <item>the format of the last successful save in this process,</item>
+        ///   <item><see cref="DefaultSaveFormat"/>,</item>
+        ///   <item>by the axes of the data, the first of these that is registered:
+        ///   axes that fit an ImageJ hyperstack: ImageJ-compatible TIFF, OME-TIFF, <c>.mxd</c>;
+        ///   axes only OME-TIFF stores (such as Channel, Z, Time and FOV together): OME-TIFF, <c>.mxd</c>;
+        ///   any other axes: <c>.mxd</c>, which keeps every axis.</item>
+        /// </list>
+        /// </summary>
+        /// <param name="axes">The axes of the data to save, or <see langword="null"/> when they are not known (treated as fitting ImageJ).</param>
+        internal static int ChooseInitialWriterIndex(IReadOnlyList<IFileFormatDescriptor> descriptors, string? title, IEnumerable<Axis>? axes = null)
+        {
+            int idx = FindWriterIndex(descriptors, title ?? "");
+
+            if (idx < 0 && _lastSaveFormatName != null)
+            {
+                for (int i = 0; i < descriptors.Count; i++)
+                {
+                    if (descriptors[i].FormatName == _lastSaveFormatName)
+                        return i;
+                }
+            }
+
+            if (idx < 0 && !string.IsNullOrEmpty(DefaultSaveFormat))
+            {
+                string ext = DefaultSaveFormat.StartsWith('.') ? DefaultSaveFormat : "." + DefaultSaveFormat;
+                idx = FindWriterIndex(descriptors, ext);
+            }
+
+            if (idx < 0)
+            {
+                string[] preference =
+                    axes == null || FitsImageJTiffLayout(axes) ? [".tif", ".ome.tif", ".mxd"]
+                    : FitsOmeTiffLayout(axes) ? [".ome.tif", ".mxd"]
+                    : [".mxd"];
+                foreach (string ext in preference)
+                {
+                    int i = FindWriterIndex(descriptors, ext);
+                    if (i >= 0) return i;
+                }
+            }
+
+            return idx;
+        }
+
+        /// <summary>Forgets the last saved format. For tests, which share the process-wide state.</summary>
+        internal static void ResetLastSaveFormat() => _lastSaveFormatName = null;
+
         /// <summary>
         /// Saves the current <see cref="IMatrixData"/> to <paramref name="path"/>.
         /// When <paramref name="path"/> is <c>null</c> (default), a Save File dialog is shown first.
         /// The format is inferred from the file extension via <see cref="FormatRegistry.CreateWriter"/>.
         /// During save, a progress bar overlay covers the window.
         /// On completion, the window title is updated to the saved file name (unless saving a copy
-        /// of read-only virtual data).
+        /// of read-only virtual data, or <see cref="AlwaysSaveAsCopy"/> is set).
+        /// The file type offered first in the dialog follows the title's extension, then the type of
+        /// the last successful save in this process, then <see cref="DefaultSaveFormat"/>.
         /// </summary>
         /// <param name="path">
         /// Destination file path, or <c>null</c> to open the Save File picker dialog.
@@ -154,30 +275,7 @@ namespace MxPlot.UI.Avalonia.Views
                 foreach (var c in Path.GetInvalidFileNameChars())
                     suggestedName = suggestedName.Replace(c, '_');
 
-                // Pre-select the file type matching the original file extension.
-                // Falls back to OME-TIFF if no match.
-                string titleLower = (title ?? "").ToLowerInvariant();
-                int bestIdx = -1;
-                int bestLen = 0;
-                for (int i = 0; i < descriptors.Count; i++)
-                {
-                    foreach (var ext in descriptors[i].Extensions)
-                    {
-                        if (titleLower.EndsWith(ext, StringComparison.Ordinal) && ext.Length > bestLen)
-                        {
-                            bestIdx = i;
-                            bestLen = ext.Length;
-                        }
-                    }
-                }
-                if (bestIdx < 0)
-                {
-                    for (int i = 0; i < descriptors.Count; i++)
-                    {
-                        if (descriptors[i].FormatName.Contains("OME", StringComparison.OrdinalIgnoreCase))
-                        { bestIdx = i; break; }
-                    }
-                }
+                int bestIdx = ChooseInitialWriterIndex(descriptors, title, _currentData.Dimensions.Axes);
                 if (bestIdx > 0)
                 {
                     var preferred = fileTypes[bestIdx];
@@ -236,7 +334,12 @@ namespace MxPlot.UI.Avalonia.Views
 
                 await Task.Run(() => _currentData.SaveAs(path, writer), ct);
 
-                if (_currentData.IsWritable)
+                var writers = FormatRegistry.WriterDescriptors;
+                int savedIdx = FindWriterIndex(writers, Path.GetFileName(path));
+                if (savedIdx >= 0)
+                    _lastSaveFormatName = writers[savedIdx].FormatName;
+
+                if (_currentData.IsWritable && !AlwaysSaveAsCopy)
                 {
                     Title = Path.GetFileName(FormatRegistry.CleanCompoundExtension(path));
                     SourcePath = path;
@@ -321,7 +424,7 @@ namespace MxPlot.UI.Avalonia.Views
                 EndProgress();
             }
 
-            AppendHistory(copy, "Duplicate", Title);
+            copy.AppendHistory("Duplicate", Title);
             var resultPlotter = MatrixPlotter.Create(copy, _view.Lut, $"Copy of {Title}");
 
             // Copy user overlays from the main view to the duplicate.
@@ -488,12 +591,12 @@ namespace MxPlot.UI.Avalonia.Views
                         string histDesc = $"Complex \u2192 double ({modeDesc})" + (applyLog10 ? " + log₁₀" : "");
                         if (replaceData)
                         {
-                            AppendHistory(converted, "Convert Complex", Title, histDesc);
+                            converted.AppendHistory("Convert Complex", Title, histDesc);
                             SetMatrixData(converted, closeDerivedWindows: true);
                         }
                         else
                         {
-                            AppendHistory(converted, "Convert Complex", Title, histDesc);
+                            converted.AppendHistory("Convert Complex", Title, histDesc);
                             MatrixPlotter.Create(converted, _view.Lut, $"Convert of {Title}").Show();
                         }
                     });

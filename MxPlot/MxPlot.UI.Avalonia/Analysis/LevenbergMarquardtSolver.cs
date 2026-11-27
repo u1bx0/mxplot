@@ -26,6 +26,8 @@ namespace MxPlot.UI.Avalonia.Analysis
             /// <summary>Coefficient of determination R².</summary>
             public double R2 { get; init; }
             public bool Converged { get; init; }
+            /// <summary>For each parameter, whether it was held at a given value instead of being fitted.</summary>
+            public IReadOnlyList<bool> IsFixed { get; init; } = [];
             /// <summary>Non-null when fitting failed before the LM loop.</summary>
             public string? Error { get; init; }
 
@@ -56,7 +58,10 @@ namespace MxPlot.UI.Avalonia.Analysis
                 var names = Fitter.ParameterNames;
                 int maxLen = names.Max(n => n.Length);
                 for (int i = 0; i < Parameters.Length; i++)
-                    sb.AppendLine($"  {names[i].PadRight(maxLen)} = {F(Parameters[i])}{u}");
+                {
+                    string note = i < IsFixed.Count && IsFixed[i] ? " (fixed)" : "";
+                    sb.AppendLine($"  {names[i].PadRight(maxLen)} = {F(Parameters[i])}{u}{note}");
+                }
 
                 foreach (var line in Fitter.FormatDerivedResults(Parameters, unit))
                     sb.AppendLine($"  {line}");
@@ -70,23 +75,48 @@ namespace MxPlot.UI.Avalonia.Analysis
 
         // ── Public entry point ────────────────────────────────────────────────
 
-        /// <summary>Fits the model defined by <paramref name="fitter"/> to the supplied XY data.</summary>
-        public static FitResult Fit(IProfileFitter fitter, IReadOnlyList<(double X, double Y)> points)
+        /// <summary>
+        /// The fewest points a fit needs: the fitter's own minimum, less one for each parameter held at a
+        /// fixed value (a fixed parameter takes no data to determine). At least 1.
+        /// </summary>
+        public static int MinimumPoints(IProfileFitter fitter, IReadOnlyList<double?>? fixedValues = null)
         {
-            if (points == null || points.Count < fitter.MinimumPoints)
-                return Fail(fitter, $"Too few data points (minimum {fitter.MinimumPoints} required).");
+            int fixedCount = fixedValues?.Count(v => v != null) ?? 0;
+            return Math.Max(1, fitter.MinimumPoints - fixedCount);
+        }
+
+        /// <summary>
+        /// Fits the model defined by <paramref name="fitter"/> to the supplied XY data.
+        /// </summary>
+        /// <param name="fixedValues">
+        /// One entry per parameter: a value holds that parameter there, <c>null</c> leaves it free.
+        /// <c>null</c> (the default) fits every parameter.
+        /// </param>
+        public static FitResult Fit(IProfileFitter fitter, IReadOnlyList<(double X, double Y)> points,
+            IReadOnlyList<double?>? fixedValues = null)
+        {
+            if (fixedValues != null && fixedValues.Count != fitter.ParameterCount)
+                return Fail(fitter, "The fixed values do not match the fitter's parameters.");
+
+            int minPoints = MinimumPoints(fitter, fixedValues);
+            if (points == null || points.Count < minPoints)
+                return Fail(fitter, $"Too few data points (minimum {minPoints} required).");
 
             var pts = points.Where(p => double.IsFinite(p.X) && double.IsFinite(p.Y)).ToList();
-            if (pts.Count < fitter.MinimumPoints)
+            if (pts.Count < minPoints)
                 return Fail(fitter, "Too few finite data points.");
 
             double[] p0 = fitter.EstimateInitialParams(pts);
-            return RunLM(fitter, pts, p0);
+            if (fixedValues != null)
+                for (int i = 0; i < p0.Length; i++)
+                    if (fixedValues[i] is { } v) p0[i] = v;
+            return RunLM(fitter, pts, p0, fixedValues);
         }
 
         // ── Levenberg-Marquardt ───────────────────────────────────────────────
 
-        private static FitResult RunLM(IProfileFitter fitter, List<(double X, double Y)> pts, double[] p)
+        private static FitResult RunLM(IProfileFitter fitter, List<(double X, double Y)> pts, double[] p,
+            IReadOnlyList<double?>? fixedValues)
         {
             int nPar = fitter.ParameterCount;
             int n = pts.Count;
@@ -94,22 +124,38 @@ namespace MxPlot.UI.Avalonia.Analysis
             double lambda = 1e-2;
             bool converged = false;
 
-            for (int iter = 0; iter < 500; iter++)
+            // Only the free parameters take part in the steps; a fixed one keeps its value throughout.
+            int[] free = Enumerable.Range(0, nPar).Where(i => fixedValues?[i] == null).ToArray();
+            int nFree = free.Length;
+            if (nFree == 0) converged = true;
+
+            for (int iter = 0; nFree > 0 && iter < 500; iter++)
             {
                 var (JtJ, Jtr, chiSq) = Accumulate(fitter, pts, p);
 
-                // Damped normal equations: (J'J + λ·diag(J'J)) Δp = J'r
-                var JtJd = (double[,])JtJ.Clone();
-                for (int i = 0; i < nPar; i++)
-                    JtJd[i, i] += lambda * Math.Max(JtJ[i, i], 1e-14);
+                // Damped normal equations over the free parameters: (J'J + λ·diag(J'J)) Δp = J'r
+                var A = new double[nFree, nFree];
+                var b = new double[nFree];
+                for (int a = 0; a < nFree; a++)
+                {
+                    b[a] = Jtr[free[a]];
+                    for (int c = 0; c < nFree; c++) A[a, c] = JtJ[free[a], free[c]];
+                    A[a, a] += lambda * Math.Max(JtJ[free[a], free[a]], 1e-14);
+                }
 
-                var dp = SolveN(JtJd, Jtr, nPar);
-                if (dp == null) break;
+                var sol = SolveN(A, b, nFree);
+                if (sol == null) break;
+                var dp = new double[nPar];   // zero for the fixed parameters
+                for (int a = 0; a < nFree; a++) dp[free[a]] = sol[a];
 
                 // Trial step
                 var pNew = new double[nPar];
                 for (int i = 0; i < nPar; i++) pNew[i] = p[i] + dp[i];
                 fitter.ClampParameters(pNew, xRange);
+                // A constraint may have moved a fixed parameter (σ is kept positive, for one): put it back.
+                if (fixedValues != null)
+                    for (int i = 0; i < nPar; i++)
+                        if (fixedValues[i] is { } fv) pNew[i] = fv;
 
                 double newChiSq = ChiSq(fitter, pts, pNew);
 
@@ -145,9 +191,10 @@ namespace MxPlot.UI.Avalonia.Analysis
             {
                 Fitter = fitter,
                 Parameters = p,
-                ChiSquared = finalChi / Math.Max(n - nPar, 1),
+                ChiSquared = finalChi / Math.Max(n - nFree, 1),
                 R2 = r2,
                 Converged = converged,
+                IsFixed = Enumerable.Range(0, nPar).Select(i => fixedValues?[i] != null).ToArray(),
             };
         }
 

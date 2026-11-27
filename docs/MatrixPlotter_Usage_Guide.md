@@ -1,7 +1,7 @@
 ﻿# MatrixPlotter — Basic Usage Guide
 
 **Created**: 2026-04-22  
-**Updated**: 2026-08-20  
+**Updated**: 2026-11-26  
 **Target**: `MxPlot.UI.Avalonia` (Avalonia 11.3.x), .NET 8 / .NET 10
 
 This guide covers opening a `MatrixPlotter` window and driving it from code — from an Avalonia
@@ -268,7 +268,7 @@ plotter.LutDepth = 64;            // quantize to 64 distinct colors (default 256
 less means "use the LUT's own level count".
 
 Custom LUTs are registered through `ColorThemes.Register(...)`, or dropped into a `LUTs/` folder
-next to the executable — see the
+next to the executable (on macOS also in `~/Library/Application Support/MxPlot`) — see the
 [MxPlot.UI.Avalonia Overview](./MxPlotUIAvalonia_Overview.md#custom-lookup-tables-luts).
 
 ### Value range
@@ -606,6 +606,25 @@ var clone = await plotter.DuplicateAsync(show: true);
 
 Additional entries in the "Export as…" submenu can be injected through `plotter.ExportFormats`
 (`ExportFormatDescriptor`).
+
+### Save format and saving behavior
+
+The Save As dialog offers one file type first. The first of these that applies is used:
+
+1. The extension in the window title (a file opened or saved in that window)
+2. The format of the last successful save in the application
+3. `MatrixPlotter.DefaultSaveFormat`
+4. The axes of the data: ImageJ-compatible TIFF when they fit an ImageJ hyperstack, otherwise
+   OME-TIFF when it can store them, otherwise `.mxd`
+
+```csharp
+// Process-wide: offer OME-TIFF first until a file has been saved
+MatrixPlotter.DefaultSaveFormat = ".ome.tif";
+
+// Per window: Save As only writes a copy. The title, source path and unsaved state stay as they are.
+// For hosts that use a window as a live viewer, such as a camera preview.
+plotter.AlwaysSaveAsCopy = true;
+```
 
 ### Progress indicator
 

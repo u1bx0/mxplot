@@ -48,6 +48,9 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly StackPanel _rowsPanel;
         private readonly TextBlock _unavailableLabel;
 
+        private readonly CheckBox _showAxisIndicatorBox;
+        private readonly CheckBox _showCrosshairLinesBox;
+
         private bool _suppressEvents;
         private bool _compositeActive;
 
@@ -103,6 +106,32 @@ namespace MxPlot.UI.Avalonia.Controls
         /// The handler receives (plane, enabled, mode).
         /// </summary>
         public event EventHandler<(ProjectionPlane Plane, bool IsEnabled, ProjectionMode Mode)>? SelectionChanged;
+
+        /// <summary>
+        /// Whether the side views draw the frozen axis' indicator line. On by default. While off, the
+        /// side views show no indicator lines at all, and the crosshair choice cannot be changed.
+        /// </summary>
+        public bool ShowAxisIndicator
+        {
+            get => _showAxisIndicatorBox.IsChecked == true;
+            set => _showAxisIndicatorBox.IsChecked = value;
+        }
+
+        /// <summary>Fired when the "Show axis indicator" checkbox changes.</summary>
+        public event EventHandler<bool>? ShowAxisIndicatorChanged;
+
+        /// <summary>
+        /// Whether the side views mark the X-Y crosshair position with lines. Off by default.
+        /// Takes effect only while <see cref="ShowAxisIndicator"/> is on.
+        /// </summary>
+        public bool ShowCrosshairLines
+        {
+            get => _showCrosshairLinesBox.IsChecked == true;
+            set => _showCrosshairLinesBox.IsChecked = value;
+        }
+
+        /// <summary>Fired when the "Show crosshair lines" checkbox changes.</summary>
+        public event EventHandler<bool>? ShowCrosshairLinesChanged;
 
         /// <summary>
         /// Fired when a row's "create data" button is clicked. The handler receives the plane to
@@ -296,9 +325,34 @@ namespace MxPlot.UI.Avalonia.Controls
                 IsVisible = false,
             };
 
+            // The option rows are kept outside _rowsPanel so they stay available when projection
+            // itself is unavailable.
+            var (indicatorRow, indicatorBox) = CreateOptionRow("Show axis indicator", isChecked: true,
+                new Thickness(6, 2, 6, 0), "Draw the current axis position as draggable lines in the side views.");
+            _showAxisIndicatorBox = indicatorBox;
+
+            const string CrosshairTip = "Draw the crosshair position as draggable lines in the side views.";
+            var (crosshairRow, crosshairBox) = CreateOptionRow("Show side-view crosshair", isChecked: false,
+                new Thickness(6, 0, 6, 4), CrosshairTip);
+            _showCrosshairLinesBox = crosshairBox;
+            ToolTip.SetShowOnDisabled(crosshairRow, true);
+
+            _showCrosshairLinesBox.IsCheckedChanged += (_, _) =>
+                ShowCrosshairLinesChanged?.Invoke(this, ShowCrosshairLines);
+            _showAxisIndicatorBox.IsCheckedChanged += (_, _) =>
+            {
+                bool show = ShowAxisIndicator;
+                crosshairRow.IsEnabled = show;
+                crosshairRow.Opacity = show ? 1.0 : 0.4;
+                ToolTip.SetTip(crosshairRow, show ? CrosshairTip : "Needs the axis indicator.");
+                ShowAxisIndicatorChanged?.Invoke(this, show);
+            };
+
             var host = new StackPanel();
             host.Children.Add(_rowsPanel);
             host.Children.Add(_unavailableLabel);
+            host.Children.Add(indicatorRow);
+            host.Children.Add(crosshairRow);
             Content = host;
         }
 
@@ -314,6 +368,50 @@ namespace MxPlot.UI.Avalonia.Controls
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// A checkbox row below the projection rows, with the same compact look: a scaled-down box
+        /// beside an 11 pt label, which toggles the box when clicked.
+        /// </summary>
+        private static (StackPanel Row, CheckBox Box) CreateOptionRow(string text, bool isChecked, Thickness margin, string tip)
+        {
+            var checkBox = new CheckBox
+            {
+                MinHeight = 0,
+                MinWidth = 0,
+                Padding = new Thickness(0),
+                VerticalAlignment = VerticalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                IsChecked = isChecked,
+            };
+
+            var label = new TextBlock
+            {
+                Text = text,
+                FontSize = 11,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 0, 0),
+            };
+            label.PointerPressed += (_, _) => checkBox.IsChecked = !(checkBox.IsChecked == true);
+
+            var row = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = margin,
+                Background = Brushes.Transparent,
+            };
+            row.Children.Add(new Viewbox
+            {
+                Width = 20,
+                Height = 20,
+                Stretch = Stretch.Uniform,
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = checkBox,
+            });
+            row.Children.Add(label);
+            ToolTip.SetTip(row, tip);
+            return (row, checkBox);
+        }
 
         /// <summary>
         /// Builds the compact "create data" button that sits at the right end of a plane row.

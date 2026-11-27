@@ -45,7 +45,8 @@ namespace MxPlot.UI.Avalonia.Rendering
             ReadOnlyMemory<int> lutMemory,
             double valueScale,
             double valueOffset,
-            int lutMaxIndex);
+            int lutMaxIndex,
+            int missingColor);
 
         private readonly RenderLoopDelegate _renderLoop;
         private readonly bool _supportsCachedColorMap;
@@ -286,7 +287,8 @@ namespace MxPlot.UI.Avalonia.Rendering
                 // Rendered outside the bitmap lock on purpose — see BitmapBlit.
                 var lutMemory = ctx.LookupTable.AsReadOnlyMemory();
                 _renderLoop(source, ctx.FrameIndex, targetPtr, strideInts, width, height,
-                            lutMemory, valueScale, valueOffset, lutMaxIndex);
+                            lutMemory, valueScale, valueOffset, lutMaxIndex,
+                            ctx.LookupTable.MissingColor);
 
                 using var fb = target.Lock();
                 BitmapBlit.Rows(pScratch, width, height, fb);
@@ -317,7 +319,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderByte(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int _)
         {
             var typedData = (MatrixData<byte>)source;
             var colorMap = _cachedColorMap!;
@@ -348,7 +350,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderUShort(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int _)
         {
             var typedData = (MatrixData<ushort>)source;
             var colorMap = _cachedColorMap!;
@@ -379,7 +381,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderShort(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int _)
         {
             var typedData = (MatrixData<short>)source;
             var colorMap = _cachedColorMap!;
@@ -410,7 +412,7 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderInt(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int _)
         {
             var typedData = (MatrixData<int>)source;
             var mem = typedData.AsMemory(frameIndex);
@@ -443,10 +445,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderFloat(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int missingColor)
         {
             var typedData = (MatrixData<float>)source;
-            int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
             if (EffectiveParallelOptions != null)
@@ -485,10 +486,9 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderDouble(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int missingColor)
         {
             var typedData = (MatrixData<double>)source;
-            int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
             if (EffectiveParallelOptions != null)
@@ -527,11 +527,10 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderComplex(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int missingColor)
         {
             var typedData = (MatrixData<Complex>)source;
             var mode = ComplexValueMode;
-            int missingColor = _cachedLut?.MissingColor ?? 0;
             var mem = typedData.AsMemory(frameIndex);
 
             if (EffectiveParallelOptions != null)
@@ -570,9 +569,8 @@ namespace MxPlot.UI.Avalonia.Rendering
         private unsafe void RenderFallback(
             IMatrixData source, int frameIndex, int* targetPtr, int strideInts,
             int width, int height, ReadOnlyMemory<int> lutMemory,
-            double valueScale, double valueOffset, int lutMaxIndex)
+            double valueScale, double valueOffset, int lutMaxIndex, int missingColor)
         {
-            int missingColor = _cachedLut?.MissingColor ?? 0;
 
             if (EffectiveParallelOptions != null)
             {

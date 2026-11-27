@@ -14,15 +14,38 @@ using System.Threading.Tasks;
 namespace MxPlot.Extensions.Tiff;
 
 /// <summary>
-/// ImageJ互換のTIFFハンドラー（標準TIFF + ImageJ Hyperstack対応）
-/// byte/ushort データ型のみサポート
+/// Reads and writes plain TIFF with ImageJ hyperstack metadata (ImageDescription and the IJMetadata
+/// tags). Pixel types are the ones <see cref="TiffPixelType"/> lists, the same as OME-TIFF.
 /// </summary>
 public static class ImageJTiffHandler
 {
+    // LibTiff silently drops tags it does not know (SetField returns false, GetField returns null),
+    // so the two IJMetadata tags have to be registered before any file is opened. The extender is
+    // process-wide; the previously installed one is chained so other users of LibTiff keep working.
+    private static readonly BitMiracle.LibTiff.Classic.Tiff.TiffExtendProc? _previousTagExtender;
+
+    static ImageJTiffHandler()
+    {
+        _previousTagExtender = BitMiracle.LibTiff.Classic.Tiff.SetTagExtender(RegisterImageJTags);
+    }
+
+    private static void RegisterImageJTags(BitMiracle.LibTiff.Classic.Tiff tiff)
+    {
+        // Both tags carry a variable-length array whose element count is passed with the value,
+        // so GetField returns { count, data }. Variable2 passes the count as a 32-bit integer; with
+        // Variable it would be 16-bit, which a metadata block of 32 KB or more overflows.
+        tiff.MergeFieldInfo(new[]
+        {
+            new TiffFieldInfo((TiffTag)TiffTagIJMetadataByteCounts, TiffFieldInfo.Variable2, TiffFieldInfo.Variable2, TiffType.LONG, FieldBit.Custom, true, true, "IJMetadataByteCounts"),
+            new TiffFieldInfo((TiffTag)TiffTagIJMetadata, TiffFieldInfo.Variable2, TiffFieldInfo.Variable2, TiffType.BYTE, FieldBit.Custom, true, true, "IJMetadata"),
+        }, 2);
+        _previousTagExtender?.Invoke(tiff);
+    }
+
     /// <summary>
     /// ImageJ互換のTIFFファイルから読み込み
     /// </summary>
-    /// <typeparam name="T">データ型（byte または ushort）</typeparam>
+    /// <typeparam name="T">Pixel type (see <see cref="TiffPixelType"/>).</typeparam>
     /// <param name="filename">ファイルパス</param>
     /// <param name="progress">進捗報告（オプション）</param>
     /// <returns>読み込まれた MatrixData</returns>
@@ -32,7 +55,7 @@ public static class ImageJTiffHandler
     public static MatrixData<T> Load<T>(string filename, IProgress<int>? progress = null, CancellationToken ct = default, int maxParallelDegree = -1, LoadingMode mode = LoadingMode.InMemory)
         where T : unmanaged
     {
-        ValidateDataType<T>();
+        TiffPixelType.EnsureSupported<T>();
 
         if (!File.Exists(filename))
             throw new FileNotFoundException($"File not found: {filename}");
@@ -45,25 +68,42 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// ImageJ互換のTIFFファイルに書き込み
+    /// Writes <paramref name="data"/> as an ImageJ-compatible TIFF with one IFD per frame.
     /// </summary>
-    /// <typeparam name="T">データ型（byte または ushort）</typeparam>
-    /// <param name="filename">ファイルパス</param>
-    /// <param name="data">保存する MatrixData</param>
-    /// <param name="progress">進捗報告（オプション）</param>
-    /// <exception cref="NotSupportedException">サポートされていないデータ型、または非対応軸</exception>
-    /// <exception cref="IOException">TIFF書き込みエラー</exception>
-    public static void Save<T>(string filename, MatrixData<T> data, IProgress<int>? progress = null)
+    /// <remarks>
+    /// Channel, Z and Time/Timelapse axes are written as the channels, slices and frames of an
+    /// ImageJ hyperstack. Any other axis is written as slices (or as frames when slices is taken)
+    /// and its name is recorded so it is restored on load. Data of 4 GiB or more is written as BigTIFF
+    /// (see <see cref="RequiresBigTiff"/>). When the axes do not fit these three
+    /// dimensions, the frames are written in their own order and the ImageDescription declares only
+    /// the image count, so the file reads back as a plain stack with its XY calibration.
+    /// </remarks>
+    /// <typeparam name="T">Pixel type (see <see cref="TiffPixelType"/>).</typeparam>
+    /// <param name="filename">Destination file path.</param>
+    /// <param name="data">The data to save.</param>
+    /// <param name="progress">Optional progress reporter.</param>
+    /// <param name="compress">True (default) writes LZW-compressed frames; false writes them uncompressed, which a Virtual load can then memory-map.</param>
+    /// <exception cref="NotSupportedException">Unsupported pixel type.</exception>
+    /// <exception cref="IOException">TIFF write error.</exception>
+    public static void Save<T>(string filename, MatrixData<T> data, IProgress<int>? progress = null, bool compress = true)
+        where T : unmanaged
+        => Save(filename, data, progress, compress, forceBigTiff: false);
+
+    /// <summary>
+    /// File offsets of a classic TIFF are 32 bit, so a file cannot exceed 4 GiB. Past that size the
+    /// file is written as BigTIFF (64-bit offsets), which ImageJ/Fiji itself does not open. The
+    /// decision uses the uncompressed size (compression may keep the real size smaller, but it is
+    /// not known up front), less a margin for the IFDs and metadata.
+    /// </summary>
+    internal static bool RequiresBigTiff(long rawPixelBytes)
+        => rawPixelBytes > 0xFFFFFFFFL - ClassicTiffMarginBytes;
+
+    private const long ClassicTiffMarginBytes = 16L * 1024 * 1024;
+
+    internal static void Save<T>(string filename, MatrixData<T> data, IProgress<int>? progress, bool compress, bool forceBigTiff)
         where T : unmanaged
     {
-        ValidateDataType<T>();
-
-        // ImageJ Hyperstack 互換性チェック
-        if (!ImageJMetadata.IsCompatible(data))
-        {
-            throw new NotSupportedException(
-                "Data contains unsupported axes. Only Channel, Z, and Time/Timelapse are supported for ImageJ Hyperstack.");
-        }
+        TiffPixelType.EnsureSupported<T>();
 
         // Create the output directory if it does not exist
         string? directory = Path.GetDirectoryName(filename);
@@ -75,13 +115,17 @@ public static class ImageJTiffHandler
         // Set the LibTiff.NET error handler
         BitMiracle.LibTiff.Classic.Tiff.SetErrorHandler(new LibTiffErrorHandler());
         
-        using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, "w");
+        long rawPixelBytes = (long)data.XCount * data.YCount * data.FrameCount * TiffPixelType.BytesPerSample(typeof(T));
+        // "w" = classic TIFF, "w8" = BigTIFF
+        string mode = forceBigTiff || RequiresBigTiff(rawPixelBytes) ? "w8" : "w";
+
+        using var tiff = BitMiracle.LibTiff.Classic.Tiff.Open(filename, mode);
         if (tiff == null)
         {
             throw new IOException($"Failed to create TIFF file: {filename}. Check LibTiff error log for details.");
         }
 
-        SaveInternal(tiff, data, progress);
+        SaveInternal(tiff, data, progress, compress);
     }
 
     /// <summary>
@@ -177,10 +221,7 @@ public static class ImageJTiffHandler
         where T : unmanaged
     {
         // 1. Validate pixel type (read from frame 0, the initial directory)
-        short bitsPerSample = tiff.GetField(TiffTag.BITSPERSAMPLE)[0].ToShort();
-        int expectedBytes = (typeof(T) == typeof(byte)) ? 8 : 16;
-        if (bitsPerSample != expectedBytes)
-            throw new InvalidDataException($"File is {bitsPerSample}bit, but {expectedBytes}bit was requested.");
+        TiffPixelType.EnsureFileMatches<T>(tiff);
 
         // 2. Basic dimensions
         int width          = tiff.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
@@ -295,7 +336,7 @@ public static class ImageJTiffHandler
         int width, int height, int frameCount, IProgress<int>? progress, CancellationToken ct)
         where T : unmanaged
     {
-        var (baseOffset, frameSizeBytes) = ValidatePackedLayout(tiff, filename, width, height, frameCount);
+        var (baseOffset, frameSizeBytes) = TiffFrameLayout.ValidatePacked(tiff, filename, height, frameCount);
 
         int scanlineSize    = tiff.ScanlineSize();
         int filePixelStride = scanlineSize / width;
@@ -316,72 +357,12 @@ public static class ImageJTiffHandler
             // invalidates that frame's cached min/max, same as SetArray would) -- there is no
             // separate frame array to copy in afterwards.
             T[] dst = data.GetArray(i);
-            if (typeof(T) == typeof(byte))
-                CopyPackedFrameBytes(buffer, (byte[])(object)dst, width, height, scanlineSize, filePixelStride);
-            else if (typeof(T) == typeof(ushort))
-                CopyPackedFrameUShort(buffer, (ushort[])(object)dst, width, height, scanlineSize, filePixelStride, bigEndian);
-            else
-                throw new NotSupportedException($"Unsupported type: {typeof(T)}");
-            
+            CopyPackedFrame(buffer, dst, width, height, scanlineSize, filePixelStride, bigEndian);
+
             data.GetValueRange(i); // recalc min/max for this frame
 
             progress?.Report(i);
         }
-    }
-
-    /// <summary>
-    /// Validates that the first IFD's strips form a contiguous, uncompressed run covering exactly
-    /// one frame, and that the file holds enough trailing raw bytes for <paramref name="frameCount"/>
-    /// packed planes. Shared by <see cref="LoadPackedFrames{T}"/> (InMemory) and
-    /// <see cref="LoadPackedFramesVirtual{T}"/> -- both build their fixed-stride offsets from the
-    /// same two numbers, just via a plain <see cref="FileStream"/> vs an MMF-backed
-    /// <see cref="StrippedMmfFrames{T}"/>.
-    /// </summary>
-    /// <returns>The file offset of frame 0's first byte, and the byte size of one frame.</returns>
-    private static (long baseOffset, long frameSizeBytes) ValidatePackedLayout(
-        BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int width, int height, int frameCount)
-    {
-        int compression = tiff.GetField(TiffTag.COMPRESSION)?[0].ToInt() ?? (int)Compression.NONE;
-        if (compression != (int)Compression.NONE)
-            throw new NotSupportedException(
-                "This file uses ImageJ's single-IFD packed-hyperstack layout (the IFD's ImageDescription " +
-                "declares more planes than there are IFDs), which requires uncompressed, fixed-stride pixel " +
-                $"data to locate each plane. Found compression={compression}.");
-
-        // The first IFD's own frame may itself be split into many strips (e.g. RowsPerStrip
-        // far smaller than ImageLength) -- that is ordinary TIFF strip chunking and unrelated
-        // to the packed-plane quirk. What matters is that those strips lay out the frame as a
-        // single contiguous, uncompressed run of bytes, so it can be read with the same fixed
-        // stride as every packed plane after it.
-        var stripOffsets = tiff.GetField(TiffTag.STRIPOFFSETS);
-        var stripByteCounts = tiff.GetField(TiffTag.STRIPBYTECOUNTS);
-        if (stripOffsets == null || stripOffsets.Length == 0 || stripByteCounts == null || stripByteCounts.Length == 0)
-            throw new InvalidDataException("Missing StripOffsets/StripByteCounts tag.");
-
-        // FieldValue wraps the whole tag value here (a ulong[] once a strip count > 1 forces an
-        // out-of-line array), so it must be unwrapped via TolongArray() -- ToLong() only works
-        // for single-strip files and throws an InvalidCastException otherwise.
-        long[] offsets = stripOffsets[0].TolongArray();
-        long[] byteCounts = stripByteCounts[0].TolongArray();
-        long baseOffset = offsets[0];
-
-        int scanlineSize = tiff.ScanlineSize();
-        long frameSizeBytes = (long)scanlineSize * height;
-
-        long firstFrameSpan = offsets[^1] + byteCounts[^1] - offsets[0];
-        if (firstFrameSpan != frameSizeBytes)
-            throw new NotSupportedException(
-                "ImageJ single-IFD packed-hyperstack layout requires the first IFD's strips to be a " +
-                $"contiguous, uncompressed run covering exactly one frame; found a {firstFrameSpan}-byte " +
-                $"span for a {frameSizeBytes}-byte frame.");
-
-        long available = new FileInfo(filename).Length - baseOffset;
-        if (available < frameSizeBytes * frameCount)
-            throw new InvalidDataException(
-                $"ImageJ metadata declares {frameCount} planes, but the file only holds enough raw pixel " +
-                $"data for {available / frameSizeBytes} plane(s) after the first IFD's strip.");
-
-        return (baseOffset, frameSizeBytes);
     }
 
     /// <summary>
@@ -393,15 +374,8 @@ public static class ImageJTiffHandler
         BitMiracle.LibTiff.Classic.Tiff tiff, string filename, int width, int height, int frameCount)
         where T : unmanaged
     {
-        var (baseOffset, frameSizeBytes) = ValidatePackedLayout(tiff, filename, width, height, frameCount);
-
-        var offsets = new long[frameCount][];
-        var byteCounts = new long[frameCount][];
-        for (int i = 0; i < frameCount; i++)
-        {
-            offsets[i] = new[] { baseOffset + i * frameSizeBytes };
-            byteCounts[i] = new[] { frameSizeBytes };
-        }
+        var (baseOffset, frameSizeBytes) = TiffFrameLayout.ValidatePacked(tiff, filename, height, frameCount);
+        var (offsets, byteCounts) = TiffFrameLayout.PackedOffsets(baseOffset, frameSizeBytes, frameCount);
 
         var vsf = new StrippedMmfFrames<T>(
             filename, width, height, offsets, byteCounts, isYFlipped: true, isBigEndian: tiff.IsBigEndian());
@@ -410,7 +384,7 @@ public static class ImageJTiffHandler
 
     /// <summary>
     /// Virtual (MMF-backed) route for the general multi-IFD layout when every frame's strips can be
-    /// mapped verbatim (see <see cref="TiffStorageLayout.IsStripMappable{T}"/>). Walks every IFD once
+    /// mapped verbatim (see <see cref="TiffStorageLayout.IsStripMappable"/>). Walks every IFD once
     /// to collect its strip offsets; no pixel data is read here.
     /// </summary>
     private static MatrixData<T> LoadStrippedFramesVirtual<T>(
@@ -440,71 +414,37 @@ public static class ImageJTiffHandler
     }
 
     /// <summary>
-    /// Applies the TIFF (top-left origin) -> MatrixData (bottom-left origin) Y-flip while copying
-    /// one packed byte plane, row by row in parallel (rows are independent, so this is safe).
+    /// Copies one packed plane into <paramref name="dst"/>, applying the TIFF (top-left origin) ->
+    /// MatrixData (bottom-left origin) Y-flip and converting the samples to host byte order.
+    /// Rows are independent, so they are processed in parallel. A file pixel stride larger than the
+    /// sample size (several samples per pixel) keeps only each pixel's first sample.
     /// </summary>
-    private static void CopyPackedFrameBytes(byte[] raw, byte[] dst, int width, int height, int scanlineSize, int filePixelStride)
+    private static void CopyPackedFrame<T>(byte[] raw, T[] dst, int width, int height, int scanlineSize, int filePixelStride, bool bigEndian)
+        where T : unmanaged
     {
-        if (filePixelStride == 1)
-        {
-            Parallel.For(0, height, row =>
-            {
-                int dstRow = height - 1 - row;
-                Array.Copy(raw, row * scanlineSize, dst, dstRow * width, width);
-            });
-        }
-        else
-        {
-            Parallel.For(0, height, row =>
-            {
-                int dstRow  = height - 1 - row;
-                int srcBase = row * scanlineSize;
-                int dstBase = dstRow * width;
-                for (int col = 0; col < width; col++)
-                    dst[dstBase + col] = raw[srcBase + col * filePixelStride];
-            });
-        }
-    }
+        int sampleSize = TiffPixelType.BytesPerSample(typeof(T));
+        bool swap = sampleSize > 1 && TiffPixelType.NeedsByteSwap(bigEndian);
 
-    /// <summary>
-    /// Same as <see cref="CopyPackedFrameBytes"/> but for 16-bit samples. When the file's samples
-    /// are tightly packed (<paramref name="filePixelStride"/> == 2) and already in host byte order,
-    /// each row is a straight memory copy; otherwise each sample is decoded via <see cref="BinaryPrimitives"/>.
-    /// </summary>
-    private static void CopyPackedFrameUShort(byte[] raw, ushort[] dst, int width, int height, int scanlineSize, int filePixelStride, bool bigEndian)
-    {
-        if (filePixelStride == 2 && bigEndian == !BitConverter.IsLittleEndian)
+        Parallel.For(0, height, row =>
         {
-            Parallel.For(0, height, row =>
+            int dstRow = height - 1 - row;
+            var dstRowSpan = dst.AsSpan(dstRow * width, width);
+            var dstBytes = MemoryMarshal.AsBytes(dstRowSpan);
+            int srcBase = row * scanlineSize;
+
+            if (filePixelStride == sampleSize)
             {
-                int dstRow = height - 1 - row;
-                var srcSpan = raw.AsSpan(row * scanlineSize, width * 2);
-                var dstSpan = MemoryMarshal.Cast<ushort, byte>(dst.AsSpan(dstRow * width, width));
-                srcSpan.CopyTo(dstSpan);
-            });
-        }
-        else if (bigEndian)
-        {
-            Parallel.For(0, height, row =>
+                raw.AsSpan(srcBase, width * sampleSize).CopyTo(dstBytes);
+            }
+            else
             {
-                int dstRow  = height - 1 - row;
-                int srcBase = row * scanlineSize;
-                int dstBase = dstRow * width;
                 for (int col = 0; col < width; col++)
-                    dst[dstBase + col] = BinaryPrimitives.ReadUInt16BigEndian(raw.AsSpan(srcBase + col * filePixelStride, 2));
-            });
-        }
-        else
-        {
-            Parallel.For(0, height, row =>
-            {
-                int dstRow  = height - 1 - row;
-                int srcBase = row * scanlineSize;
-                int dstBase = dstRow * width;
-                for (int col = 0; col < width; col++)
-                    dst[dstBase + col] = BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(srcBase + col * filePixelStride, 2));
-            });
-        }
+                    raw.AsSpan(srcBase + col * filePixelStride, sampleSize).CopyTo(dstBytes.Slice(col * sampleSize, sampleSize));
+            }
+
+            if (swap)
+                TiffPixelType.SwapEndiannessInPlace(dstRowSpan);
+        });
     }
 
     /// <summary>
@@ -562,35 +502,6 @@ public static class ImageJTiffHandler
         }
 
         return (1.0, 1.0); // default
-    }
-
-    private static T[] ReadFrameData<T>(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height)
-        where T : unmanaged
-    {
-        int bytesPerPixel   = GetBytesPerPixel<T>();
-        int scanlineSize    = tiff.ScanlineSize();       // actual bytes per row as stored in the file
-        int filePixelStride = scanlineSize / width;      // bytes per pixel in the file (≥ bytesPerPixel for multi-sample)
-        var buffer          = new byte[scanlineSize * height];
-
-        for (int row = 0; row < height; row++)
-        {
-            if (!tiff.ReadScanline(buffer, row * scanlineSize, row, 0))
-                throw new IOException($"Failed to read scanline at row {row}");
-        }
-
-        // Y-flip: TIFF (top-left origin) → MatrixData (bottom-left origin)
-        var flipped = new T[width * height];
-        for (int row = 0; row < height; row++)
-        {
-            for (int col = 0; col < width; col++)
-            {
-                int srcOffset = row * scanlineSize + col * filePixelStride;
-                int dstIndex  = (height - 1 - row) * width + col;
-                flipped[dstIndex] = GetValue<T>(buffer, srcOffset);
-            }
-        }
-
-        return flipped;
     }
 
     /// <summary>
@@ -656,41 +567,69 @@ public static class ImageJTiffHandler
     {
         var axes = new List<Axis>();
 
-        if (metadata.Channels > 1)
+        bool hasChannel = metadata.Channels > 1;
+        string? channelName = hasChannel ? "Channel" : null;
+        string zName = PickAxisName("Z", metadata.ZAxisName, channelName, metadata.TAxisName ?? "Time");
+        string tName = PickAxisName("Time", metadata.TAxisName, channelName, zName);
+
+        if (hasChannel)
             axes.Add(Axis.Channel(metadata.Channels));
 
         if (metadata.Slices > 1)
         {
             double zMin = -metadata.ZOrigin * metadata.Spacing;
             double zMax = (metadata.Slices - 1 - metadata.ZOrigin) * metadata.Spacing;
-            axes.Add(Axis.Z(metadata.Slices, zMin, zMax, metadata.ZUnit ?? ""));
+            string zUnit = metadata.ZUnit ?? "";
+            axes.Add(zName == "Z"
+                ? Axis.Z(metadata.Slices, zMin, zMax, zUnit)
+                : new Axis(metadata.Slices, zMin, zMax, zName, zUnit, IsIndexLike(zMin, zMax, metadata.Slices, zUnit)));
         }
 
         if (metadata.Frames > 1)
         {
             double tMax = (metadata.Frames - 1) * metadata.Interval;
-            axes.Add(Axis.Time(metadata.Frames, 0, tMax, "s"));
+            axes.Add(tName == "Time"
+                ? Axis.Time(metadata.Frames, 0, tMax, "s")
+                : new Axis(metadata.Frames, 0, tMax, tName, "", IsIndexLike(0, tMax, metadata.Frames, "")));
         }
 
         if (axes.Count > 0)
             data.DefineDimensions(axes.ToArray());
     }
 
+    // Uses the recorded name unless it would duplicate another axis of the same data.
+    private static string PickAxisName(string standardName, string? recordedName, params string?[] takenNames)
+    {
+        if (recordedName == null)
+            return standardName;
+        foreach (string? taken in takenNames)
+        {
+            if (string.Equals(taken, recordedName, StringComparison.OrdinalIgnoreCase))
+                return standardName;
+        }
+        return recordedName;
+    }
+
+    // An axis that counts 0, 1, 2, ... without a unit is an index axis.
+    private static bool IsIndexLike(double min, double max, int count, string unit)
+        => unit.Length == 0 && Math.Abs(min) < 1e-9 && Math.Abs(max - (count - 1)) < 1e-9;
+
     #endregion
 
     #region Save Implementation
 
-    private static void SaveInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, MatrixData<T> data, IProgress<int>? progress)
+    private static void SaveInternal<T>(BitMiracle.LibTiff.Classic.Tiff tiff, MatrixData<T> data, IProgress<int>? progress, bool compress)
         where T : unmanaged
     {
         int frameCount = data.FrameCount;
         progress?.Report(-frameCount); // signal start
 
-        // Generate ImageJ metadata
-        var ijMetadata = ImageJMetadata.FromMatrixData(data);
+        // Generate ImageJ metadata (null layout: the axes do not fit a hyperstack)
+        var layout = ImageJAxisLayout.TryCreate(data);
+        var ijMetadata = ImageJMetadata.FromMatrixData(data, layout);
 
         // Compute frame order (ImageJ uses C-Z-T order)
-        int[] frameOrder = CalculateFrameOrder(data, ijMetadata);
+        int[] frameOrder = CalculateFrameOrder(data, ijMetadata, layout);
 
         // Write frames in order
         for (int i = 0; i < frameCount; i++)
@@ -698,7 +637,7 @@ public static class ImageJTiffHandler
             int frameIndex = frameOrder[i];
 
             // Set basic TIFF tags
-            SetBasicTiffTags(tiff, data.XCount, data.YCount, typeof(T));
+            SetBasicTiffTags(tiff, data.XCount, data.YCount, typeof(T), compress);
 
             // Write additional metadata to the first frame only
             if (i == 0)
@@ -721,7 +660,7 @@ public static class ImageJTiffHandler
         progress?.Report(frameCount); // signal completion
     }
 
-    private static void SetBasicTiffTags(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height, Type dataType)
+    private static void SetBasicTiffTags(BitMiracle.LibTiff.Classic.Tiff tiff, int width, int height, Type dataType, bool compress)
     {
         tiff.SetField(TiffTag.IMAGEWIDTH, width);
         tiff.SetField(TiffTag.IMAGELENGTH, height);
@@ -729,23 +668,22 @@ public static class ImageJTiffHandler
         tiff.SetField(TiffTag.PLANARCONFIG, PlanarConfig.CONTIG);
         tiff.SetField(TiffTag.PHOTOMETRIC, Photometric.MINISBLACK);
 
-        if (dataType == typeof(byte))
-        {
-            tiff.SetField(TiffTag.BITSPERSAMPLE, 8);
-            tiff.SetField(TiffTag.SAMPLEFORMAT, SampleFormat.UINT);
-        }
-        else if (dataType == typeof(ushort))
-        {
-            tiff.SetField(TiffTag.BITSPERSAMPLE, 16);
-            tiff.SetField(TiffTag.SAMPLEFORMAT, SampleFormat.UINT);
-        }
+        tiff.SetField(TiffTag.BITSPERSAMPLE, TiffPixelType.BitsPerSample(dataType));
+        tiff.SetField(TiffTag.SAMPLEFORMAT, TiffPixelType.SampleFormatOf(dataType));
 
         // Compression (LZW without horizontal-differencing predictor).
         // Predictor.HORIZONTAL (tag 317 = 2) triggers FluoRender's DecodeAcc16,
         // which has a bug that causes a SIGSEGV on ARM64 macOS regardless of strip
         // layout.  Predictor.NONE avoids the call entirely with minimal size impact.
-        tiff.SetField(TiffTag.COMPRESSION, Compression.LZW);
-        tiff.SetField(TiffTag.PREDICTOR, Predictor.NONE);
+        if (compress)
+        {
+            tiff.SetField(TiffTag.COMPRESSION, Compression.LZW);
+            tiff.SetField(TiffTag.PREDICTOR, Predictor.NONE);
+        }
+        else
+        {
+            tiff.SetField(TiffTag.COMPRESSION, Compression.NONE);
+        }
         //tiff.SetField(TiffTag.PREDICTOR, Predictor.HORIZONTAL);
 
         // Set RowsPerStrip
@@ -791,22 +729,16 @@ public static class ImageJTiffHandler
     private static void WriteFrameData<T>(BitMiracle.LibTiff.Classic.Tiff tiff, T[] data, int width, int height)
         where T : unmanaged
     {
-        int bytesPerPixel = GetBytesPerPixel<T>();
-        var buffer = new byte[width * height * bytesPerPixel];
+        int bytesPerPixel = TiffPixelType.BytesPerSample(typeof(T));
+        int stride = width * bytesPerPixel;
+        var buffer = new byte[stride * height];
 
-        // Y-flip: MatrixData (bottom-left origin) → TIFF (top-left origin)
+        // Y-flip: MatrixData (bottom-left origin) → TIFF (top-left origin). Samples go out in host
+        // byte order, which is the order LibTiff declares in the file header it writes.
         for (int row = 0; row < height; row++)
-        {
-            for (int col = 0; col < width; col++)
-            {
-                int srcIndex = (height - 1 - row) * width + col;
-                int dstIndex = row * width + col;
-                SetValue(buffer, dstIndex * bytesPerPixel, data[srcIndex]);
-            }
-        }
+            Buffer.BlockCopy(data, (height - 1 - row) * stride, buffer, row * stride, stride);
 
         // Write row by row
-        int stride = width * bytesPerPixel;
         for (int row = 0; row < height; row++)
         {
             if (!tiff.WriteScanline(buffer, row * stride, row, 0))
@@ -816,9 +748,17 @@ public static class ImageJTiffHandler
         }
     }
 
-    private static int[] CalculateFrameOrder(IMatrixData data, ImageJMetadata metadata)
+    private static int[] CalculateFrameOrder(IMatrixData data, ImageJMetadata metadata, ImageJAxisLayout? layout)
     {
         int[] order = new int[data.FrameCount];
+
+        // Without a hyperstack layout the frames are written as they are stored
+        if (layout == null)
+        {
+            for (int i = 0; i < order.Length; i++)
+                order[i] = i;
+            return order;
+        }
 
         // ImageJ order: XYCZT (C varies fastest)
         int index = 0;
@@ -828,46 +768,12 @@ public static class ImageJTiffHandler
             {
                 for (int c = 0; c < metadata.Channels; c++)
                 {
-                    order[index++] = CalculateMatrixDataIndex(data, c, z, t);
+                    order[index++] = layout.GetFrameIndex(data, c, z, t);
                 }
             }
         }
 
         return order;
-    }
-
-    private static int CalculateMatrixDataIndex(IMatrixData data, int c, int z, int t)
-    {
-        var dims = data.Dimensions;
-        if (dims.AxisCount == 0)
-            return 0;
-
-        var indices = new Dictionary<string, int>();
-
-        int[] axisIndices = new int[dims.AxisCount];
-        
-        if (dims.Contains("Channel"))
-        {
-            int chOrder = dims.GetAxisOrder(dims["Channel"]!);
-            axisIndices[chOrder] = c;
-        }
-        if (dims.Contains("Z"))
-        {
-            int zOrder = dims.GetAxisOrder(dims["Z"]!);
-            axisIndices[zOrder] = z;
-        }
-        if (dims.Contains("Time"))
-        {
-            int tOrder = dims.GetAxisOrder(dims["Time"]!);
-            axisIndices[tOrder] = t;
-        }
-        else if (dims.Contains("Timelapse"))
-        {
-            int tOrder = dims.GetAxisOrder(dims["Timelapse"]!);
-            axisIndices[tOrder] = t;
-        }
-
-        return dims.GetFrameIndexAt(axisIndices);
     }
 
     #endregion
@@ -890,14 +796,15 @@ public static class ImageJTiffHandler
         var ijMeta = tiff.GetField((TiffTag)TiffTagIJMetadata);
         var ijMetaBC = tiff.GetField((TiffTag)TiffTagIJMetadataByteCounts);
 
-        if (ijMeta != null && ijMetaBC != null && ijMeta.Length > 0 && ijMetaBC.Length > 0)
+        // [0] is the element count, [1] the data (see RegisterImageJTags).
+        if (ijMeta != null && ijMetaBC != null && ijMeta.Length > 1 && ijMetaBC.Length > 1)
         {
-            byte[]? metaBytes = ijMeta[0].ToByteArray();
+            byte[]? metaBytes = ijMeta[1].ToByteArray();
 
             if (metaBytes != null && metaBytes.Length > 0)
             {
                 // Convert ByteCounts to uint[]
-                uint[] byteCounts = ConvertToUIntArray(ijMetaBC[0]);
+                uint[] byteCounts = ConvertToUIntArray(ijMetaBC[1]);
 
                 if (byteCounts != null && byteCounts.Length > 0)
                 {
@@ -918,19 +825,25 @@ public static class ImageJTiffHandler
         if (data.Metadata.Count == 0)
             return;
 
-        // Serialize metadata to "key=value\nkey=value\n..." format
+        // Serialize metadata to "key=value\nkey=value\n..." format. Format-header entries describe
+        // the file they came from (ImageDescription, FITS_HEADER, ...) and are not carried over.
+        var headerKeys = data.GetFormatHeaderKeys();
         var sb = new System.Text.StringBuilder();
         foreach (var kvp in data.Metadata)
         {
-            if (kvp.Key == "ImageDescription")
+            if (kvp.Key == "ImageDescription" || headerKeys.Contains(kvp.Key))
+                continue;
+            // A key containing '=' or a line break cannot be told apart from a value.
+            if (kvp.Key.Length == 0 || kvp.Key.AsSpan().IndexOfAny('=', '\r', '\n') >= 0)
                 continue;
 
-            sb.AppendLine($"{kvp.Key}={kvp.Value}");
+            sb.Append(kvp.Key).Append('=').Append(EscapeInfoValue(kvp.Value)).Append('\n');
         }
 
-        string info = sb.ToString();
-        if (string.IsNullOrEmpty(info))
+        if (sb.Length == 0)
             return;
+
+        string info = InfoEscapedMarker + "\n" + sb;
 
         // Convert to IJMetadata format
         ConvertToIJMetadata(info, out uint[] byteCounts, out byte[] metaData);
@@ -1010,7 +923,11 @@ public static class ImageJTiffHandler
                 if (headerPos + 8 > header.Length)
                     break;
 
+                // The type is a 4-byte integer ("info" = 0x696e666f) stored in the file's byte order,
+                // so a little-endian file holds "ofni".
                 var type = System.Text.Encoding.ASCII.GetString(header, headerPos, 4);
+                if (!isBE)
+                    type = string.Create(4, type, static (span, s) => { for (int k = 0; k < 4; k++) span[k] = s[3 - k]; });
                 headerPos += 4;
 
                 var count = BitConverter.ToUInt32(header, headerPos);
@@ -1049,21 +966,59 @@ public static class ImageJTiffHandler
     private static void ParseMetadataString(string text, IDictionary<string, string> metadata)
     {
         var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-        
+        // Only text written by this handler is unescaped; an info block written by ImageJ or an
+        // older version may legitimately contain backslashes.
+        bool escaped = Array.IndexOf(lines, InfoEscapedMarker) >= 0;
+
         foreach (var line in lines)
         {
+            if (line == InfoEscapedMarker)
+                continue;
+
             var parts = line.Split(new[] { '=' }, 2);
             if (parts.Length == 2)
             {
                 string key = parts[0].Trim();
-                string value = parts[1].Trim();
-                
+                string value = escaped ? UnescapeInfoValue(parts[1]) : parts[1].Trim();
+
                 if (!string.IsNullOrEmpty(key))
                 {
                     metadata[key] = value;
                 }
             }
         }
+    }
+
+    // First line of an info block written by this handler: its values escape backslashes and
+    // line breaks, so multi-line values survive the one-entry-per-line layout.
+    private const string InfoEscapedMarker = "mxplot.info.escaped=1";
+
+    private static string EscapeInfoValue(string value)
+    {
+        if (value.AsSpan().IndexOfAny('\\', '\r', '\n') < 0)
+            return value;
+        return value.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("\n", "\\n");
+    }
+
+    private static string UnescapeInfoValue(string value)
+    {
+        if (value.IndexOf('\\') < 0)
+            return value;
+
+        var sb = new System.Text.StringBuilder(value.Length);
+        for (int i = 0; i < value.Length; i++)
+        {
+            char c = value[i];
+            if (c == '\\' && i + 1 < value.Length)
+            {
+                char n = value[i + 1];
+                if (n == 'n') { sb.Append('\n'); i++; continue; }
+                if (n == 'r') { sb.Append('\r'); i++; continue; }
+                if (n == '\\') { sb.Append('\\'); i++; continue; }
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -1094,54 +1049,5 @@ public static class ImageJTiffHandler
 
     #endregion
 
-    #region Type Utilities
 
-    private static void ValidateDataType<T>()
-    {
-        if (typeof(T) != typeof(byte) && typeof(T) != typeof(ushort))
-        {
-            throw new NotSupportedException(
-                $"Data type {typeof(T).Name} is not supported. Only byte and ushort are supported.");
-        }
-    }
-
-    private static int GetBytesPerPixel<T>() where T : unmanaged
-    {
-        if (typeof(T) == typeof(byte))
-            return 1;
-        if (typeof(T) == typeof(ushort))
-            return 2;
-
-        throw new NotSupportedException($"Unsupported type: {typeof(T)}");
-    }
-
-    private static T GetValue<T>(byte[] buffer, int offset) where T : unmanaged
-    {
-        if (typeof(T) == typeof(byte))
-            return (T)(object)buffer[offset];
-        if (typeof(T) == typeof(ushort))
-            return (T)(object)BitConverter.ToUInt16(buffer, offset);
-
-        throw new NotSupportedException($"Unsupported type: {typeof(T)}");
-    }
-
-    private static void SetValue<T>(byte[] buffer, int offset, T value) where T : unmanaged
-    {
-        if (typeof(T) == typeof(byte))
-        {
-            buffer[offset] = (byte)(object)value;
-        }
-        else if (typeof(T) == typeof(ushort))
-        {
-            byte[] bytes = BitConverter.GetBytes((ushort)(object)value);
-            buffer[offset] = bytes[0];
-            buffer[offset + 1] = bytes[1];
-        }
-        else
-        {
-            throw new NotSupportedException($"Unsupported type: {typeof(T)}");
-        }
-    }
-
-    #endregion
 }

@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Platform.Storage;
 using MxPlot.App.Services;
 using MxPlot.Core.IO.Formats;
+using MxPlot.Extensions.Images;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -131,6 +132,25 @@ namespace MxPlot.App.Views
 
             return await WithTopmostSuspended(() =>
                 LoadingModeDialog.ShowAsync(this, Path.GetFileName(path), fileInfo.Length));
+        }
+
+        /// <summary>
+        /// Chooses how an animated GIF or WebP is read. Within the reader's size limit
+        /// (<see cref="ImageLoader.BitmapImageFormat.MaxAnimationBytes"/>) every frame is read without
+        /// asking; above it the user chooses between every frame and the first frame only. Still
+        /// images are never asked about. Returns null if the user cancels.
+        /// </summary>
+        internal async Task<ImageLoader.AnimationReadMode?> ResolveAnimationModeAsync(
+            string path, ImageLoader.BitmapImageFormat reader)
+        {
+            // Reads only the header, but that is still I/O.
+            var info = await Task.Run(() => ImageLoader.InspectAnimation(path));
+            if (info == null || info.EstimatedBytes <= reader.MaxAnimationBytes)
+                return reader.AnimationMode;
+
+            long available = System.GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+            return await WithTopmostSuspended(() =>
+                AnimationLoadDialog.ShowAsync(this, Path.GetFileName(path), info, available));
         }
     }
 }

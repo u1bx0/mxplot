@@ -30,22 +30,25 @@ namespace MxPlot.UI.Avalonia.Commands
             new("Geometry & Dimensions", "Reverse Stack…", "Reverse the frame order along a selected axis",
                 MenuIcons.Layers, new ReverseStackCommand(), host => host.Data?.FrameCount > 1),
             new("Geometry & Dimensions", "Transpose…", "Swap X and Y about the origin [0,0] (bottom-left corner)",
-                MenuIcons.AutoFix, new TransposeCommand()),
+                MenuIcons.Wand, new TransposeCommand()),
             new("Geometry & Dimensions", "Resample…", "Change the pixel count, keeping the physical extent",
-                MenuIcons.AutoFix, new ResampleCommand()),
+                MenuIcons.Wand, new ResampleCommand()),
 
             new("Filters", "Median…", "Apply a median (hot-pixel removal) filter",
-                MenuIcons.AutoFix, new SpatialFilterCommand(SpatialFilterDialog.KernelType.Median)),
+                MenuIcons.Wand, new SpatialFilterCommand(SpatialFilterDialog.KernelType.Median)),
             new("Filters", "Gaussian…", "Apply a Gaussian (smoothing) filter",
-                MenuIcons.AutoFix, new SpatialFilterCommand(SpatialFilterDialog.KernelType.Gaussian)),
+                MenuIcons.Wand, new SpatialFilterCommand(SpatialFilterDialog.KernelType.Gaussian)),
 
             new("Intensity", "Normalize…", "Scale pixel values so the maximum equals a target value",
-                MenuIcons.AutoFix, new NormalizeCommand()),
+                MenuIcons.Wand, new NormalizeCommand()),
             new("Intensity", "Log Transform…", "Apply a logarithm transform (ln / log₁₀ / log₂); outputs double",
-                MenuIcons.AutoFix, new LogTransformCommand()),
+                MenuIcons.Wand, new LogTransformCommand()),
+            // Stands alone at the bottom of the Processing tab instead of inside a group.
+            new("Calculator", "Calculator…", "Compute new values from a formula of this data (m1), the pixel coordinates and the axis positions; outputs double",
+                MenuIcons.Function, new CalculatorCommand()),
 
             new("Frequency", "FFT 2D…", "Forward or inverse 2D Fourier transform; outputs complex data",
-                MenuIcons.AutoFix, new FftCommand()),
+                MenuIcons.Wand, new FftCommand()),
 
             // Only meaningful when there is more than one channel to collapse.
             new("Conversion", "Convert to Grayscale…",

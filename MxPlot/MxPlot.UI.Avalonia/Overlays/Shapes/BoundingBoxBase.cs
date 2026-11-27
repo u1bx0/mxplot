@@ -17,7 +17,7 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
     /// <see cref="OverlayManager"/> performs hit-testing and dragging.
     /// </para>
     /// <para>
-    /// Because <c>BitmapWriter.FlipY = true</c> inverts the Y axis when rendering data,
+    /// Because <c>LutBitmapWriter.FlipY = true</c> inverts the Y axis when rendering data,
     /// overlay world Y = 0 is the <em>screen top</em> (= data YMax), not data row 0.
     /// Any code that needs data-index or physical coordinates must apply the FlipY
     /// transform: <c>dataIndexY = (YCount − 1) − worldY</c>.
@@ -254,11 +254,48 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         {
             // In world (pixel-index) space Y increases downward (screen convention),
             // so top-left is (X, Y) and bottom-right is (X+W, Y+H).
-            var tl = g.WorldToScreen(X,         Y);
-            var tr = g.WorldToScreen(X + Width,  Y);
-            var bl = g.WorldToScreen(X,          Y + Height);
-            var br = g.WorldToScreen(X + Width,  Y + Height);
+            var (x, y, w, h, _) = GetInteractionBounds(g);
+            var tl = g.WorldToScreen(x,         y);
+            var tr = g.WorldToScreen(x + w,     y);
+            var bl = g.WorldToScreen(x,         y + h);
+            var br = g.WorldToScreen(x + w,     y + h);
             return (tl, tr, bl, br);
+        }
+
+        // ── Interaction bounds ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Minimum on-screen extent (screen pixels, per axis) of the box used for handles and
+        /// hit-testing. A box drawn smaller than this is enlarged about its centre for interaction
+        /// only; the stored geometry and the rendering are unaffected. 0 disables the enlargement.
+        /// </summary>
+        protected virtual double MinInteractionScreenSize => 0;
+
+        private (double X, double Y, double Width, double Height, bool Expanded) GetInteractionBounds(AvaloniaOverlayGraphics g)
+        {
+            if (MinInteractionScreenSize <= 0) return (X, Y, Width, Height, false);
+            return ExpandForInteraction(g.WorldToScreen(0, 0), g.WorldToScreen(1, 0), g.WorldToScreen(0, 1));
+        }
+
+        /// <summary>World-space box used for handles and hit-testing under the given viewport (see <see cref="MinInteractionScreenSize"/>).</summary>
+        protected (double X, double Y, double Width, double Height, bool Expanded) GetInteractionBounds(AvaloniaViewport vp)
+        {
+            if (MinInteractionScreenSize <= 0) return (X, Y, Width, Height, false);
+            return ExpandForInteraction(vp.WorldToScreen(new Point(0, 0)), vp.WorldToScreen(new Point(1, 0)), vp.WorldToScreen(new Point(0, 1)));
+        }
+
+        private (double X, double Y, double Width, double Height, bool Expanded) ExpandForInteraction(Point o, Point ex, Point ey)
+        {
+            double min = MinInteractionScreenSize;
+            double pxX = Math.Sqrt((ex.X - o.X) * (ex.X - o.X) + (ex.Y - o.Y) * (ex.Y - o.Y));
+            double pxY = Math.Sqrt((ey.X - o.X) * (ey.X - o.X) + (ey.Y - o.Y) * (ey.Y - o.Y));
+            double w = Math.Abs(Width), h = Math.Abs(Height);
+            double nw = pxX > 1e-9 && w * pxX < min ? min / pxX : w;
+            double nh = pxY > 1e-9 && h * pxY < min ? min / pxY : h;
+            if (nw == w && nh == h) return (X, Y, Width, Height, false);
+
+            double cx = X + Width / 2, cy = Y + Height / 2;
+            return (cx - nw / 2, cy - nh / 2, nw, nh, true);
         }
 
         private static (Point TL, Point TR, Point BL, Point BR) GetScreenCorners(AvaloniaViewport vp,
@@ -276,7 +313,8 @@ namespace MxPlot.UI.Avalonia.Overlays.Shapes
         protected HandleType HitTestBoundingBox(Point location, AvaloniaViewport vp,
             bool testEdges = true, bool alwaysTestHandles = false, bool testInterior = false)
         {
-            var (sTL, sTR, sBL, sBR) = GetScreenCorners(vp, X, Y, Width, Height);
+            var (bx, by, bw, bh, _) = GetInteractionBounds(vp);
+            var (sTL, sTR, sBL, sBR) = GetScreenCorners(vp, bx, by, bw, bh);
             var sTC = Mid(sTL, sTR);
             var sMR = Mid(sTR, sBR);
             var sBC = Mid(sBL, sBR);

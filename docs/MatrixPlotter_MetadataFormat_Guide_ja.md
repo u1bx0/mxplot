@@ -264,18 +264,20 @@ FITS 再読み込み → FITS_HEADER のみがフォーマットヘッダー
 
 ### 履歴の記録方法
 
-`MatrixPlotter.AppendHistory()` は各処理の完了時に呼び出されます:
+公開拡張メソッド `AppendHistory()`（クラス `MatrixDataHistoryExtensions`、名前空間 `MxPlot.UI.Avalonia.Metadata`）が各処理の完了時に呼び出されます:
 
 ```csharp
 // シグネチャ
-internal static void AppendHistory(
-    IMatrixData data,
+public static void AppendHistory(
+    this IMatrixData data,
     string operation,
     string? from,
     string? detail = null)
 ```
 
-現在の呼び出し箇所（すべて `MxPlot.UI.Avalonia.Views` 内の `MatrixPlotter` partial クラス）:
+アプリやプラグインが自分で作ったデータを含め、任意の `IMatrixData` に対して呼べます。`CopyPropertiesFrom` の後に呼ぶと、ソースの履歴が引き継がれて追記されます。プラグインは `IMatrixPlotterContext.Title` を `from` に渡せます。
+
+現在の呼び出し箇所（`MxPlot.UI.Avalonia` 内の `MatrixPlotter` partial クラスと `Commands/`）:
 
 | 呼び出し箇所 | `op` | `from` | `detail` |
 |---|---|---|---|
@@ -379,8 +381,10 @@ MxPlot.Core/
 MxPlot.Extensions.Tiff/
 │   └── OmeTiffHandler.cs        ← MarkAsFormatHeader("OME_XML")
 │
-MxPlot.UI.Avalonia/Views/
-├── PlotterConfigKeys.cs         ← Prefix, VisibleSystemKeys, IsReserved()
-├── MatrixPlotter.History.cs     ← HistoryMetaKey, AppendHistory()
-└── MatrixPlotter.InfoTab.cs     ← ResolveMetaKey(), IsDisplayKeyReadOnly(), RefreshMetaTab()
+MxPlot.UI.Avalonia/
+├── Metadata/
+│   ├── PlotterConfigKeys.cs           ← Prefix, VisibleSystemKeys, IsReserved()
+│   └── MatrixDataHistoryExtensions.cs ← HistoryMetaKey, AppendHistory()（IMatrixData の拡張メソッド）
+└── Views/
+    └── MatrixPlotter.InfoTab.cs       ← ResolveMetaKey(), IsDisplayKeyReadOnly(), RefreshMetaTab()
 ```

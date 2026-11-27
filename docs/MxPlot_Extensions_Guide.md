@@ -26,7 +26,7 @@ By placing a DLL in the appropriate directory you can add functionality without 
 | `MatrixPlotterPluginRegistry.LoadFromDirectory()` | ✅ Working | Called automatically at startup |
 | `MxPlotAppPluginRegistry.LoadFromDirectory()` | ✅ Working | Called automatically at startup |
 | `FormatRegistry` startup auto-scan | ✅ Working | Auto-detects `MxPlot.Extensions.*.dll` |
-| Plugin Registry startup auto-scan | ✅ Working | `App.axaml.cs` scans `plugins/` automatically |
+| Plugin Registry startup auto-scan | ✅ Working | MxPlot.App scans the `plugins/` folder of every add-on root automatically (see §8) |
 
 ---
 
@@ -391,19 +391,56 @@ public string? GroupName => "Deconvolution";
 public string CommandName => "Wiener Filter";
 ```
 
+#### Opening a Window That Follows the Source (Synced)
+
+`ctx.WindowService.ShowMatrixPlotter` opens a Window that shows a fixed result. To open one that stays up to
+date with the source Window, call `ctx.ShowSyncedMatrixPlotter`. The new Window is recomputed by your
+transform whenever the source's active frame changes or its data is refreshed, and it closes together with
+the source.
+
+```csharp
+public void Run(IMatrixPlotterContext ctx)
+{
+    var initial = new MatrixData<double>(ctx.Data.XCount, ctx.Data.YCount);
+
+    IDisposable handle = ctx.ShowSyncedMatrixPlotter(initial, "Doubled", (input, ct) =>
+    {
+        // input.Frame  : the active frame (the whole channel cube while the source is in Composite mode)
+        // input.Source : the source's complete data, for a transform that needs other frames too
+        var frame = input.Frame;
+        var result = new MatrixData<double>(frame.XCount, frame.YCount);
+        var src = frame.GetFrameAsDoubleSpan(frame.ActiveIndex);
+        var dst = result.GetArray(0);
+        for (int i = 0; i < dst.Length; i++) dst[i] = src[i] * 2;
+        return result;
+    });
+}
+```
+
+- The transform runs on a background thread. A call still running when the source changes again is cancelled
+  through `ct`, so observe it in long computations. Call `ShowSyncedMatrixPlotter` itself on the UI thread.
+- Treat `input` as read-only.
+- Returning `null` leaves the Window as it is for that change.
+- The result may differ from `initial` in type and shape.
+- A transform written with `double` accessors (`GetFrameAsDoubleSpan` and so on) returns `MatrixData<double>`.
+  To keep the element type of the source, the algorithm has to see the type; run it through an
+  `IMatrixDataOperation` (see `MxPlot.Core/IOperation.cs`).
+- Disposing the returned handle closes the Window and ends the following.
+- This is available to `IMatrixPlotterPlugin` only. An `IMxPlotAppPlugin` has no source Window.
+
 ### 4.4 Registration
 
 ```csharp
 // Direct
 MatrixPlotterPluginRegistry.AddPlugin(new GaussianFitPlugin());
 
-// Directory scan (called automatically from App.axaml.cs)
+// Directory scan (MxPlot.App does this for every add-on root at startup)
 var pluginsDir = Path.Combine(AppContext.BaseDirectory, "plugins");
 MatrixPlotterPluginRegistry.LoadFromDirectory(pluginsDir);
 ```
 
-`LoadFromDirectory()` is called automatically from `App.axaml.cs`.
-Just place the plugin DLL in the `plugins/` folder.
+MxPlot.App loads plugins automatically at startup. Just place the plugin DLL in a `plugins/` folder
+of an add-on root (see §8).
 
 ---
 
@@ -491,13 +528,13 @@ public async void Run(IMxPlotAppContext ctx)
 ```csharp
 MxPlotAppPluginRegistry.AddPlugin(new BatchCsvExportPlugin());
 
-// Directory scan (called automatically from App.axaml.cs, same pattern as IMatrixPlotterPlugin)
+// Directory scan (MxPlot.App does this for every add-on root at startup, same pattern as IMatrixPlotterPlugin)
 var pluginsDir = Path.Combine(AppContext.BaseDirectory, "plugins");
 MxPlotAppPluginRegistry.LoadFromDirectory(pluginsDir);
 ```
 
-`LoadFromDirectory()` is called automatically from `App.axaml.cs`. If you use MxPlot.App as-is, just
-place the plugin DLL in the `plugins/` folder — nothing else to do. Direct registration (`AddPlugin`)
+MxPlot.App loads plugins automatically at startup. If you use MxPlot.App as-is, just place the plugin
+DLL in a `plugins/` folder of an add-on root (see §8) — nothing else to do. Direct registration (`AddPlugin`)
 is for a custom host app that embeds `MatrixPlotter`/`MxPlot.UI.Avalonia` without MxPlot.App's own
 directory scan, or a plugin compiled directly into the host rather than shipped as a separate DLL.
 
@@ -512,7 +549,9 @@ public class MyAnalysisPlugin: IMatrixPlotterPlugin   { ... }  // ② MatrixPlot
 public class MyBatchPlugin   : IMxPlotAppPlugin          { ... }  // ③ MxPlot.App plugin
 ```
 
-Each Registry selects only the types implementing its own interface, so mixing is safe.
+Each Registry selects only the types implementing its own interface, so mixing is safe. MxPlot.App
+reads every DLL in a `plugins/` folder for all of these (file formats, MatrixPlotter plugins and export
+plugins, MxPlot.App plugins), so a mixed DLL only has to be placed there, under any name.
 
 ---
 
@@ -536,8 +575,31 @@ working across Avalonia and WinForms hosts.
 
 ## 8. Deployment Summary
 
+### Add-on roots
+
+MxPlot.App reads add-ons from every *add-on root*, nearest first. Every root has the same layout:
+
+| What | Where in a root | Naming |
+|---|---|---|
+| File-format extensions | Directly in the root, or in the `plugins/` folder | `MxPlot.Extensions.{Name}.dll` in the root; any name in `plugins/` |
+| Plugins (MatrixPlotter and MxPlot.App) | The `plugins/` folder | Any (`*.dll`) |
+| Custom LUTs | The `LUTs/` folder | `*.mlut` (file format: [Custom LUTs](./MxPlotUIAvalonia_Overview.md#custom-lookup-tables-luts)) |
+
+| Root | Where |
+|---|---|
+| The application folder | Next to `MxPlot.App.exe` (on macOS, the `Contents/MacOS` folder inside the bundle) |
+| The per-user folder | macOS only: `~/Library/Application Support/MxPlot`. This is the place for add-ons on macOS — the app bundle is read-only (changing it breaks its signature, it is hidden from Finder and it is replaced on every update), and the location does not depend on where you keep the app |
+| The folder that holds `MxPlot.app` | macOS only: a convenience that is not recommended — the folder differs from user to user, and an app that was never moved out of its download location may run from a translocated, read-only copy where the neighboring folder is not visible |
+
+**Tools → Open Add-ons Folder** shows the folder to use: the application folder on Windows, the per-user
+folder on macOS (created if it does not exist; nothing inside it is created). Folder names are matched
+case-insensitively. Add-ons are read at startup, so restart MxPlot.App after adding one.
+
+If the same assembly is found under more than one root, the nearest root wins. A copy of a DLL that the
+application itself ships (for example a shared library that ended up in a plugin's build output) is ignored.
+
 ```
-[Application directory]
+[Application directory]                       (Windows)
 ├─ MxPlot.App.exe
 ├─ MxPlot.Core.dll
 ├─ MxPlot.UI.Avalonia.dll
@@ -545,17 +607,27 @@ working across Avalonia and WinForms hosts.
 ├─ MxPlot.Extensions.OmeTiff.dll          ← auto-scanned by FormatRegistry
 ├─ MxPlot.Extensions.Hdf5.dll
 ├─ MxPlot.Extensions.MyPropFormat.dll
-└─ plugins/                               ← auto-scanned by MxPlot.App at startup
-   ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
-   └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
+├─ plugins/                               ← auto-scanned by MxPlot.App at startup
+│  ├─ MyCompany.MxPlotPlugin.GaussianFit.dll
+│  └─ MyCompany.MxPlotAppPlugin.BatchExport.dll
+└─ LUTs/
+   └─ MyPalette.mlut
+
+~/Library/Application Support/MxPlot/         (macOS, same layout)
+├─ MxPlot.Extensions.MyPropFormat.dll
+├─ plugins/
+│  └─ MyCompany.MxPlotPlugin.GaussianFit.dll
+└─ LUTs/
+   └─ MyPalette.mlut
 ```
 
 | Type | Naming convention | Auto-detected |
 |---|---|---|
-| File format DLL | `MxPlot.Extensions.{Name}.dll` | ✅ `AppContext.BaseDirectory`, scanned by `FormatRegistry` |
-| MatrixPlotter plugin DLL | Any (`*.dll`) | ✅ `plugins/`, scanned by MxPlot.App at startup |
+| File format DLL | `MxPlot.Extensions.{Name}.dll` in a root, or any name in `plugins/` | ✅ Directly in an add-on root (scanned by `FormatRegistry`), or in the `plugins/` folder |
+| MatrixPlotter plugin DLL | Any (`*.dll`) | ✅ `plugins/` of an add-on root, scanned by MxPlot.App at startup |
 | MxPlot.App plugin DLL | Any (`*.dll`) | ✅ Same as above |
 
-`LoadFromDirectory()` itself is a generic API that takes any directory as an argument — it isn't hardcoded
-to `plugins/`. MxPlot.App just happens to call it with that path at startup, so a plugin DLL placed there
-is auto-detected as long as you're using MxPlot.App as-is (see §4.4 / §5.4).
+`LoadFromDirectory()` and `LoadFromAssembly()` are generic APIs — they aren't hardcoded to `plugins/`.
+MxPlot.App just calls them for the `plugins/` folder of each add-on root at startup, so a plugin DLL placed
+there is auto-detected as long as you're using MxPlot.App as-is (see §4.4 / §5.4). A host that does its own
+scanning can use `AddOnFolders` (`MxPlot.UI.Avalonia.AddOns`) to get the same roots.

@@ -59,6 +59,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void Subscribe(MatrixPlotter p)
         {
+            p.IsInSyncGroup          = true;
             p.SyncLutChanged        += OnLutChanged;
             p.SyncLutDepthChanged   += OnLutDepthChanged;
             p.SyncInvertedChanged   += OnInvertedChanged;
@@ -76,6 +77,7 @@ namespace MxPlot.UI.Avalonia.Views
 
         private void Unsubscribe(MatrixPlotter p)
         {
+            p.IsInSyncGroup          = false;
             p.SyncLutChanged        -= OnLutChanged;
             p.SyncLutDepthChanged   -= OnLutDepthChanged;
             p.SyncInvertedChanged   -= OnInvertedChanged;

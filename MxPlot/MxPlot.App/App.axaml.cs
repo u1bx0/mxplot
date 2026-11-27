@@ -35,13 +35,10 @@ namespace MxPlot.App
                 // More info: https://docs.avaloniaui.net/docs/guides/development-guides/data-validation#manage-validationplugins
                 DisableAvaloniaDataAnnotationValidation();
 
-                // ── Plugin auto-scan ───────────────────────────────────────────────
-                // Scans the "plugins" subdirectory next to the executable.
-                // FormatRegistry (IMatrixDataReader/Writer) is handled separately via
-                // its own MxPlot.Extensions.*.dll convention in AppContext.BaseDirectory.
-                var pluginsDir = Path.Combine(System.AppContext.BaseDirectory, "plugins");
-                MatrixPlotterPluginRegistry.LoadFromDirectory(pluginsDir);
-                MxPlotAppPluginRegistry.LoadFromDirectory(pluginsDir);
+                // ── Add-on auto-scan ───────────────────────────────────────────────
+                // Plugins (the "plugins" folder) and file-format extensions (MxPlot.Extensions.*.dll
+                // directly in a root) are read from every add-on root, nearest first; see AddOnFolders.
+                AddOnLoader.LoadAll();
                 MatrixPlotterPluginRegistry.AddExportPlugin(new AviExporter());
                 // MP4 has no bundled encoder (see FfmpegFrameWriter) -- only offer it when an
                 // actual ffmpeg is reachable, so the menu never advertises an export that would

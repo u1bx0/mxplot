@@ -284,10 +284,33 @@ namespace MxPlot.UI.Avalonia.Controls
         public int? AxisIndicatorPx { get; set; }
 
         /// <summary>
+        /// Whether the line and label for <see cref="AxisIndicatorPx"/> are drawn and can be dragged.
+        /// The position is kept while this is <c>false</c>, so scrolling to it still works.
+        /// </summary>
+        public bool ShowAxisIndicator { get; set; } = true;
+
+        /// <summary>
         /// When set, draws a text label near the axis indicator line.
         /// Typically provides the axis name and physical value, e.g. <c>"Z=1.250 mm"</c>.
         /// </summary>
         public string? AxisIndicatorLabel { get; set; }
+
+        /// <summary>
+        /// When set, draws a line (same style as the axis indicator) at the given bitmap
+        /// <b>column</b>, i.e. perpendicular to <see cref="AxisIndicatorPx"/>'s line. Unlike the
+        /// axis indicator it is not affected by <see cref="FlipY"/> and cannot be dragged.
+        /// Used by the orthogonal side views to mark the XY crosshair position.
+        /// Draggable: <see cref="CrossIndicatorDragged"/> reports the new column index.
+        /// </summary>
+        public int? CrossIndicatorPx { get; set; }
+
+        /// <summary>Text label drawn near the cross indicator line (e.g. <c>"x=1.25 um"</c>).</summary>
+        public string? CrossIndicatorLabel { get; set; }
+
+        /// <summary>Fired when the user drags the cross indicator to a new bitmap-column index.</summary>
+        public event EventHandler<int>? CrossIndicatorDragged;
+
+        private bool _isDraggingCrossIndicator;
 
         /// <summary>Fired when zoom, translation, or bitmap size changes, so <see cref="MxView"/> can sync scrollbars.</summary>
         public event EventHandler? ScrollStateChanged;
@@ -897,7 +920,8 @@ namespace MxPlot.UI.Avalonia.Controls
                         ctx.DrawImage(_bitmap, new Rect(cx - origW / 2.0, cy - origH / 2.0, origW, origH));
                 }
                 // Axis indicator is drawn in screen space so it works correctly for all transforms
-                DrawAxisIndicator(ctx, rx, ry, effW, effH);
+                if (ShowAxisIndicator) DrawAxisIndicator(ctx, rx, ry, effW, effH);
+                DrawCrossIndicator(ctx, rx, ry, effW, effH);
             }
 
             // User overlays drawn above the image but below the system overlays
@@ -1218,12 +1242,25 @@ namespace MxPlot.UI.Avalonia.Controls
                 return;
             }
 
-            if (AxisIndicatorPx.HasValue && IsOnAxisIndicator(pos))
+            // At the intersection of the two lines both are grabbed and move together.
+            bool onAxis = AxisIndicatorPx.HasValue && IsOnAxisIndicator(pos);
+            bool onCross = IsOnCrossIndicator(pos);
+            if (onAxis || onCross)
             {
-                _isDraggingAxisIndicator = true;
-                var newIdx = ScreenToAxisIndicatorIndex(pos);
-                AxisIndicatorPx = newIdx;
-                AxisIndicatorDragged?.Invoke(this, newIdx);
+                _isDraggingAxisIndicator = onAxis;
+                _isDraggingCrossIndicator = onCross;
+                if (onAxis)
+                {
+                    var newIdx = ScreenToAxisIndicatorIndex(pos);
+                    AxisIndicatorPx = newIdx;
+                    AxisIndicatorDragged?.Invoke(this, newIdx);
+                }
+                if (onCross)
+                {
+                    var newCol = ScreenToCrossIndicatorIndex(pos);
+                    CrossIndicatorPx = newCol;
+                    CrossIndicatorDragged?.Invoke(this, newCol);
+                }
                 e.Pointer.Capture(this);
                 InvalidateVisual();
                 e.Handled = true;
@@ -1255,13 +1292,25 @@ namespace MxPlot.UI.Avalonia.Controls
             _lastPointerModifiers = e.KeyModifiers;
             var pos = e.GetPosition(this);
             _lastScreenPos = pos;
-            if (_isDraggingAxisIndicator)
+            if (_isDraggingAxisIndicator || _isDraggingCrossIndicator)
             {
-                var newIdx = ScreenToAxisIndicatorIndex(pos);
-                if (AxisIndicatorPx != newIdx)
+                if (_isDraggingAxisIndicator)
                 {
-                    AxisIndicatorPx = newIdx;
-                    AxisIndicatorDragged?.Invoke(this, newIdx);
+                    var newIdx = ScreenToAxisIndicatorIndex(pos);
+                    if (AxisIndicatorPx != newIdx)
+                    {
+                        AxisIndicatorPx = newIdx;
+                        AxisIndicatorDragged?.Invoke(this, newIdx);
+                    }
+                }
+                if (_isDraggingCrossIndicator)
+                {
+                    var newCol = ScreenToCrossIndicatorIndex(pos);
+                    if (CrossIndicatorPx != newCol)
+                    {
+                        CrossIndicatorPx = newCol;
+                        CrossIndicatorDragged?.Invoke(this, newCol);
+                    }
                 }
             }
             else if (_isDraggingCrosshair)
@@ -1285,13 +1334,27 @@ namespace MxPlot.UI.Avalonia.Controls
             }
 
             // Update cursor for AxisIndicator / Crosshair when no overlay or pan is active.
-            if (!_isDraggingAxisIndicator && !_isDraggingCrosshair && !_isPanning)
+            if (!_isDraggingAxisIndicator && !_isDraggingCrossIndicator && !_isDraggingCrosshair && !_isPanning)
             {
-                if (AxisIndicatorPx.HasValue && IsOnAxisIndicator(pos))
+                bool hoverAxis = AxisIndicatorPx.HasValue && IsOnAxisIndicator(pos);
+                bool hoverCross = IsOnCrossIndicator(pos);
+                bool axisIsHorizontal = Transform is not (ViewTransform.Transpose
+                                                       or ViewTransform.Rotate90CW
+                                                       or ViewTransform.Rotate90CCW);
+                if (hoverAxis && hoverCross)
                 {
-                    Cursor = Transform is ViewTransform.Transpose
-                                      or ViewTransform.Rotate90CW
-                                      or ViewTransform.Rotate90CCW
+                    Cursor = new Cursor(StandardCursorType.SizeAll);
+                }
+                else if (hoverAxis)
+                {
+                    Cursor = axisIsHorizontal
+                        ? new Cursor(StandardCursorType.SizeNorthSouth)
+                        : new Cursor(StandardCursorType.SizeWestEast);
+                }
+                else if (hoverCross)
+                {
+                    // The cross line is perpendicular to the axis line.
+                    Cursor = axisIsHorizontal
                         ? new Cursor(StandardCursorType.SizeWestEast)
                         : new Cursor(StandardCursorType.SizeNorthSouth);
                 }
@@ -1315,12 +1378,14 @@ namespace MxPlot.UI.Avalonia.Controls
 
         protected override void OnPointerReleased(PointerReleasedEventArgs e)
         {
-            if (_isDraggingAxisIndicator)
+            if (_isDraggingAxisIndicator || _isDraggingCrossIndicator)
             {
+                bool axisDragged = _isDraggingAxisIndicator;
                 _isDraggingAxisIndicator = false;
+                _isDraggingCrossIndicator = false;
                 Cursor = Cursor.Default;
                 e.Pointer.Capture(null);
-                AxisIndicatorDragEnded?.Invoke(this, EventArgs.Empty);
+                if (axisDragged) AxisIndicatorDragEnded?.Invoke(this, EventArgs.Empty);
                 return;
             }
             if (_isDraggingCrosshair)
@@ -2209,12 +2274,88 @@ namespace MxPlot.UI.Avalonia.Controls
             }
         }
 
+        /// <summary>
+        /// Draws the line for <see cref="CrossIndicatorPx"/>. The column index runs along the
+        /// bitmap's X direction, so the line is vertical for the unrotated transforms and
+        /// horizontal for the 90-degree ones (same mapping as <see cref="DataToScreen"/>).
+        /// </summary>
+        private void DrawCrossIndicator(DrawingContext ctx, double rx, double ry, double effW, double effH)
+        {
+            if (!CrossIndicatorPx.HasValue || _bitmap == null) return;
+            double pos = GetCrossLinePos(rx, ry, effW, effH, out bool vertical);
+            string? lbl = CrossIndicatorLabel?.Length > 0 ? CrossIndicatorLabel : null;
+            if (vertical)
+            {
+                if (pos < rx || pos > rx + effW) return;
+                ctx.DrawLine(AxisIndicatorBlack, new Point(pos, ry), new Point(pos, ry + effH));
+                ctx.DrawLine(AxisIndicatorWhite, new Point(pos, ry), new Point(pos, ry + effH));
+                if (lbl != null) DrawVLineLabel(ctx, lbl, pos, rx, ry, effW, effH);
+            }
+            else
+            {
+                if (pos < ry || pos > ry + effH) return;
+                ctx.DrawLine(AxisIndicatorBlack, new Point(rx, pos), new Point(rx + effW, pos));
+                ctx.DrawLine(AxisIndicatorWhite, new Point(rx, pos), new Point(rx + effW, pos));
+                if (lbl != null) DrawHLineLabel(ctx, lbl, pos, rx, ry, effW, effH);
+            }
+        }
+
+        /// <summary>
+        /// Screen coordinate of the cross indicator line (X when <paramref name="vertical"/>,
+        /// otherwise Y). Requires <see cref="CrossIndicatorPx"/> and a bitmap.
+        /// </summary>
+        private double GetCrossLinePos(double rx, double ry, double effW, double effH, out bool vertical)
+        {
+            var (ax, _) = GetAspectScales();
+            double d = (CrossIndicatorPx!.Value + 0.5) * _zoom * ax;
+            vertical = Transform is ViewTransform.None or ViewTransform.FlipV
+                                 or ViewTransform.FlipH or ViewTransform.Rotate180;
+            return Transform switch
+            {
+                ViewTransform.FlipH or ViewTransform.Rotate180 => rx + effW - d,
+                ViewTransform.Transpose or ViewTransform.Rotate90CW => ry + d,
+                ViewTransform.Rotate90CCW => ry + effH - d,
+                _ => rx + d,
+            };
+        }
+
+        private bool IsOnCrossIndicator(Point screenPos)
+        {
+            if (!CrossIndicatorPx.HasValue || _bitmap == null) return false;
+            var (effW, effH) = GetEffectiveBmpDims();
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
+            double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
+            double pos = GetCrossLinePos(rx, ry, effW, effH, out bool vertical);
+            return vertical
+                ? Math.Abs(screenPos.X - pos) < AxisIndicatorHitTolerance && screenPos.Y >= ry && screenPos.Y <= ry + effH
+                : Math.Abs(screenPos.Y - pos) < AxisIndicatorHitTolerance && screenPos.X >= rx && screenPos.X <= rx + effW;
+        }
+
+        /// <summary>Converts a screen position to the nearest bitmap-column index (inverse of <see cref="GetCrossLinePos"/>).</summary>
+        private int ScreenToCrossIndicatorIndex(Point screenPos)
+        {
+            if (_bitmap == null || _zoom == 0) return 0;
+            var (ax, _) = GetAspectScales();
+            var (effW, effH) = GetEffectiveBmpDims();
+            double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);
+            double ry = GetRenderTrans(_transY, effH, Bounds.Height, false);
+            double step = _zoom * ax;
+            double d = Transform switch
+            {
+                ViewTransform.FlipH or ViewTransform.Rotate180 => rx + effW - screenPos.X,
+                ViewTransform.Transpose or ViewTransform.Rotate90CW => screenPos.Y - ry,
+                ViewTransform.Rotate90CCW => ry + effH - screenPos.Y,
+                _ => screenPos.X - rx,
+            };
+            return Math.Clamp((int)Math.Floor(d / step), 0, _bitmap.PixelSize.Width - 1);
+        }
+
         // ── Axis indicator helpers ─────────────────────────────────────────────
 
         /// <summary>Returns true if <paramref name="screenPos"/> is within hit-test distance of the axis indicator line.</summary>
         private bool IsOnAxisIndicator(Point screenPos)
         {
-            if (!AxisIndicatorPx.HasValue || _bitmap == null) return false;
+            if (!ShowAxisIndicator || !AxisIndicatorPx.HasValue || _bitmap == null) return false;
             var (_, ay) = GetAspectScales();
             var (effW, effH) = GetEffectiveBmpDims();
             double rx = GetRenderTrans(_transX, effW, Bounds.Width, true);

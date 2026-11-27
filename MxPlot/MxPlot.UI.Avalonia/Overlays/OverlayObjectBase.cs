@@ -15,7 +15,7 @@ namespace MxPlot.UI.Avalonia.Overlays
     /// <b>Coordinate system:</b> All positions are in <em>overlay world coordinates</em>,
     /// which correspond to the rendered bitmap's pixel-index space (left-top origin, Y increases
     /// downward). This is the native coordinate system of the Avalonia display surface.
-    /// <c>BitmapWriter.FlipY = true</c> maps data row 0 (YMin) to the bitmap bottom, so
+    /// <c>LutBitmapWriter.FlipY = true</c> maps data row 0 (YMin) to the bitmap bottom, so
     /// overlay world Y = 0 corresponds to data row <c>YCount − 1</c> (YMax) and
     /// overlay world Y = <c>YCount − 1</c> corresponds to data row 0 (YMin).
     /// </para>
@@ -48,6 +48,13 @@ namespace MxPlot.UI.Avalonia.Overlays
         public bool IsDeletable { get; set; } = true;
         public bool IsSelectable { get; set; } = true;
         public PixelSnapMode SnapMode { get; set; } = PixelSnapMode.None;
+
+        /// <summary>
+        /// The world point that <see cref="SnapMode"/> applies to while the whole object is dragged.
+        /// <c>null</c> (the default) snaps the pointer position instead, so the object keeps its
+        /// offset to the grid; an override snaps that point itself (e.g. a target's centre).
+        /// </summary>
+        public virtual Point? GetSnapAnchor() => null;
 
         /// <summary>
         /// Set by <see cref="OverlayManager"/> immediately before calling

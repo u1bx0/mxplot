@@ -19,6 +19,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using MxPlot.App.Views;
 using MxPlot.Core.IO.Formats;
+using MxPlot.Extensions.Images;
 
 namespace MxPlot.App.ViewModels
 {
@@ -204,6 +205,16 @@ namespace MxPlot.App.ViewModels
             {
                 _lastClickHandledWindow = window;
                 WindowSelectionClickedAction?.Invoke(window, e.KeyModifiers.HasFlag(KeyModifiers.Control));
+
+                // The mark is for the Activated that comes with this click, and nothing else. A click in a
+                // window that is already active brings no Activated to consume it, and a mark left behind
+                // would swallow a later, automatic activation of this window (e.g. after another window
+                // was closed), which then selects nothing in the list. Background is below the priority
+                // the Activated handler posts at, so a click's own Activated sees the mark first.
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (_lastClickHandledWindow == window) _lastClickHandledWindow = null;
+                }, DispatcherPriority.Background);
             }, RoutingStrategies.Tunnel);
             window.Activated += (_, _) => Dispatcher.UIThread.Post(() =>
             {
@@ -460,6 +471,15 @@ namespace MxPlot.App.ViewModels
                 var reader = FormatRegistry.CreateReader(path)
                     ?? throw new NotSupportedException(
                         $"No reader registered for '{Path.GetExtension(path)}'.");
+
+                // A large GIF / animated WebP expands to far more memory than its file size suggests,
+                // so the user chooses between every frame and the first frame only.
+                if (reader is ImageLoader.BitmapImageFormat bitmapReader)
+                {
+                    var animation = await owner.ResolveAnimationModeAsync(path, bitmapReader);
+                    if (animation == null) return; // user cancelled
+                    bitmapReader.AnimationMode = animation.Value;
+                }
 
                 // Show progress overlay while the file is being read.
                 _loadingCts = new CancellationTokenSource();

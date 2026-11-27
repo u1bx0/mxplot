@@ -60,7 +60,10 @@ matrix.Save("no_flip.ome.tif", new OmeTiffFormat(options));
 IMatrixData loadedData = MatrixData.Load("input.ome.tif");
 ```
 ## Technical Notes
-- **Supported Types**: `byte`, `sbyte`, `short`, `ushort`, `int`, `float`, `double`.
+- **Supported Types**: `byte`, `sbyte`, `short`, `ushort`, `uint`, `int`, `float`, `double`. `ImageJTiffFormat` and `OmeTiffFormat` accept the same set; the pixel type is stored with the standard TIFF `BitsPerSample` / `SampleFormat` tags. ImageJ/Fiji itself opens 8/16-bit integer and 32-bit float images; other types are read back by MxPlot and other TIFF readers, but Fiji may not open them.
+- **Compression (write)**: both formats implement `ICompressible`; `CompressionInWrite` defaults to `true` (LZW). Set it to `false` for uncompressed files that a Virtual load can memory-map.
+- **BigTIFF (write)**: both formats switch to BigTIFF automatically when the uncompressed pixel data approaches 4 GiB, the limit of a classic TIFF. ImageJ/Fiji itself does not open BigTIFF (Bio-Formats does); MxPlot reads it, including Virtual loading.
+- **Frame layouts (read)**: one IFD per frame, or ImageJ's single-IFD "packed" stack (all frames follow the first IFD at a fixed stride, uncompressed). Both layouts support Virtual loading (memory-mapped for uncompressed strip files, per-frame decode otherwise).
 - **Coordinates**: The library automatically handles the vertical flip (Y-axis) required to map MxPlot's mathematical Cartesian coordinates to the raster scan order of TIFF images. This behavior can be customized via the `FlipY` option if needed. See the API documentation for `OmeTiffFormat` and `ImageJTiffFormat` for details.
 - **Dependencies**: Built on top of `BitMiracle.LibTiff.NET`.
 

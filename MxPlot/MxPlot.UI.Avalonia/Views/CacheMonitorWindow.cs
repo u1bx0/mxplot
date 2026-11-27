@@ -70,6 +70,7 @@ namespace MxPlot.UI.Avalonia.Views
 
             _flatModeCheck = ControlFactory.MakeCheckBox("Flat grid", hint: "Show one square-ish 2D grid of every frame instead of grouping by axis.");
             _wrapCheck     = ControlFactory.MakeCheckBox("Wrap to window", hint: "Flat grid only: size the grid to the window width instead of a fixed square.");
+            _flatModeCheck.IsChecked = true;
             _flatModeCheck.IsCheckedChanged += (_, _) => UpdateStatus();
             _wrapCheck.IsCheckedChanged     += (_, _) => UpdateStatus();
 

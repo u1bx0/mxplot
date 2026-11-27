@@ -23,8 +23,10 @@ namespace MxPlot.Core.Processing
         /// <param name="end">End of the segment, in physical coordinates.</param>
         /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
         /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
+        /// <param name="originT">Where <c>Pos</c> is 0, as a fraction of the unclipped segment (0 = <paramref name="start"/>, 1 = <paramref name="end"/>); <c>null</c> (the default) puts 0 at the clipped start.</param>
         /// <returns>
-        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Pos</c>: distance along the line direction from the clipped start (<c>Pos[0] = 0</c>), or from the
+        /// <c>originT</c> point of the unclipped segment when given (negative before it).
         /// <c>Values</c>: sampled data values at each position.
         /// Both arrays are empty if the segment is entirely outside the data bounds.
         /// </returns>
@@ -33,10 +35,12 @@ namespace MxPlot.Core.Processing
             (double X, double Y) start,
             (double X, double Y) end,
             int frameIndex = -1,
-            LineProfileOption option = LineProfileOption.NearestNeighbor)
+            LineProfileOption option = LineProfileOption.NearestNeighbor,
+            double? originT = null)
         {
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
-            if (!ClipSegment(src, ref start, ref end, out _, out _))
+            double fullLen = SegmentLength(start, end);
+            if (!ClipSegment(src, ref start, ref end, out double tMin, out _))
                 return Empty();
 
             double dx = end.X - start.X;
@@ -44,7 +48,7 @@ namespace MxPlot.Core.Processing
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
             int n = ComputeAdaptiveSampleCount(src, dx, dy, clippedLen);
 
-            return SampleLine(start, end, clippedLen, n,
+            return SampleLine(start, end, clippedLen, n, PosOffset(fullLen, tMin, originT),
                 (x, y) => Sample(src, x, y, frameIndex, option));
         }
 
@@ -58,8 +62,10 @@ namespace MxPlot.Core.Processing
         /// <param name="numPoints">The number of sample points along the clipped segment. Must be ≥ 1.</param>
         /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
         /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
+        /// <param name="originT">Where <c>Pos</c> is 0, as a fraction of the unclipped segment (0 = <paramref name="start"/>, 1 = <paramref name="end"/>); <c>null</c> (the default) puts 0 at the clipped start.</param>
         /// <returns>
-        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Pos</c>: distance along the line direction from the clipped start (<c>Pos[0] = 0</c>), or from the
+        /// <c>originT</c> point of the unclipped segment when given (negative before it).
         /// <c>Values</c>: sampled data values at each position.
         /// Both arrays are empty if the segment is entirely outside the data bounds.
         /// </returns>
@@ -69,19 +75,21 @@ namespace MxPlot.Core.Processing
             (double X, double Y) end,
             int numPoints,
             int frameIndex = -1,
-            LineProfileOption option = LineProfileOption.NearestNeighbor)
+            LineProfileOption option = LineProfileOption.NearestNeighbor,
+            double? originT = null)
         {
             if (numPoints < 1)
                 throw new ArgumentOutOfRangeException(nameof(numPoints), "numPoints must be >= 1.");
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
-            if (!ClipSegment(src, ref start, ref end, out _, out _))
+            double fullLen = SegmentLength(start, end);
+            if (!ClipSegment(src, ref start, ref end, out double tMin, out _))
                 return Empty();
 
             double dx = end.X - start.X;
             double dy = end.Y - start.Y;
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
 
-            return SampleLine(start, end, clippedLen, numPoints,
+            return SampleLine(start, end, clippedLen, numPoints, PosOffset(fullLen, tMin, originT),
                 (x, y) => Sample(src, x, y, frameIndex, option));
         }
 
@@ -98,6 +106,7 @@ namespace MxPlot.Core.Processing
         /// <param name="end">End of the segment, in physical coordinates.</param>
         /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
         /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
+        /// <param name="originT">Where <c>Pos</c> is 0, as a fraction of the unclipped segment (0 = <paramref name="start"/>, 1 = <paramref name="end"/>); <c>null</c> (the default) puts 0 at the clipped start.</param>
         /// <param name="valueConverter">
         /// Reduces a sampled <typeparamref name="T"/> value to <c>double</c>.
         /// Unnecessary (and ignored) when <typeparamref name="T"/> is one of
@@ -112,7 +121,8 @@ namespace MxPlot.Core.Processing
         /// The value mode to read when <paramref name="valueConverter"/> is omitted. Ignored for primitive types.
         /// </param>
         /// <returns>
-        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Pos</c>: distance along the line direction from the clipped start (<c>Pos[0] = 0</c>), or from the
+        /// <c>originT</c> point of the unclipped segment when given (negative before it).
         /// <c>Values</c>: sampled data values at each position.
         /// Both arrays are empty if the segment is entirely outside the data bounds.
         /// </returns>
@@ -123,12 +133,14 @@ namespace MxPlot.Core.Processing
             int frameIndex = -1,
             LineProfileOption option = LineProfileOption.NearestNeighbor,
             Func<T, double>? valueConverter = null,
-            int valueMode = 0)
+            int valueMode = 0,
+            double? originT = null)
             where T : unmanaged
         {
             var converter = ResolveConverter(valueConverter, valueMode);
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
-            if (!ClipSegment(src, ref start, ref end, out _, out _))
+            double fullLen = SegmentLength(start, end);
+            if (!ClipSegment(src, ref start, ref end, out double tMin, out _))
                 return Empty();
 
             double dx = end.X - start.X;
@@ -136,7 +148,7 @@ namespace MxPlot.Core.Processing
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
             int n = ComputeAdaptiveSampleCount(src, dx, dy, clippedLen);
 
-            return SampleLine(start, end, clippedLen, n,
+            return SampleLine(start, end, clippedLen, n, PosOffset(fullLen, tMin, originT),
                 (x, y) => SampleTyped(src, x, y, frameIndex, option, converter));
         }
 
@@ -152,10 +164,12 @@ namespace MxPlot.Core.Processing
         /// <param name="numPoints">The number of sample points along the clipped segment. Must be ≥ 1.</param>
         /// <param name="frameIndex">The frame to sample. A negative value (the default) selects <c>ActiveIndex</c>.</param>
         /// <param name="option">How a value between pixels is obtained: the nearest pixel, or bilinear interpolation.</param>
+        /// <param name="originT">Where <c>Pos</c> is 0, as a fraction of the unclipped segment (0 = <paramref name="start"/>, 1 = <paramref name="end"/>); <c>null</c> (the default) puts 0 at the clipped start.</param>
         /// <param name="valueConverter">See the adaptive-step overload for the exact contract.</param>
         /// <param name="valueMode">See the adaptive-step overload.</param>
         /// <returns>
-        /// <c>Pos</c>: distance from the clipped start along the line direction (<c>Pos[0] = 0</c>).
+        /// <c>Pos</c>: distance along the line direction from the clipped start (<c>Pos[0] = 0</c>), or from the
+        /// <c>originT</c> point of the unclipped segment when given (negative before it).
         /// <c>Values</c>: sampled data values at each position.
         /// Both arrays are empty if the segment is entirely outside the data bounds.
         /// </returns>
@@ -167,21 +181,23 @@ namespace MxPlot.Core.Processing
             int frameIndex = -1,
             LineProfileOption option = LineProfileOption.NearestNeighbor,
             Func<T, double>? valueConverter = null,
-            int valueMode = 0)
+            int valueMode = 0,
+            double? originT = null)
             where T : unmanaged
         {
             if (numPoints < 1)
                 throw new ArgumentOutOfRangeException(nameof(numPoints), "numPoints must be >= 1.");
             var converter = ResolveConverter(valueConverter, valueMode);
             if (frameIndex < 0) frameIndex = src.ActiveIndex;
-            if (!ClipSegment(src, ref start, ref end, out _, out _))
+            double fullLen = SegmentLength(start, end);
+            if (!ClipSegment(src, ref start, ref end, out double tMin, out _))
                 return Empty();
 
             double dx = end.X - start.X;
             double dy = end.Y - start.Y;
             double clippedLen = Math.Sqrt(dx * dx + dy * dy);
 
-            return SampleLine(start, end, clippedLen, numPoints,
+            return SampleLine(start, end, clippedLen, numPoints, PosOffset(fullLen, tMin, originT),
                 (x, y) => SampleTyped(src, x, y, frameIndex, option, converter));
         }
 
@@ -263,13 +279,15 @@ namespace MxPlot.Core.Processing
 
         /// <summary>
         /// Samples <paramref name="n"/> equally spaced points along the clipped segment.
-        /// <c>Pos[0]</c> is always 0 (clipped start); <c>Pos[n-1]</c> equals the clipped segment length.
+        /// Without an origin <c>Pos[0]</c> is 0 (clipped start) and <c>Pos[n-1]</c> equals the clipped
+        /// segment length; <paramref name="posOffset"/> (see <see cref="PosOffset"/>) shifts every position.
         /// </summary>
         private static (double[] Pos, double[] Values) SampleLine(
             (double X, double Y) clippedStart,
             (double X, double Y) clippedEnd,
             double clippedLen,
             int n,
+            double posOffset,
             Func<double, double, double> sampleAt)
         {
             double cdx = clippedEnd.X - clippedStart.X;
@@ -287,12 +305,27 @@ namespace MxPlot.Core.Processing
                 double d = i * step;
                 double x = clippedStart.X + ux * d;
                 double y = clippedStart.Y + uy * d;
-                pos[i]    = d;
+                pos[i]    = d + posOffset;
                 values[i] = sampleAt(x, y);
             }
 
             return (pos, values);
         }
+
+        private static double SegmentLength((double X, double Y) start, (double X, double Y) end)
+        {
+            double dx = end.X - start.X;
+            double dy = end.Y - start.Y;
+            return Math.Sqrt(dx * dx + dy * dy);
+        }
+
+        /// <summary>
+        /// The shift applied to every <c>Pos</c> so that the point at <paramref name="originT"/> of the
+        /// unclipped segment becomes 0. <paramref name="tMin"/> is where the clipped start lies on the
+        /// unclipped segment. <c>null</c> keeps the clipped start as 0.
+        /// </summary>
+        private static double PosOffset(double fullLen, double tMin, double? originT)
+            => originT.HasValue ? (tMin - originT.Value) * fullLen : 0.0;
 
         private static (double[], double[]) Empty()
             => (Array.Empty<double>(), Array.Empty<double>());

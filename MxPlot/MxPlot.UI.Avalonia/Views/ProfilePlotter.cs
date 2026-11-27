@@ -60,6 +60,36 @@ namespace MxPlot.UI.Avalonia.Views
         private IProfileFitter? _activeFitter;
         private CheckBox? _fitCurveToggle;
 
+        /// <summary>User-adjustable fit options, edited in the gear flyout next to "Fit curve".</summary>
+        private sealed class FitSettings
+        {
+            /// <summary>Index of the series to fit; clamped to the available series at fit time.</summary>
+            public int SeriesIndex;
+            /// <summary>When true the curve gets max(300, 2 x data points) samples.</summary>
+            public bool AutoCurvePoints = true;
+            /// <summary>Number of samples of the fit curve when <see cref="AutoCurvePoints"/> is off.</summary>
+            public int CurvePoints = 300;
+
+            private readonly Dictionary<string, double?[]> _fixedByFitter = [];
+
+            /// <summary>
+            /// The values the parameters of <paramref name="fitter"/> are held at, one entry per parameter
+            /// (<c>null</c> = free). Kept per fitter, so switching fitters and back finds them again.
+            /// The array is edited in place.
+            /// </summary>
+            public double?[] FixedFor(IProfileFitter fitter)
+            {
+                if (!_fixedByFitter.TryGetValue(fitter.Name, out var values) || values.Length != fitter.ParameterCount)
+                    _fixedByFitter[fitter.Name] = values = new double?[fitter.ParameterCount];
+                return values;
+            }
+        }
+        private readonly FitSettings _fitSettings = new();
+
+        private LevenbergMarquardtSolver.FitResult? _lastFit;
+        // Refreshes the fitted values shown in the parameters flyout; set only while that flyout is open.
+        private Action? _refreshFitParameterValues;
+
         // Plot size mode
         private bool _plotSizeFixed = false;
         private double _fixedPlotWidth = 500.0;
@@ -138,6 +168,9 @@ namespace MxPlot.UI.Avalonia.Views
         private Button _hamburgerBtn = null!;
         private bool _showMenu;
         private double _savedMenuWidth = MenuPanelWidth;
+        // Opens/closes the "Property" group, and shows the Axes flyout with focus on the given part.
+        private Action<bool>? _setPropertyExpanded;
+        private Action<PlotAxisRegion>? _showAxesFlyout;
         private StackPanel _plotStyleContainer = null!;
         private StackPanel _fitStyleSection    = null!;
         private StackPanel _dataVisibilityContainer = null!;
@@ -173,6 +206,7 @@ namespace MxPlot.UI.Avalonia.Views
             Plot.SetData(series, xAxisLabel, yAxisLabel, title);
 
             BuildLayout();
+            Plot.AxisRegionDoubleClicked += (_, region) => OpenAxesEditor(region);
             Plot.SeriesChanged += (_, _) => Dispatcher.UIThread.Post(() =>
             {
                 RebuildDataVisibilityControls();
@@ -568,6 +602,18 @@ namespace MxPlot.UI.Avalonia.Views
             }
         }
 
+        /// <summary>
+        /// Shows the Axes flyout from the menu: opens the side panel and the Property group if they
+        /// are closed, so that settings are always edited in the same place.
+        /// </summary>
+        private void OpenAxesEditor(PlotAxisRegion region)
+        {
+            if (!_showMenu) ToggleMenuPanel();
+            _setPropertyExpanded?.Invoke(true);
+            // The panel and the group have only just become visible: anchor the flyout once they are laid out.
+            Dispatcher.UIThread.Post(() => _showAxesFlyout?.Invoke(region), DispatcherPriority.Loaded);
+        }
+
         // ── Menu side panel builder ───────────────────────────────────────────
 
         private Border BuildMenuSidePanel()
@@ -733,36 +779,62 @@ namespace MxPlot.UI.Avalonia.Views
                 legendSection,
                 sizeModeSection,
                 fontSection,
-            ], icon: MenuIcons.Ruler, initiallyExpanded: false));
+            ], out var setPropertyExpanded, icon: MenuIcons.Ruler, initiallyExpanded: false));
+            _setPropertyExpanded = setPropertyExpanded;
 
             var fitCurveChk = ControlFactory.MakeCheckBox("Fit curve", hint: "Fit curve with selected function");
             fitCurveChk.Margin = new Thickness(26, 1, 6, -7);
+            // The gear lives inside the checkbox content so it scales and aligns with the label
+            // (see the rename button in RebuildDataVisibilityControls).
+            var fitContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            fitContent.Children.Add(new TextBlock { Text = "Fit curve", VerticalAlignment = VerticalAlignment.Center });
+            fitContent.Children.Add(BuildFitSettingsButton());
+            fitCurveChk.Content = fitContent;
             _fitCurveToggle = fitCurveChk;
 
             var fitterCombo = new ComboBox
             {
                 ItemsSource = ProfileFitterRegistry.Fitters,
                 SelectedIndex = ProfileFitterRegistry.Fitters.Count > 0 ? 0 : -1,
-                Width = 120,
+                // Takes the width the row leaves, so a long fitter name shows when the menu panel is widened.
+                HorizontalAlignment = HorizontalAlignment.Stretch,
                 Height = 20,
                 MinHeight = 0,
+                MinWidth = 0,
                 FontSize = 11,
                 Padding = new Thickness(4, 0),
                 VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(26, 0, 6, 2),
             };
             fitterCombo.ItemTemplate = new FuncDataTemplate<IProfileFitter>((f, _) =>
                 new TextBlock { Text = f?.Name ?? "", FontSize = 11 });
+
+            // [combo][parameters button]: the button sticks to the panel's right edge and the combo fills the rest.
+            var fitParamsBtn = BuildFitParametersButton();
+            DockPanel.SetDock(fitParamsBtn, Dock.Right);
+            var fitterRow = new DockPanel { Margin = new Thickness(26, 0, 6, 2), LastChildFill = true };
+            fitterRow.Children.Add(fitParamsBtn);
+            fitterRow.Children.Add(fitterCombo);
             _activeFitter = ProfileFitterRegistry.Fitters.Count > 0 ? ProfileFitterRegistry.Fitters[0] : null;
             fitterCombo.SelectionChanged += (_, _) =>
             {
                 _activeFitter = fitterCombo.SelectedItem as IProfileFitter;
-                if (_fitCurveToggle?.IsChecked == true) RunFit();
+                if (_fitCurveToggle?.IsChecked == true)
+                {
+                    RunFit();
+                    // The Style section is titled after the fitter, so it follows the selection.
+                    BuildFitStyleSection();
+                }
             };
-            fitterCombo.IsEnabled = (fitCurveChk.IsChecked == true);
+            fitterRow.IsEnabled = (fitCurveChk.IsChecked == true);
+            // Dragging a range marker refits as it moves.
+            Plot.FitRangeChanged += (_, _) =>
+            {
+                if (fitCurveChk.IsChecked == true) RunFit();
+            };
             fitCurveChk.IsCheckedChanged += (_, _) =>
             {
-                fitterCombo.IsEnabled = (fitCurveChk.IsChecked == true);
+                fitterRow.IsEnabled = (fitCurveChk.IsChecked == true);
+                Plot.ShowFitRangeMarkers = fitCurveChk.IsChecked == true;
                 if (fitCurveChk.IsChecked == true)
                 {
                     RunFit();
@@ -785,7 +857,7 @@ namespace MxPlot.UI.Avalonia.Views
             };
             menuItems.Children.Add(ControlFactory.MakeMenuGroup("Analyze", [
                 fitCurveChk,
-                fitterCombo,
+                fitterRow,
             ],
             icon: MenuIcons.Magnify, initiallyExpanded: false
             ));
@@ -849,8 +921,41 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     Plot.SetSeriesVisible(idx, chk.IsChecked == true);
                 };
+                // The button lives inside the checkbox content: MakeCheckBox shrinks the whole control
+                // with a RenderTransform, which leaves its layout size unscaled, so a sibling element
+                // would sit far from the label and off its baseline. Sizes below are therefore in
+                // pre-transform units (x0.75 on screen).
+                var renameBtn = new Button
+                {
+                    Content = new PathIcon { Data = MenuIcons.Edit, Width = 13, Height = 13 },
+                    Padding = new Thickness(1),
+                    Background = Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Width = 20,
+                    Height = 20,
+                    MinWidth = 0,
+                    MinHeight = 0,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Cursor = new Cursor(StandardCursorType.Hand),
+                };
+                ToolTip.SetTip(renameBtn, "Rename series");
+                renameBtn.Click += async (_, _) => await RenameSeriesAsync(idx);
+                var content = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                content.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+                content.Children.Add(renameBtn);
+                chk.Content = content;
                 _dataVisibilityContainer.Children.Add(chk);
             }
+        }
+
+        private async Task RenameSeriesAsync(int index)
+        {
+            var series = Plot.Series;
+            if ((uint)index >= (uint)series.Count) return;
+            var dlg = new AxisRenameDialog(series[index].Name, title: "Rename Series");
+            await dlg.ShowDialog(this);
+            if (dlg.Result is { } name)
+                Plot.SetSeriesName(index, name);
         }
 
         private void RebuildStyleControls()
@@ -973,30 +1078,360 @@ namespace MxPlot.UI.Avalonia.Views
             return swatch;
         }
 
+        /// <summary>Builds the gear button whose flyout edits <see cref="_fitSettings"/>.</summary>
+        private Button BuildFitSettingsButton()
+        {
+            var panel = new StackPanel { Spacing = 4, Margin = new Thickness(2) };
+            var flyout = new Flyout { Content = panel };
+            // Rebuilt on each opening so the series list is always current.
+            flyout.Opening += (_, _) => RebuildFitSettingsPanel(panel);
+
+            var btn = new Button
+            {
+                Content = new PathIcon { Data = MenuIcons.Gear, Width = 13, Height = 13 },
+                Padding = new Thickness(1),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Width = 20,
+                Height = 20,
+                MinWidth = 0,
+                MinHeight = 0,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Flyout = flyout,
+            };
+            ToolTip.SetTip(btn, "Fit settings");
+            return btn;
+        }
+
+        private void RebuildFitSettingsPanel(StackPanel panel)
+        {
+            panel.Children.Clear();
+            var series = Plot.Series;
+
+            var seriesCombo = new ComboBox
+            {
+                Width = 140,
+                Height = 20,
+                MinHeight = 0,
+                FontSize = 11,
+                Padding = new Thickness(4, 0),
+            };
+            for (int i = 0; i < series.Count; i++)
+                seriesCombo.Items.Add(series[i].Name.Length > 0 ? series[i].Name : $"Series {i + 1}");
+            seriesCombo.SelectedIndex = series.Count == 0 ? -1 : Math.Min(_fitSettings.SeriesIndex, series.Count - 1);
+            seriesCombo.SelectionChanged += (_, _) =>
+            {
+                if (seriesCombo.SelectedIndex < 0) return;
+                _fitSettings.SeriesIndex = seriesCombo.SelectedIndex;
+                if (_fitCurveToggle?.IsChecked == true) RunFit();
+            };
+
+            var autoChk = ControlFactory.MakeCheckBox("Auto", hint: "Use max(300, 2 x data points) samples");
+            autoChk.IsChecked = _fitSettings.AutoCurvePoints;
+            var pointsNud = ControlFactory.MakeNumericUpDown(_fitSettings.CurvePoints, 10m, 100000m, 10m);
+            pointsNud.IsEnabled = !_fitSettings.AutoCurvePoints;
+            autoChk.IsCheckedChanged += (_, _) =>
+            {
+                _fitSettings.AutoCurvePoints = autoChk.IsChecked == true;
+                pointsNud.IsEnabled = !_fitSettings.AutoCurvePoints;
+                if (_fitCurveToggle?.IsChecked == true) RunFit();
+            };
+            pointsNud.ValueChanged += (_, _) =>
+            {
+                if (pointsNud.Value is not { } v) return;
+                _fitSettings.CurvePoints = (int)v;
+                if (_fitCurveToggle?.IsChecked == true && !_fitSettings.AutoCurvePoints) RunFit();
+            };
+
+            panel.Children.Add(new TextBlock { Text = "Target series", FontSize = 11, Opacity = 0.75 });
+            panel.Children.Add(seriesCombo);
+            panel.Children.Add(new TextBlock { Text = "Curve points", FontSize = 11, Opacity = 0.75, Margin = new Thickness(0, 4, 0, 0) });
+            var pointsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            pointsRow.Children.Add(pointsNud);
+            pointsRow.Children.Add(autoChk);
+            panel.Children.Add(pointsRow);
+
+            // ── Fit range (X). Empty = from the first / up to the last point. The same range is
+            //    set by dragging the diamond markers in the plot.
+            TextBox MakeRangeBox(double? value, string watermark, string tip)
+            {
+                var box = new TextBox
+                {
+                    Width = 72, Height = 20, MinHeight = 0, FontSize = 11,
+                    Padding = new Thickness(4, 0),
+                    VerticalContentAlignment = VerticalAlignment.Center,
+                    Watermark = watermark,
+                    Text = value?.ToString("G6", CultureInfo.InvariantCulture) ?? "",
+                };
+                ToolTip.SetTip(box, tip);
+                return box;
+            }
+            static bool TryParseRangeEnd(string? text, out double? value)
+            {
+                value = null;
+                if (string.IsNullOrWhiteSpace(text)) return true;
+                if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double d)) return false;
+                value = d;
+                return true;
+            }
+            void RefitIfOn()
+            {
+                if (_fitCurveToggle?.IsChecked == true) RunFit();
+            }
+
+            var startBox = MakeRangeBox(Plot.FitRangeStart, "first", "Start of the fitted X range. Empty: from the first point.");
+            var endBox = MakeRangeBox(Plot.FitRangeEnd, "last", "End of the fitted X range. Empty: up to the last point.");
+            void ApplyStart()
+            {
+                if (!TryParseRangeEnd(startBox.Text, out var v)) return;
+                Plot.FitRangeStart = v;
+                RefitIfOn();
+            }
+            void ApplyEnd()
+            {
+                if (!TryParseRangeEnd(endBox.Text, out var v)) return;
+                Plot.FitRangeEnd = v;
+                RefitIfOn();
+            }
+            startBox.LostFocus += (_, _) => ApplyStart();
+            startBox.KeyDown += (_, e) => { if (e.Key == Key.Return) ApplyStart(); };
+            endBox.LostFocus += (_, _) => ApplyEnd();
+            endBox.KeyDown += (_, e) => { if (e.Key == Key.Return) ApplyEnd(); };
+
+            var resetBtn = new Button
+            {
+                Content = "Whole data", FontSize = 11, Height = 20, MinHeight = 0,
+                Padding = new Thickness(8, 0), VerticalContentAlignment = VerticalAlignment.Center,
+            };
+            resetBtn.Click += (_, _) =>
+            {
+                Plot.FitRangeStart = null;
+                Plot.FitRangeEnd = null;
+                startBox.Text = "";
+                endBox.Text = "";
+                RefitIfOn();
+            };
+
+            panel.Children.Add(new TextBlock { Text = "Fit range (X)", FontSize = 11, Opacity = 0.75, Margin = new Thickness(0, 4, 0, 0) });
+            var rangeRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+            rangeRow.Children.Add(startBox);
+            rangeRow.Children.Add(new TextBlock { Text = "–", FontSize = 11, VerticalAlignment = VerticalAlignment.Center });
+            rangeRow.Children.Add(endBox);
+            panel.Children.Add(rangeRow);
+            panel.Children.Add(resetBtn);
+        }
+
+        /// <summary>
+        /// Builds the wrench button next to the fitter combo box. Its flyout lists the parameters of the
+        /// selected fitter, each of which can be held at a fixed value.
+        /// </summary>
+        private Button BuildFitParametersButton()
+        {
+            var panel = new StackPanel { Spacing = 4, Margin = new Thickness(2) };
+            var flyout = new Flyout { Content = panel };
+            // Rebuilt on each opening: the parameters belong to whichever fitter is selected then.
+            flyout.Opening += (_, _) => RebuildFitParametersPanel(panel);
+            flyout.Closed += (_, _) => _refreshFitParameterValues = null;
+
+            var btn = new Button
+            {
+                Content = new PathIcon { Data = MenuIcons.Wrench, Width = 13, Height = 13 },
+                Padding = new Thickness(1),
+                Background = Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Width = 20,
+                Height = 20,
+                MinWidth = 0,
+                MinHeight = 0,
+                Margin = new Thickness(2, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Flyout = flyout,
+            };
+            ToolTip.SetTip(btn, "Fit parameters");
+            return btn;
+        }
+
+        /// <summary>
+        /// One row per parameter of the selected fitter: a check box that holds the parameter at the value in
+        /// the box beside it. A free parameter's box shows the value of the latest fit, so ticking it fixes
+        /// the parameter where it is now. At least one parameter stays free.
+        /// </summary>
+        private void RebuildFitParametersPanel(StackPanel panel)
+        {
+            panel.Children.Clear();
+            _refreshFitParameterValues = null;
+            var fitter = _activeFitter;
+            if (fitter == null) return;
+
+            var fixedValues = _fitSettings.FixedFor(fitter);
+            var names = fitter.ParameterNames;
+            int count = fitter.ParameterCount;
+            var checks = new CheckBox[count];
+            var boxes = new TextBox[count];
+            bool updating = false;
+
+            static string Format(double v) => v.ToString("G6", CultureInfo.InvariantCulture);
+            void RefitIfOn()
+            {
+                if (_fitCurveToggle?.IsChecked == true) RunFit();
+            }
+            double? FittedValue(int i) =>
+                _lastFit is { } f && ReferenceEquals(f.Fitter, fitter) && i < f.Parameters.Length ? f.Parameters[i] : null;
+
+            // A fixed parameter shows its fixed value; a free one the value of the latest fit.
+            void ShowValues()
+            {
+                updating = true;
+                for (int i = 0; i < count; i++)
+                {
+                    bool isFixed = fixedValues[i] != null;
+                    checks[i].IsChecked = isFixed;
+                    boxes[i].IsEnabled = isFixed;
+                    boxes[i].Text = fixedValues[i] is { } v ? Format(v)
+                        : FittedValue(i) is { } fv ? Format(fv) : "";
+                }
+                // The last free parameter cannot be fixed.
+                int fixedCount = fixedValues.Count(v => v != null);
+                for (int i = 0; i < count; i++)
+                    checks[i].IsEnabled = fixedValues[i] != null || fixedCount < count - 1;
+                updating = false;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int index = i;
+                var check = ControlFactory.MakeCheckBox(names[i], hint: $"Hold {names[i]} at the value on the right");
+                check.Width = 64;
+                check.VerticalAlignment = VerticalAlignment.Center;
+                var box = new TextBox
+                {
+                    Width = 84, Height = 20, MinHeight = 0, FontSize = 11,
+                    Padding = new Thickness(4, 0),
+                    VerticalContentAlignment = VerticalAlignment.Center,
+                };
+                checks[i] = check;
+                boxes[i] = box;
+
+                check.IsCheckedChanged += (_, _) =>
+                {
+                    if (updating) return;
+                    if (check.IsChecked == true)
+                    {
+                        // Fix at the value shown now: the latest fitted value, or one that was typed.
+                        fixedValues[index] = double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v)
+                            ? v : 0.0;
+                    }
+                    else
+                    {
+                        fixedValues[index] = null;
+                    }
+                    ShowValues();
+                    RefitIfOn();
+                };
+
+                void Commit()
+                {
+                    if (updating || fixedValues[index] == null) return;
+                    if (double.TryParse(box.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
+                    {
+                        fixedValues[index] = v;
+                        RefitIfOn();
+                    }
+                    else
+                    {
+                        box.Text = Format(fixedValues[index]!.Value);   // not a number: keep the old value
+                    }
+                }
+                box.LostFocus += (_, _) => Commit();
+                box.KeyDown += (_, e) => { if (e.Key == Key.Return) Commit(); };
+
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+                row.Children.Add(check);
+                row.Children.Add(box);
+                panel.Children.Add(row);
+            }
+
+            var freeAllBtn = new Button
+            {
+                Content = "All free", FontSize = 11, Height = 20, MinHeight = 0,
+                Padding = new Thickness(8, 0), VerticalContentAlignment = VerticalAlignment.Center,
+            };
+            freeAllBtn.Click += (_, _) =>
+            {
+                for (int i = 0; i < count; i++) fixedValues[i] = null;
+                ShowValues();
+                RefitIfOn();
+            };
+
+            panel.Children.Insert(0, new TextBlock
+            {
+                Text = $"{fitter.Name} parameters", FontSize = 11, Opacity = 0.75,
+            });
+            panel.Children.Add(freeAllBtn);
+
+            ShowValues();
+            _refreshFitParameterValues = ShowValues;
+        }
+
         private void RunFit()
         {
             if (_activeFitter == null) return;
 
             var series = Plot.Series;
-            if (series.Count == 0 || series[0].Points.Count < _activeFitter.MinimumPoints)
+            int seriesIndex = Math.Min(_fitSettings.SeriesIndex, series.Count - 1);
+            var fixedValues = _fitSettings.FixedFor(_activeFitter);
+            int minPoints = LevenbergMarquardtSolver.MinimumPoints(_activeFitter, fixedValues);
+            // The range markers sit on the fitted series and leave it as many points as the fit needs.
+            Plot.FitSeriesIndex = Math.Max(seriesIndex, 0);
+            Plot.FitMinimumPoints = minPoints;
+            if (seriesIndex < 0)
             {
+                _lastFit = null;
                 Plot.SetFitOverlay(null);
                 return;
             }
 
-            var pts = series[0].Points;
-            var result = LevenbergMarquardtSolver.Fit(_activeFitter, pts);
+            // Only the points inside the fit range are fitted; an end left unset follows the data.
+            IReadOnlyList<(double X, double Y)> pts = series[seriesIndex].Points;
+            bool ranged = Plot.FitRangeStart != null || Plot.FitRangeEnd != null;
+            if (ranged)
+            {
+                double lo = Plot.FitRangeStart ?? double.NegativeInfinity;
+                double hi = Plot.FitRangeEnd ?? double.PositiveInfinity;
+                pts = pts.Where(p => p.X >= lo && p.X <= hi).ToList();
+            }
+
+            if (pts.Count < minPoints)
+            {
+                _lastFit = null;
+                Plot.SetFitOverlay(null);
+                if (ranged)
+                {
+                    InfoText = $"The fit range holds {pts.Count} point(s); {_activeFitter.Name} needs at least {minPoints}.";
+                    if (!_showInfo) ToggleInfoPanel();
+                }
+                return;
+            }
+
+            var result = LevenbergMarquardtSolver.Fit(_activeFitter, pts, fixedValues);
 
             if (result.Error != null)
             {
+                _lastFit = null;
                 Plot.SetFitOverlay(null);
                 InfoText = $"{_activeFitter.Name} fit failed:\n{result.Error}";
                 if (!_showInfo) ToggleInfoPanel();
                 return;
             }
 
+            _lastFit = result;
+            _refreshFitParameterValues?.Invoke();
+
             double xMin = pts.Min(p => p.X), xMax = pts.Max(p => p.X);
-            Plot.SetFitOverlay(result.GenerateCurve(xMin, xMax, Math.Max(300, pts.Count * 2)), $"{_activeFitter.Name} fit");
+            int curveN = _fitSettings.AutoCurvePoints ? Math.Max(300, pts.Count * 2) : _fitSettings.CurvePoints;
+            Plot.SetFitOverlay(result.GenerateCurve(xMin, xMax, curveN), $"{_activeFitter.Name} fit");
 
             //string unit = Plot.XLabel ?? "";
             string unit = ""; //Currently, we don't have a way to get the unit from the plot, so we'll leave it empty for now.
@@ -1017,13 +1452,25 @@ namespace MxPlot.UI.Avalonia.Views
                 [
                     new FilePickerFileType("PNG Image")  { Patterns = ["*.png"] },
                     new FilePickerFileType("SVG Image")  { Patterns = ["*.svg"] },
+                    new FilePickerFileType("CSV Data")   { Patterns = ["*.csv"] },
                 ],
             });
             if (file == null) return;
 
             bool isSvg = file.Name.EndsWith(".svg", StringComparison.OrdinalIgnoreCase);
+            bool isCsv = file.Name.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
             try
             {
+                if (isCsv)
+                {
+                    string? csv = BuildRowDataCsv("R");
+                    if (csv == null) return;
+                    await using var csvStream = await file.OpenWriteAsync();
+                    await using var writer = new StreamWriter(csvStream, new UTF8Encoding(false));
+                    await writer.WriteAsync(csv);
+                    return;
+                }
+
                 var logical = Plot.Bounds.Size;
                 if (logical.Width <= 0 || logical.Height <= 0) return;
 
@@ -1036,7 +1483,9 @@ namespace MxPlot.UI.Avalonia.Views
                 {
                     const double ExportScale = 2.0;
                     bool prevCrosshair = Plot.ShowCrosshair;
+                    bool prevMarkers = Plot.ShowFitRangeMarkers;
                     Plot.ShowCrosshair = false;
+                    Plot.ShowFitRangeMarkers = false;
                     try
                     {
                         var pixelSize = new PixelSize(
@@ -1054,7 +1503,7 @@ namespace MxPlot.UI.Avalonia.Views
                         }
                         bmp.Save(stream);
                     }
-                    finally { Plot.ShowCrosshair = prevCrosshair; }
+                    finally { Plot.ShowCrosshair = prevCrosshair; Plot.ShowFitRangeMarkers = prevMarkers; }
                 }
             }
             catch (Exception ex) { Debug.WriteLine(ex); }
@@ -1202,6 +1651,20 @@ namespace MxPlot.UI.Avalonia.Views
             var axesBtn = ControlFactory.MakeChildMenuItem("Axes\u2026", () => { }, "Edit title, axis labels and ranges.");
             FlyoutBase.SetAttachedFlyout(axesBtn, flyout);
             axesBtn.Click += (_, _) => FlyoutBase.ShowAttachedFlyout(axesBtn);
+
+            // The part of the plot that was double-clicked decides which field takes the focus.
+            _showAxesFlyout = region =>
+            {
+                FlyoutBase.ShowAttachedFlyout(axesBtn);
+                TextBox box = region switch
+                {
+                    PlotAxisRegion.XAxis => xLabelBox,
+                    PlotAxisRegion.YAxis => yLabelBox,
+                    _ => titleBox,
+                };
+                // The flyout fills its boxes while opening; focus them afterwards.
+                Dispatcher.UIThread.Post(() => { box.Focus(); box.SelectAll(); }, DispatcherPriority.Background);
+            };
             return axesBtn;
         }
 
@@ -1415,7 +1878,9 @@ namespace MxPlot.UI.Avalonia.Views
                 (int)Math.Ceiling(logicalSize.Height * scaling));
 
             bool prevCrosshair = Plot.ShowCrosshair;
+            bool prevMarkers = Plot.ShowFitRangeMarkers;
             Plot.ShowCrosshair = false;
+            Plot.ShowFitRangeMarkers = false;
             var bmp = new RenderTargetBitmap(pixelSize, new Vector(96, 96));
             try
             {
@@ -1433,30 +1898,44 @@ namespace MxPlot.UI.Avalonia.Views
                 ShowToast("Copied", "Image copied to clipboard.");
             }
             catch (Exception ex) { bmp.Dispose(); Debug.WriteLine(ex); }
-            finally { Plot.ShowCrosshair = prevCrosshair; }
+            finally { Plot.ShowCrosshair = prevCrosshair; Plot.ShowFitRangeMarkers = prevMarkers; }
         }
 
-        private async Task CopyRowDataToClipboardAsync()
+        /// <summary>
+        /// Quotes a CSV field when it contains a comma, a double quote or a line break;
+        /// embedded double quotes are doubled.
+        /// </summary>
+        private static string CsvField(string value)
+            => value.IndexOfAny([',', '"', '\r', '\n']) >= 0
+                ? "\"" + value.Replace("\"", "\"\"") + "\""
+                : value;
+
+        /// <summary>
+        /// Builds the row-oriented CSV of all series (and the fit overlay): one X,Y column pair per
+        /// series. Returns null when there is nothing to export.
+        /// </summary>
+        /// <param name="numberFormat">Format string for the numeric cells ("R" keeps every digit).</param>
+        private string? BuildRowDataCsv(string numberFormat)
         {
             var series    = Plot.Series;
             var fitPts    = Plot.FitOverlayPoints;
             string fitLabel = Plot.FitOverlayName;
             bool includeFit = fitPts is { Count: > 0 } && fitLabel.Length > 0;
-            if (series.Count == 0 && !includeFit) return;
+            if (series.Count == 0 && !includeFit) return null;
 
-            string xl = Plot.XLabel;
+            string xl = CsvField(Plot.XLabel);
             var sb = new StringBuilder();
 
             // Header: xLabel,seriesName, ...  [, xLabel, fitLabel]
             for (int i = 0; i < series.Count; i++)
             {
                 if (i > 0) sb.Append(',');
-                sb.Append(xl).Append(',').Append(series[i].Name);
+                sb.Append(xl).Append(',').Append(CsvField(series[i].Name));
             }
             if (includeFit)
             {
                 if (series.Count > 0) sb.Append(',');
-                sb.Append(xl).Append(',').Append(fitLabel);
+                sb.Append(xl).Append(',').Append(CsvField(fitLabel));
             }
             sb.AppendLine();
 
@@ -1471,9 +1950,9 @@ namespace MxPlot.UI.Avalonia.Views
                     var pts = series[i].Points;
                     if (row < pts.Count)
                     {
-                        sb.Append(pts[row].X.ToString("G6", CultureInfo.InvariantCulture));
+                        sb.Append(pts[row].X.ToString(numberFormat, CultureInfo.InvariantCulture));
                         sb.Append(',');
-                        sb.Append(pts[row].Y.ToString("G6", CultureInfo.InvariantCulture));
+                        sb.Append(pts[row].Y.ToString(numberFormat, CultureInfo.InvariantCulture));
                     }
                     else sb.Append(',');
                 }
@@ -1482,20 +1961,27 @@ namespace MxPlot.UI.Avalonia.Views
                     if (series.Count > 0) sb.Append(',');
                     if (row < fitPts!.Count)
                     {
-                        sb.Append(fitPts[row].X.ToString("G6", CultureInfo.InvariantCulture));
+                        sb.Append(fitPts[row].X.ToString(numberFormat, CultureInfo.InvariantCulture));
                         sb.Append(',');
-                        sb.Append(fitPts[row].Y.ToString("G6", CultureInfo.InvariantCulture));
+                        sb.Append(fitPts[row].Y.ToString(numberFormat, CultureInfo.InvariantCulture));
                     }
                     else sb.Append(',');
                 }
                 sb.AppendLine();
             }
+            return sb.ToString();
+        }
+
+        private async Task CopyRowDataToClipboardAsync()
+        {
+            string? csv = BuildRowDataCsv("G6");
+            if (csv == null) return;
 
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
             if (clipboard == null) return;
             try
             {
-                await clipboard.SetTextAsync(sb.ToString());
+                await clipboard.SetTextAsync(csv);
                 ShowToast("Copied", "Row data copied to clipboard.");
             }
             catch { }

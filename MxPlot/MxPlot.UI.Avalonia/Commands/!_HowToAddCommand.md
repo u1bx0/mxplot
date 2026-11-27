@@ -1,4 +1,4 @@
-# Adding a command to the Processing / Conversion menu
+﻿# Adding a command to the Processing / Conversion menu
 
 A *command* is a one-shot menu item: ask the user (a dialog, or nothing), do something with the data,
 put the result somewhere. This folder holds them all. `Xxx` below stands for your command's name.
@@ -131,6 +131,7 @@ The optional members of `CommandPlan` (defaults in parentheses):
 | `Prepare` | Work before the operation, such as a scan of the whole stack; its result reaches `CreateOperation` as `run.State`. May throw `OperationCanceledException` to end the run silently. |
 | `PrepareResult` | Finishes the result before it is shown; also runs for every refresh of a Sync window. The default copies the source's properties (not with `WholeData`). |
 | `OnResultReady` | For what only the first result needs (not run again by a Sync refresh). |
+| `Edit`, `EditLabel` | Lets the user change the parameters of a Sync window afterwards: `Edit` shows the dialog again from this plan's parameters and returns the new plan. The Sync window then offers `EditLabel` in its menu (Data > View) and is recomputed with the new plan. The result must keep its shape. See `CalculatorCommand`. |
 
 Real commands to copy from: `SpatialFilterCommand` (the plain case), `FftCommand` (`PrepareResult`),
 `NormalizeCommand` (`Prepare`), `TransposeCommand` (`OnResultReady`), `ReverseStackCommand`
@@ -139,7 +140,7 @@ Real commands to copy from: `SpatialFilterCommand` (the plain case), `FftCommand
 **3. Register it** in `CommandCatalog.cs`. The menu builds the item from this entry.
 
 ```csharp
-new("Filters", "Xxx…", "Tooltip text", MenuIcons.AutoFix, new XxxCommand()),
+new("Filters", "Xxx…", "Tooltip text", MenuIcons.Wand, new XxxCommand()),
 // an optional last argument decides when the item is offered:
 //     host => host.Data?.FrameCount > 1
 ```

@@ -3,6 +3,7 @@
 // traced. Off by default; uncomment alongside VolumeAccessor.cs's RESTACK_DIAG to re-enable.
 //#define RESTACK_DIAG
 using Avalonia.Controls;
+using Avalonia.Threading;
 using MxPlot.Core;
 using MxPlot.Core.IO;
 using MxPlot.Core.IO.CacheStrategies;
@@ -10,6 +11,7 @@ using MxPlot.Core.IO.Formats;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Controls;
 using MxPlot.UI.Avalonia.Rendering;
+using MxPlot.UI.Avalonia.Metadata;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -24,6 +26,10 @@ namespace MxPlot.UI.Avalonia.Views
         // ── Orthogonal side panel ──────────────────────────────────────────────
 
         //private bool _suppressOrthoResize;
+
+        // True while SetMatrixData brings back an orthogonal view that was on screen for the data being
+        // replaced. The window already has the room for the side views, so activation must not add it again.
+        private bool _orthoViewRoomKept;
 
         /// <summary>
         /// Wires the <see cref="AxisTracker.FreezeButton"/> toggle to activate/deactivate
@@ -49,10 +55,17 @@ namespace MxPlot.UI.Avalonia.Views
                         _orthoController.Activate(_currentData, axis.Name);
                         // Guard: clamp any active action's ROIs to the new axis dimensions.
                         _activeTool?.NotifyContextChanged(CreateToolContext());
-                        if (!wasShowing && WindowState != WindowState.Maximized)
+                        if (!wasShowing && !_orthoViewRoomKept && WindowState != WindowState.Maximized)
                         {
+                            bool expand = _orthoPanel.IsSideSizeInitial;
                             Width += _orthoPanel.SavedSideDeltaWidth;
                             Height += _orthoPanel.SavedSideDeltaHeight;
+                            // First activation: grow to full bitmap size where the screen allows.
+                            // Posted so the new layout is measured before the sizes are read.
+                            if (expand)
+                                Dispatcher.UIThread.Post(
+                                    () => _orthoPanel.RequestAutoResizeAll(),
+                                    DispatcherPriority.Background);
                         }
                     }
                 }
@@ -692,7 +705,7 @@ namespace MxPlot.UI.Avalonia.Views
                 detail += $"; ColorCoded {axisName} {ccp.Value.Start}-{ccp.Value.End}, LUT {lutName}, " +
                     $"Range {colorCodedValueMin:G6}-{colorCodedValueMax:G6}, Invert {(ccp.Value.Invert ? "Yes" : "No")}";
             }
-            AppendHistory(result, $"{modeLabel} {alongLabel}-Projection", Title, detail);
+            result.AppendHistory($"{modeLabel} {alongLabel}-Projection", Title, detail);
 
             if (p.ReplaceData)
             {
@@ -1113,7 +1126,7 @@ namespace MxPlot.UI.Avalonia.Views
             if (otherAxisParts.Count > 0)
                 detail += " @ " + string.Join(", ", otherAxisParts);
             detail += $"; {result.FrameCount} frame(s)";
-            AppendHistory(result, $"Restack along {stackLetter}", Title, detail);
+            result.AppendHistory($"Restack along {stackLetter}", Title, detail);
 #if RESTACK_DIAG
             Console.WriteLine($"[Restack:UI] Rename + AppendHistory done, calling MatrixPlotter.Create @ {diagSw.ElapsedMilliseconds} ms");
 #endif

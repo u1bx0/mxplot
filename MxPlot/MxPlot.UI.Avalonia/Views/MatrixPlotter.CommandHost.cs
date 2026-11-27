@@ -70,8 +70,31 @@ namespace MxPlot.UI.Avalonia.Views
             => CreateLinked(result, _view.Lut, title).Show();
 
         void ICommandHost.ShowSyncedResult(IMatrixData result, string title, string? compositeAxisName, bool copyDisplayState,
-            Func<SyncInput, CancellationToken, SyncOutput> transform)
-            => OpenSyncedWindow(result, title, compositeAxisName, copyDisplayState, transform);
+            Func<SyncInput, CancellationToken, SyncOutput> transform, ILinkedViewProperties? properties)
+            => OpenSyncedWindow(result, title, compositeAxisName, copyDisplayState,
+                (input, ct) => transform(input, ct), properties);
+
+        /// <summary>
+        /// Opens a window that follows this one through a plugin-supplied transform. See
+        /// <see cref="Plugins.IMatrixPlotterContext.ShowSyncedMatrixPlotter"/>. Must be called on the UI thread.
+        /// </summary>
+        /// <returns>A handle whose disposal closes the follower.</returns>
+        internal IDisposable OpenPluginSyncedWindow(IMatrixData initial, string title,
+            Func<Plugins.PlotSyncInput, CancellationToken, IMatrixData?> transform)
+        {
+            var follower = OpenSyncedWindow(initial, title, compositeAxisName: null, copyDisplayState: false,
+                (input, ct) =>
+                {
+                    var data = transform(new Plugins.PlotSyncInput(input.Operand, input.Source), ct);
+                    return data == null ? null : new SyncOutput(data, null);
+                });
+            return new FollowerHandle(follower);
+        }
+
+        private sealed class FollowerHandle(MatrixPlotter follower) : IDisposable
+        {
+            public void Dispose() => follower.Close();
+        }
 
         /// <summary>
         /// Opens a window showing <paramref name="result"/> that follows this one: whenever this window's active
@@ -79,7 +102,8 @@ namespace MxPlot.UI.Avalonia.Views
         /// Returns the new window, for a caller that sets it up further.
         /// </summary>
         private MatrixPlotter OpenSyncedWindow(IMatrixData result, string title, string? compositeAxisName,
-            bool copyDisplayState, Func<SyncInput, CancellationToken, SyncOutput> transform)
+            bool copyDisplayState, Func<SyncInput, CancellationToken, SyncOutput?> transform,
+            ILinkedViewProperties? properties = null)
         {
             // CreateLinked marks the child as secondary, which suppresses the unsaved-changes
             // confirmation on close: a window that follows its source is fully derived and recomputed
@@ -106,9 +130,9 @@ namespace MxPlot.UI.Avalonia.Views
                 return Task.Run<LinkedViewUpdate?>(() =>
                 {
                     var output = transform(new SyncInput(sourceData, operand, cube?.ChannelAxisName, valueMode), ct);
-                    return new LinkedViewUpdate(output.Data, output.CompositeAxisName);
+                    return output is { } o ? new LinkedViewUpdate(o.Data, o.CompositeAxisName) : null;
                 }, ct);
-            });
+            }, properties: properties);
             return follower;
         }
 

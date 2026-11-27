@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Primitives;
@@ -277,6 +277,7 @@ namespace MxPlot.App.Views
                             s.IsSelected = true;
                     }
                     ViewModel.RefreshSelectionState();
+                    UpdateLiveInputHighlights();
 
                     // Single-selection: bring the window to front only if it is currently visible.
                     // Skip activation while any item is being renamed — the managed window
@@ -316,6 +317,11 @@ namespace MxPlot.App.Views
                 if (_isSyncActive) return;
                 if (!e.GetCurrentPoint(_windowList).Properties.IsLeftButtonPressed) return;
                 if (ViewModel.ManagedWindows.Any(m => m.IsRenaming)) return;
+
+                // A click with Ctrl, Cmd or Shift edits the selection. Activating here would queue a
+                // deferred Activated for a window the ListBox may be about to deselect, and
+                // OnManagedWindowFocused would then select that window again.
+                if ((e.KeyModifiers & (KeyModifiers.Control | KeyModifiers.Meta | KeyModifiers.Shift)) != 0) return;
 
                 var listBoxItem = (e.Source as Control)?.FindAncestorOfType<ListBoxItem>(includeSelf: true);
                 if (listBoxItem?.DataContext is WindowListItemViewModel vm

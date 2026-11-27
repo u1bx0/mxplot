@@ -112,6 +112,18 @@ namespace MxPlot.UI.Avalonia.Overlays
             DrawHandleAtScreen(fillColor, borderColor, pt, screenSize);
         }
 
+        /// <summary>
+        /// Draws a fixed-pixel-size round handle centred at the given world coordinate.
+        /// The circle is always <paramref name="screenSize"/> pixels across regardless of zoom.
+        /// </summary>
+        public void DrawCircleHandle(Color fillColor, Color borderColor, double wx, double wy,
+            double screenSize = 9.0)
+        {
+            var pt = _vp.WorldToScreen(new Point(wx, wy));
+            double r = screenSize / 2.0;
+            _ctx.DrawEllipse(MakeBrush(fillColor), new Pen(new SolidColorBrush(borderColor), 1.5), pt, r, r);
+        }
+
         /// <summary>Draws a line at screen-space coordinates (zoom-independent).</summary>
         public void DrawLineAtScreen(Color color, double width, Point p1, Point p2) =>
             _ctx.DrawLine(MakePen(color, width), p1, p2);

@@ -4,6 +4,7 @@ using MxPlot.UI.Avalonia.Views;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 
 namespace MxPlot.App.Plugins
@@ -43,21 +44,37 @@ namespace MxPlot.App.Plugins
             if (!Directory.Exists(pluginsDir)) return;
             foreach (var dll in Directory.GetFiles(pluginsDir, "*.dll"))
             {
-                try
+                try { LoadFromAssembly(Assembly.LoadFrom(dll)); }
+                catch { /* skip unloadable / incompatible DLLs */ }
+            }
+        }
+
+        /// <summary>
+        /// Instantiates every exported class of <paramref name="assembly"/> that implements
+        /// <see cref="IMxPlotAppPlugin"/>, and registers it. A type that is already registered is
+        /// not registered again, so the same assembly can be offered more than once. An
+        /// incompatible assembly is silently skipped.
+        /// </summary>
+        /// <returns>The number of plugins registered by this call.</returns>
+        public static int LoadFromAssembly(Assembly assembly)
+        {
+            int count = 0;
+            try
+            {
+                foreach (var type in assembly.GetExportedTypes())
                 {
-                    var asm = Assembly.LoadFrom(dll);
-                    foreach (var type in asm.GetExportedTypes())
+                    if (type.IsClass && !type.IsAbstract
+                        && typeof(IMxPlotAppPlugin).IsAssignableFrom(type)
+                        && !_plugins.Any(p => p.GetType() == type)
+                        && Activator.CreateInstance(type) is IMxPlotAppPlugin plugin)
                     {
-                        if (type.IsClass && !type.IsAbstract
-                            && typeof(IMxPlotAppPlugin).IsAssignableFrom(type)
-                            && Activator.CreateInstance(type) is IMxPlotAppPlugin plugin)
-                        {
-                            AddPlugin(plugin);
-                        }
+                        AddPlugin(plugin);
+                        count++;
                     }
                 }
-                catch { }
             }
+            catch { /* skip an unloadable / incompatible assembly */ }
+            return count;
         }
 
         // ── Default IPlotWindowService ────────────────────────────────────────

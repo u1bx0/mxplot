@@ -4,7 +4,8 @@ using MxPlot.Core;
 namespace MxPlot.Extensions.Tiff;
 
 /// <summary>
-/// ImageJ互換のメタデータ（Channel, Z, Timeのみ対応）
+/// Metadata of an ImageJ-compatible TIFF: the contents of the ImageDescription tag
+/// (channels, slices, frames, units, origins and spacing).
 /// </summary>
 public class ImageJMetadata
 {
@@ -27,32 +28,37 @@ public class ImageJMetadata
     
     public double Spacing { get; set; } = 1.0;
     public double Interval { get; set; } = 1.0;
-    
+
     /// <summary>
-    /// MatrixDataがImageJ Hyperstack互換か判定（Channel, Z, Time/Timelapse のみ）
+    /// ImageDescription keys recording the names of the axes stored as slices and frames, when
+    /// they are not the standard Z / Time. ImageJ ignores them.
+    /// </summary>
+    internal const string ZAxisNameKey = "mxplot.axis.z";
+    internal const string TAxisNameKey = "mxplot.axis.t";
+
+    /// <summary>Recorded name of the axis stored as slices; null when it is the standard Z.</summary>
+    internal string? ZAxisName { get; set; }
+
+    /// <summary>Recorded name of the axis stored as frames; null when it is the standard Time.</summary>
+    internal string? TAxisName { get; set; }
+
+    /// <summary>
+    /// Returns true when the axes of <paramref name="data"/> can be described as an ImageJ
+    /// hyperstack (channels, slices, frames). Axes named Channel, Z and Time/Timelapse map to their
+    /// own dimension; any other axis is stored as slices, or as frames when slices is taken.
+    /// Data that does not fit is saved as a plain stack, without channels/slices/frames.
     /// </summary>
     public static bool IsCompatible(IMatrixData data)
-    {
-        var series = data.Dimensions;
-        if (series.AxisCount == 0)
-            return true;
-        
-        foreach (var axis in series.Axes)
-        {
-            string name = axis.Name;
-            if (name != "Channel" && name != "Z" && 
-                name != "Time" && name != "Timelapse")
-            {
-                return false; // 非対応軸
-            }
-        }
-        return true;
-    }
-    
+        => ImageJAxisLayout.TryCreate(data) != null;
+
     /// <summary>
-    /// MatrixDataからImageJMetadataを生成
+    /// Creates the metadata of <paramref name="data"/>. The channels/slices/frames counts are set
+    /// only when the axes fit an ImageJ hyperstack (see <see cref="IsCompatible"/>).
     /// </summary>
     public static ImageJMetadata FromMatrixData(IMatrixData data)
+        => FromMatrixData(data, ImageJAxisLayout.TryCreate(data));
+
+    internal static ImageJMetadata FromMatrixData(IMatrixData data, ImageJAxisLayout? layout)
     {
         var metadata = new ImageJMetadata
         {
@@ -60,30 +66,30 @@ public class ImageJMetadata
             Unit = data.XUnit,
             YUnit = data.YUnit
         };
-        
+
         var series = data.Dimensions;
-        
-        if (series.Contains("Channel"))
-            metadata.Channels = series["Channel"]!.Count;
-        
-        if (series.Contains("Z"))
+
+        if (layout?.ChannelAxis is { } channelName)
+            metadata.Channels = series[channelName]!.Count;
+
+        if (layout?.ZAxis is { } zName)
         {
-            var zAxis = series["Z"];
-            metadata.Slices = zAxis!.Count;
+            var zAxis = series[zName]!;
+            metadata.Slices = zAxis.Count;
             metadata.Spacing = zAxis.Step;
             metadata.ZUnit = zAxis.Unit;
             metadata.ZOrigin = -zAxis.Min / zAxis.Step;
+            metadata.ZAxisName = layout.ZNameToRecord;
         }
-        
-        string? timeKey = series.Contains("Time") ? "Time" : 
-                         (series.Contains("Timelapse") ? "Timelapse" : null);
-        if (timeKey != null)
+
+        if (layout?.TAxis is { } tName)
         {
-            var tAxis = series[timeKey];
-            metadata.Frames = tAxis!.Count;
+            var tAxis = series[tName]!;
+            metadata.Frames = tAxis.Count;
             metadata.Interval = tAxis.Step;
+            metadata.TAxisName = layout.TNameToRecord;
         }
-        
+
         metadata.XOrigin = -data.XMin * (data.XCount - 1) / (data.XMax - data.XMin);
         metadata.YOrigin = -data.YMin * (data.YCount - 1) / (data.YMax - data.YMin);
         
@@ -127,7 +133,12 @@ public class ImageJMetadata
         
         if (Frames > 1)
             sb.AppendLine($"interval={Interval}");
-        
+
+        if (Slices > 1 && ZAxisName != null)
+            sb.AppendLine($"{ZAxisNameKey}={EscapeJavaUnicode(ZAxisName)}");
+        if (Frames > 1 && TAxisName != null)
+            sb.AppendLine($"{TAxisNameKey}={EscapeJavaUnicode(TAxisName)}");
+
         sb.AppendLine("mode=color");
         sb.AppendLine("loop=false");
         
@@ -170,11 +181,31 @@ public class ImageJMetadata
                     case "zorigin": metadata.ZOrigin = double.Parse(value); break;
                     case "spacing": metadata.Spacing = double.Parse(value); break;
                     case "interval": metadata.Interval = double.Parse(value); break;
+                    case ZAxisNameKey: metadata.ZAxisName = UnescapeJavaUnicode(value); break;
+                    case TAxisNameKey: metadata.TAxisName = UnescapeJavaUnicode(value); break;
                 }
             }
         }
         
         return metadata;
+    }
+
+    // The ImageDescription tag is ASCII-only, so non-ASCII characters are written as \uXXXX
+    // (the inverse of UnescapeJavaUnicode).
+    private static string EscapeJavaUnicode(string value)
+    {
+        if (value.All(c => c < 0x7F))
+            return value;
+
+        var sb = new StringBuilder(value.Length + 8);
+        foreach (char c in value)
+        {
+            if (c < 0x7F)
+                sb.Append(c);
+            else
+                sb.Append("\\u").Append(((int)c).ToString("x4"));
+        }
+        return sb.ToString();
     }
 
     /// <summary>

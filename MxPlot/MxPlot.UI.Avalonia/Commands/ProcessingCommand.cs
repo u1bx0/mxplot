@@ -1,6 +1,8 @@
-﻿using MxPlot.Core;
+﻿using Avalonia.Controls;
+using MxPlot.Core;
 using MxPlot.Core.Processing;
 using MxPlot.UI.Avalonia.Views;
+using MxPlot.UI.Avalonia.Metadata;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -31,8 +33,19 @@ namespace MxPlot.UI.Avalonia.Commands
     /// The value mode the source is shown in (see <see cref="ICommandHost.ValueMode"/>). An operation that reduces
     /// a structured element to one value reads it in this mode.
     /// </param>
+    /// <param name="Source">
+    /// The source window's data, of which the operation may be given only a part (one frame, or a channel
+    /// cube). For an operation that needs to know where that part sits; most do not.
+    /// </param>
+    /// <param name="FrameIndex">The frame of <paramref name="Source"/> the run is at: its active frame when the run starts.</param>
+    /// <param name="CompositeAxisName">The composited axis when the operand is a channel cube; otherwise <see langword="null"/>.</param>
+    /// <param name="PartOfSource">
+    /// Whether the operand is only a part of <paramref name="Source"/> - one frame of it, or a channel cube - rather than
+    /// all of it.
+    /// </param>
     internal readonly record struct RunContext(IProgress<int>? Progress, CancellationToken Token, object? State = null,
-        int ValueMode = 0);
+        int ValueMode = 0, IMatrixData? Source = null, int FrameIndex = -1, string? CompositeAxisName = null,
+        bool PartOfSource = false);
 
     /// <summary>What a command may look at before its operation runs.</summary>
     /// <param name="Data">The source window's data.</param>
@@ -144,6 +157,17 @@ namespace MxPlot.UI.Avalonia.Commands
 
         /// <summary>Called once, after <see cref="PrepareResult"/>, for what only the first result needs.</summary>
         public Action<ICommandHost, IMatrixData, ResultContext>? OnResultReady { get; init; }
+
+        /// <summary>
+        /// Shows the command's dialog again, starting from this plan's parameters and owned by the given
+        /// window, and returns the plan for the new parameters; <see langword="null"/> when the user cancels.
+        /// When set, a window that follows its source offers <see cref="EditLabel"/> in its menu and is
+        /// recomputed with the returned plan. The new plan must give data of the same shape.
+        /// </summary>
+        public Func<Window, Task<CommandPlan?>>? Edit { get; init; }
+
+        /// <summary>The text of the menu item that runs <see cref="Edit"/>.</summary>
+        public string EditLabel { get; init; } = "Edit Parameters…";
     }
 
     /// <summary>
@@ -198,7 +222,7 @@ namespace MxPlot.UI.Avalonia.Commands
                     ? host.BeginProgress(plan.ProgressLabel, cancellable: tracked)
                     : null;
                 var run = new RunContext(tracked ? session?.Progress : null, tracked ? session?.Token ?? default : default, state,
-                    host.ValueMode);
+                    host.ValueMode, data, frameIndex, cube?.ChannelAxisName, PartOfSource: cube != null || sliceFirst);
                 var operation = plan.CreateOperation(run);
                 result = await Task.Run(() =>
                 {
@@ -229,10 +253,8 @@ namespace MxPlot.UI.Avalonia.Commands
             string? modeName = ReadsScalarsOf(plan, data)
                 ? data.ElementType.ValueModes[data.ElementType.ClampMode(host.ValueMode)].Name
                 : null;
-            string historyDetail = plan.HistoryDetail(ctx);
-            if (modeName != null)
-                historyDetail = historyDetail.Length > 0 ? $"{historyDetail}, mode={modeName}" : $"mode={modeName}";
-            MatrixPlotter.AppendHistory(result, plan.HistoryLabel, host.Title, historyDetail);
+            string sourceTitle = host.Title;
+            AppendHistory(plan, result, ctx, sourceTitle, modeName);
 
             string title = plan.ResultTitle(host.Title);
             if (modeName != null && !(choices.SyncSource && singleFrame))
@@ -241,11 +263,36 @@ namespace MxPlot.UI.Avalonia.Commands
             if (choices.ReplaceData)
                 host.ReplaceData(result, compositeAxis);
             else if (choices.SyncSource && singleFrame)
-                host.ShowSyncedResult(result, title, compositeAxis, plan.CopiesDisplayState, (input, ct) => Recompute(plan, input, ct));
+            {
+                // The follower recomputes with whatever plan is current, so that an edit takes effect.
+                var current = new EditablePlan(plan);
+                host.ShowSyncedResult(result, title, compositeAxis, plan.CopiesDisplayState,
+                    (input, ct) => Recompute(current.Plan, input, ct, sourceTitle), plan.Edit != null ? current : null);
+            }
             else if (plan.ResultIsLinked)
                 host.ShowLinkedResult(result, title);
             else
                 host.ShowResult(result, title, compositeAxis, plan.CopiesDisplayState);
+        }
+
+        /// <summary>The plan a following window recomputes with, replaced when the user edits it.</summary>
+        private sealed class EditablePlan(CommandPlan plan) : ILinkedViewProperties
+        {
+            private volatile CommandPlan _plan = plan;
+
+            public CommandPlan Plan => _plan;
+
+            public string MenuLabel => _plan.EditLabel;
+
+            public async Task<bool> EditAsync(Window owner)
+            {
+                var edit = _plan.Edit;
+                if (edit == null) return false;
+                var next = await edit(owner);
+                if (next == null) return false;
+                _plan = next;
+                return true;
+            }
         }
 
         private static void PrepareResult(CommandPlan plan, IMatrixData result, ResultContext ctx)
@@ -266,15 +313,52 @@ namespace MxPlot.UI.Avalonia.Commands
         private static bool ReadsScalarsOf(CommandPlan plan, IMatrixData data)
             => plan.WorksOnScalars && !MatrixData.SupportedPrimitiveTypes.Contains(data.ElementType.Type);
 
-        private static SyncOutput Recompute(CommandPlan plan, SyncInput input, CancellationToken ct)
+        /// <summary>
+        /// Records the run in the result's history. When structured data was read as scalars,
+        /// <paramref name="modeName"/> names the value mode that was processed.
+        /// </summary>
+        private static void AppendHistory(CommandPlan plan, IMatrixData result, ResultContext ctx, string sourceTitle,
+            string? modeName)
+        {
+            string detail = plan.HistoryDetail(ctx);
+            if (modeName != null)
+                detail = detail.Length > 0 ? $"{detail}, mode={modeName}" : $"mode={modeName}";
+            result.AppendHistory(plan.HistoryLabel, sourceTitle, detail);
+        }
+
+        /// <summary>The position of the source along every axis but the composited one, e.g. <c>Z=3, Time=2</c> (indices).</summary>
+        private static string DescribePosition(IMatrixData source, string compositeAxisName)
+        {
+            var axes = source.Axes;
+            var indices = source.Dimensions.GetAxisIndices(source.ActiveIndex);
+            var parts = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < axes.Count; i++)
+                if (!string.Equals(axes[i].Name, compositeAxisName, StringComparison.OrdinalIgnoreCase))
+                    parts.Add($"{axes[i].Name}={indices[i]}");
+            return string.Join(", ", parts);
+        }
+
+        /// <summary>
+        /// Computes the data of a window that follows its source. Each result is a new instance, so it gets
+        /// its own history entry: the window's history then always says what the window shows, also after
+        /// the plan was edited, and it stays with the data when the window is saved or duplicated.
+        /// </summary>
+        private static SyncOutput Recompute(CommandPlan plan, SyncInput input, CancellationToken ct, string sourceTitle)
         {
             // The operand is a single frame or a channel cube: process all of it.
-            var operation = plan.CreateOperation(new RunContext(null, ct, ValueMode: input.ValueMode));
+            // The operand is one frame of the source, or its channel cube.
+            var operation = plan.CreateOperation(new RunContext(null, ct, ValueMode: input.ValueMode,
+                Source: input.Source, FrameIndex: input.Source.ActiveIndex, CompositeAxisName: input.CompositeAxisName,
+                PartOfSource: true));
             var updated = ReadOperand(plan, input.Operand, input.ValueMode).Apply(operation);
             var ctx = new ResultContext(input.Source,
-                input.CompositeAxisName != null ? input.Operand : null, null,
+                input.CompositeAxisName != null ? input.Operand : null,
+                input.CompositeAxisName != null ? DescribePosition(input.Source, input.CompositeAxisName) : null,
                 true, input.Source.ActiveIndex);
             PrepareResult(plan, updated, ctx);
+            var elementType = input.Source.ElementType;
+            AppendHistory(plan, updated, ctx, sourceTitle,
+                ReadsScalarsOf(plan, input.Source) ? elementType.ValueModes[elementType.ClampMode(input.ValueMode)].Name : null);
             return new SyncOutput(updated, plan.KeepsCompositeMode ? input.CompositeAxisName : null);
         }
     }

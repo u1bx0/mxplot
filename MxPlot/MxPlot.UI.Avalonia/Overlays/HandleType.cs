@@ -10,6 +10,8 @@
         TopLeft, TopCenter, TopRight,
         MiddleLeft, MiddleRight,
         BottomLeft, BottomCenter, BottomRight,
-        StartPoint, EndPoint
+        StartPoint, EndPoint,
+        /// <summary>The movable profile origin of a line.</summary>
+        Origin
     }
 }

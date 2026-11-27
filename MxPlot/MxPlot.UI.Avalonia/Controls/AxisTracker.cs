@@ -30,6 +30,12 @@ namespace MxPlot.UI.Avalonia.Controls
         private const double IndicatorWidth = 32;
         private const double ButtonSize = 22;
         private const double ComponentHeight = 20;
+
+        /// <summary>
+        /// Space between the tracker's own edge and its first / last control. The right edge of the
+        /// Freeze button lies this far inside the tracker's width.
+        /// </summary>
+        internal const double EdgeMargin = 5;
         private const int DefaultInterval = 100;   // ms
 
         private const double BaseFontSize = 11;
@@ -278,7 +284,7 @@ namespace MxPlot.UI.Avalonia.Controls
             _axis.UnitChanged  += OnAxisScaleChanged;  // Unit changes also refresh the ToolTip
 
             // ── Layout ────────────────────────────────────────────────────────
-            var grid = new Grid { Margin = new Thickness(5, 0, 5, 0) };
+            var grid = new Grid { Margin = new Thickness(EdgeMargin, 0, EdgeMargin, 0) };
             grid.RowDefinitions.Add(new RowDefinition(GridLength.Auto));
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // Name
             grid.ColumnDefinitions.Add(new ColumnDefinition(GridLength.Auto));   // … AxisConfig

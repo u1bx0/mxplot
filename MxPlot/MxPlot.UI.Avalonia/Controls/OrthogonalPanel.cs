@@ -23,7 +23,7 @@ namespace MxPlot.UI.Avalonia.Controls
     {
         private const double SplitterThickness = 4.0;
         private const double InitialSideWidth = 200.0;
-        private const double InitialSideHeight = 180.0;
+        private const double InitialSideHeight = 200.0;
         private const double MinSideSize = 20.0;
         private const double MinMainSize = 80.0;
 
@@ -34,6 +34,8 @@ namespace MxPlot.UI.Avalonia.Controls
         private readonly Border _cornerHandle;        // row 2 × col 1: diagonal resize corner
         private readonly Button _autoResizeBottomBtn; // XZ: auto-height overlay
         private readonly Button _autoResizeRightBtn;  // ZY: auto-width overlay
+        private readonly Button _autoShrinkBottomBtn; // XZ: shrink-to-fit overlay (view taller than bitmap)
+        private readonly Button _autoShrinkRightBtn;  // ZY: shrink-to-fit overlay (view wider than bitmap)
         private readonly Button _autoResizeMainBtn;   // XY: fit main view / window
 
         public readonly MxView MainView;
@@ -99,6 +101,12 @@ namespace MxPlot.UI.Avalonia.Controls
         /// In ortho mode the host should call <see cref="SetMainViewPixelSize"/> to adjust the main column/row.
         /// </summary>
         public event Action? AutoResizeMainRequested;
+
+        /// <summary>Raised when the user asks to shrink the bottom (XZ) view to fit its bitmap.</summary>
+        public event Action? AutoShrinkBottomRequested;
+
+        /// <summary>Raised when the user asks to shrink the right (ZY) view to fit its bitmap.</summary>
+        public event Action? AutoShrinkRightRequested;
 
         // ── ShowRight / ShowBottom ────────────────────────────────────────────
 
@@ -281,24 +289,42 @@ namespace MxPlot.UI.Avalonia.Controls
             // Auto-resize overlay buttons (drawn on top of side views). Each view's own busy
             // spinner (MxView.IsBusy) always sits at that view's top-left corner, so the two
             // buttons are pinned to different corners per view to avoid overlapping it.
+            // Expand: arrow toward the edge being moved, bar = that edge. Shrink: arrow pulling the
+            // same edge back. Each shrink button sits in a different corner from its Expand button.
+            // Ctrl+click on any of the four fits both side views instead of the one the button belongs to.
+            const string FitBothHint = "\nCtrl+click: fit both side views";
             _autoResizeBottomBtn = MakeAutoResizeButton(
-                "M 0,0 L 10,0 M 0,14 L 10,14 M 5,0 L 5,5 M 5,9 L 5,14 M 2,4 L 5,0 L 8,4 M 2,10 L 5,14 L 8,10 M 5,5 L 5,6.5 M 5,7.5 L 5,9",
-                10, 14, "Expand");
+                "M 5,0 L 5,11 M 1,7 L 5,11 L 9,7 M 0,14 L 10,14", 10, 14, "Expand to fit" + FitBothHint);
             _autoResizeBottomBtn.HorizontalAlignment = HorizontalAlignment.Right;
             _autoResizeBottomBtn.VerticalAlignment = VerticalAlignment.Bottom;
-            _autoResizeBottomBtn.Click += (_, _) => AutoResizeBottomRequested?.Invoke();
+            WireSideFitButton(_autoResizeBottomBtn, () => AutoResizeBottomRequested?.Invoke());
             Grid.SetRow(_autoResizeBottomBtn, 3); Grid.SetColumn(_autoResizeBottomBtn, 0);
 
+            _autoShrinkBottomBtn = MakeAutoResizeButton(
+                "M 5,2 L 5,11 M 1,6 L 5,2 L 9,6 M 0,14 L 10,14", 10, 14, "Shrink to fit" + FitBothHint);
+            _autoShrinkBottomBtn.HorizontalAlignment = HorizontalAlignment.Right;
+            _autoShrinkBottomBtn.VerticalAlignment = VerticalAlignment.Top;
+            WireSideFitButton(_autoShrinkBottomBtn, () => AutoShrinkBottomRequested?.Invoke());
+            Grid.SetRow(_autoShrinkBottomBtn, 3); Grid.SetColumn(_autoShrinkBottomBtn, 0);
+
             _autoResizeRightBtn = MakeAutoResizeButton(
-                "M 0,0 L 0,10 M 14,0 L 14,10 M 0,5 L 5,5 M 9,5 L 14,5 M 4,2 L 0,5 L 4,8 M 10,2 L 14,5 L 10,8 M 5,5 L 6.5,5 M 7.5,5 L 9,5",
-                14, 10, "Expand");
+                "M 0,5 L 11,5 M 7,1 L 11,5 L 7,9 M 14,0 L 14,10", 14, 10, "Expand to fit" + FitBothHint);
             _autoResizeRightBtn.HorizontalAlignment = HorizontalAlignment.Right;
             _autoResizeRightBtn.VerticalAlignment = VerticalAlignment.Top;
-            _autoResizeRightBtn.Click += (_, _) => AutoResizeRightRequested?.Invoke();
+            WireSideFitButton(_autoResizeRightBtn, () => AutoResizeRightRequested?.Invoke());
             Grid.SetRow(_autoResizeRightBtn, 1); Grid.SetColumn(_autoResizeRightBtn, 2);
+
+            _autoShrinkRightBtn = MakeAutoResizeButton(
+                "M 3,5 L 14,5 M 7,1 L 3,5 L 7,9 M 14,0 L 14,10", 14, 10, "Shrink to fit" + FitBothHint);
+            _autoShrinkRightBtn.HorizontalAlignment = HorizontalAlignment.Left;
+            _autoShrinkRightBtn.VerticalAlignment = VerticalAlignment.Top;
+            WireSideFitButton(_autoShrinkRightBtn, () => AutoShrinkRightRequested?.Invoke());
+            Grid.SetRow(_autoShrinkRightBtn, 1); Grid.SetColumn(_autoShrinkRightBtn, 2);
 
             _grid.Children.Add(_autoResizeBottomBtn);
             _grid.Children.Add(_autoResizeRightBtn);
+            _grid.Children.Add(_autoShrinkBottomBtn);
+            _grid.Children.Add(_autoShrinkRightBtn);
 
             // Auto-resize main: diagonal ↖↘ icon (top-left and bottom-right corners with arrow tips)
             // 16×16 canvas: two L-shaped corner brackets pointing NW and SE
@@ -318,6 +344,11 @@ namespace MxPlot.UI.Avalonia.Controls
             BottomView.ViewportChanged += (_, _) => UpdateAutoResizeButtonVisibility();
             RightView.ViewportChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
             MainView.ViewportChanged   += (_, _) => UpdateAutoResizeButtonVisibility();
+
+            // The shrink buttons depend on the side views' laid-out size, which settles after a
+            // window resize (including the one a fit button itself causes) without a viewport change.
+            BottomView.SizeChanged += (_, _) => UpdateAutoResizeButtonVisibility();
+            RightView.SizeChanged  += (_, _) => UpdateAutoResizeButtonVisibility();
         }
 
         // ── Splitter drag wiring ──────────────────────────────────────────────
@@ -597,6 +628,60 @@ namespace MxPlot.UI.Avalonia.Controls
         /// <summary>Total height delta (bottom pane + splitter) when side views are first shown.</summary>
         public static double InitialSideDeltaHeight => InitialSideHeight + SplitterThickness;
 
+        /// <summary>
+        /// <c>true</c> while neither side view has been resized from its initial size, i.e. there is
+        /// no user-chosen size that a reopen should preserve.
+        /// </summary>
+        public bool IsSideSizeInitial =>
+            _savedSideWidth == InitialSideWidth && _savedSideHeight == InitialSideHeight;
+
+        /// <summary>
+        /// Raises the right-side, bottom-side and main-view auto-resize requests in that order,
+        /// so each side view ends at its fit size (grown where the screen allows, or shrunk when
+        /// the stack is shorter than the initial size) and the main view is fitted last.
+        /// Each side request is a no-op in the direction it does not apply to.
+        /// </summary>
+        public void RequestAutoResizeAll()
+        {
+            AutoShrinkRightRequested?.Invoke();
+            AutoResizeRightRequested?.Invoke();
+            AutoShrinkBottomRequested?.Invoke();
+            AutoResizeBottomRequested?.Invoke();
+            AutoResizeMainRequested?.Invoke();
+        }
+
+        /// <summary>
+        /// Raises the shrink and expand requests of both side views, so each ends at its fit size
+        /// whichever direction that is. The main view is left as it is.
+        /// </summary>
+        public void RequestAutoResizeSides()
+        {
+            AutoShrinkRightRequested?.Invoke();
+            AutoResizeRightRequested?.Invoke();
+            AutoShrinkBottomRequested?.Invoke();
+            AutoResizeBottomRequested?.Invoke();
+        }
+
+        /// <summary>
+        /// Makes <paramref name="button"/> raise its own request on a plain click and
+        /// <see cref="RequestAutoResizeSides"/> on a click with Ctrl (or the Command key) held.
+        /// </summary>
+        private void WireSideFitButton(Button button, Action raiseOwnRequest)
+        {
+            // Click carries no key state, so it is read from the pointer release that raises the click.
+            bool fitBoth = false;
+            button.AddHandler(PointerReleasedEvent,
+                (_, e) => fitBoth = (e.KeyModifiers & (KeyModifiers.Control | KeyModifiers.Meta)) != 0,
+                global::Avalonia.Interactivity.RoutingStrategies.Tunnel);
+            button.Click += (_, _) =>
+            {
+                bool both = fitBoth;
+                fitBoth = false;
+                if (both) RequestAutoResizeSides();
+                else raiseOwnRequest();
+            };
+        }
+
         /// <summary>Width delta to add to the window when reopening the right side view.</summary>
         public double SavedSideDeltaWidth => _savedSideWidth + SplitterThickness;
 
@@ -612,6 +697,9 @@ namespace MxPlot.UI.Avalonia.Controls
             _topPanel = panel;
             Grid.SetRow(panel, 0);
             Grid.SetColumn(panel, 0);
+            // Row 0 holds nothing else, so the panel may reach over the side view's column; the host
+            // decides how wide it actually is.
+            Grid.SetColumnSpan(panel, 3);
             _grid.Children.Add(panel);
         }
 
@@ -655,11 +743,64 @@ namespace MxPlot.UI.Avalonia.Controls
 
         // ── Auto-resize overlay buttons ───────────────────────────────────────
 
+        // A view may exceed its fit size by this much before the shrink button appears, so a view
+        // that was just fitted (or sits within rounding of it) does not offer to shrink.
+        private const double ShrinkTolerance = 4.0;
+
+        /// <summary>
+        /// Natural size of the projection selector, which occupies the corner shared by the bottom
+        /// and right views while both are shown: its height is the least the bottom view can be
+        /// fitted to, its width the least for the right view. Falls back to
+        /// <see cref="MinSideSize"/> when the selector is not shown.
+        /// </summary>
+        private Size ProjectionSelectorSize
+        {
+            get
+            {
+                if (!ProjectionSelector.IsVisible) return new Size(MinSideSize, MinSideSize);
+                // Measured unconstrained: DesiredSize under the current cell would be clipped to it.
+                ProjectionSelector.Measure(Size.Infinity);
+                var d = ProjectionSelector.DesiredSize;
+                return new Size(Math.Max(d.Width, MinSideSize), Math.Max(d.Height, MinSideSize));
+            }
+        }
+
+        /// <summary>
+        /// Height the bottom (XZ) view needs to show its whole bitmap plus a margin of one data
+        /// step (at least 50 DIP). Target of both expand and shrink.
+        /// </summary>
+        public double BottomFitHeight
+        {
+            get
+            {
+                var (_, bmpH) = BottomView.GetEffectiveBmpDims();
+                int count = BottomView.MatrixData?.YCount ?? 1;
+                double oneDip = count > 0 ? bmpH / count : 50.0;
+                return Math.Max(bmpH + Math.Max(oneDip, 50.0), ProjectionSelectorSize.Height);
+            }
+        }
+
+        /// <summary>Width counterpart of <see cref="BottomFitHeight"/> for the right (ZY) view.</summary>
+        public double RightFitWidth
+        {
+            get
+            {
+                var (bmpW, _) = RightView.GetEffectiveBmpDims();
+                int count = RightView.MatrixData?.YCount ?? 1;
+                double oneDip = count > 0 ? bmpW / count : 50.0;
+                return Math.Max(bmpW + Math.Max(oneDip, 50.0), ProjectionSelectorSize.Width);
+            }
+        }
+
         private void UpdateAutoResizeButtonVisibility()
         {
             _autoResizeBottomBtn.IsVisible = _showBottom && BottomView.HasVerticalScrollbar  && !_maximizedMode;
             _autoResizeRightBtn.IsVisible  = _showRight  && RightView.HasHorizontalScrollbar && !_maximizedMode;
             _autoResizeMainBtn.IsVisible   = !_maximizedMode && !MainView.IsFitToView;
+            _autoShrinkBottomBtn.IsVisible = _showBottom && !_maximizedMode
+                && BottomView.Bounds.Height > BottomFitHeight + ShrinkTolerance;
+            _autoShrinkRightBtn.IsVisible  = _showRight && !_maximizedMode
+                && RightView.Bounds.Width > RightFitWidth + ShrinkTolerance;
         }
 
         private static Button MakeAutoResizeButton(string iconPath, double iconW, double iconH, string tooltip)

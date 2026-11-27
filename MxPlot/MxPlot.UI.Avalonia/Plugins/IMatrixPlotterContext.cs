@@ -2,6 +2,8 @@
 using Avalonia.Media.Imaging;
 using MxPlot.Core;
 using MxPlot.UI.Avalonia.Rendering;
+using System;
+using System.Threading;
 
 namespace MxPlot.UI.Avalonia.Plugins
 {
@@ -29,8 +31,36 @@ namespace MxPlot.UI.Avalonia.Plugins
         /// <summary>The host window; use as dialog owner.</summary>
         TopLevel? Owner { get; }
 
+        /// <summary>
+        /// The title of the host window. Use it as the <c>from</c> of a history entry
+        /// (<see cref="Metadata.MatrixDataHistoryExtensions.AppendHistory"/>) or as the base of a result's title.
+        /// </summary>
+        string Title { get; }
+
         /// <summary>Service for opening new plot windows from within the plugin.</summary>
         IPlotWindowService WindowService { get; }
+
+        /// <summary>
+        /// Opens a window that follows this one: it first shows <paramref name="initial"/>, then is
+        /// recomputed by <paramref name="transform"/> whenever this window's active frame changes or its
+        /// data is refreshed. It closes together with this window.
+        /// </summary>
+        /// <param name="initial">What the window shows until the first recompute.</param>
+        /// <param name="title">The window title.</param>
+        /// <param name="transform">
+        /// Computes the new content from a <see cref="PlotSyncInput"/>. It runs on a background thread, and
+        /// a call still running when this window changes again is cancelled through its token, so it
+        /// should observe the token. Return <c>null</c> to leave the window as it is for this change.
+        /// The result may have a different type or shape from <paramref name="initial"/>. A type-preserving
+        /// transform needs the element type, which is reached through an <see cref="IMatrixDataOperation"/>.
+        /// It must not modify its input.
+        /// </param>
+        /// <returns>A handle whose disposal closes the window and ends the following.</returns>
+        /// <remarks>Call on the UI thread.</remarks>
+        IDisposable ShowSyncedMatrixPlotter(
+            IMatrixData initial,
+            string title,
+            Func<PlotSyncInput, CancellationToken, IMatrixData?> transform);
 
         // ── Frame rendering ───────────────────────────────────────────────────
 
@@ -75,7 +105,7 @@ namespace MxPlot.UI.Avalonia.Plugins
         /// the sequence needed for video or animated GIF export.
         /// <para>
         /// <b>Composite mode (future):</b> this method always uses the single-frame
-        /// <c>BitmapWriter</c> path and is intentionally kept that way.
+        /// <c>LutBitmapWriter</c> path and is intentionally kept that way.
         /// When composite rendering is active, call <c>RenderFrameAsComposite</c> instead.
         /// See the design note below.
         /// </para>

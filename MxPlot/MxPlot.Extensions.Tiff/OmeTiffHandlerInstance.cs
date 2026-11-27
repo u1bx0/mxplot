@@ -726,11 +726,36 @@ namespace MxPlot.Extensions.Tiff
                         }
                     }
                 }
+
+                ReadOriginalMetadataAnnotations(doc, data);
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"MatrixDataMetadata annotation read error: {ex.Message}");
                 // Non-fatal: continue without metadata annotation
+            }
+        }
+
+        /// <summary>
+        /// Reads the general (non-system) metadata: one XMLAnnotation per entry in the
+        /// <c>openmicroscopy.org/OriginalMetadata</c> namespace, each holding
+        /// <c>&lt;OriginalMetadata&gt;&lt;Key/&gt;&lt;Value/&gt;&lt;/OriginalMetadata&gt;</c>. Bio-Formats and ImageJ
+        /// list exactly these entries, and files written by other tools carry them too.
+        /// A key already read from the MapAnnotation is kept as it is.
+        /// </summary>
+        private static void ReadOriginalMetadataAnnotations(XDocument doc, HyperstackMetadata data)
+        {
+            foreach (var annotation in doc.Descendants().Where(e =>
+                         e.Name.LocalName == "XMLAnnotation" && e.Attribute("Namespace")?.Value == OriginalMetadataNamespace))
+            {
+                // Matched by local name: the payload may or may not inherit the SA namespace.
+                var entry = annotation.Descendants().FirstOrDefault(e => e.Name.LocalName == "OriginalMetadata");
+                var key = entry?.Elements().FirstOrDefault(e => e.Name.LocalName == "Key")?.Value;
+                if (string.IsNullOrEmpty(key)) continue;
+
+                var value = entry!.Elements().FirstOrDefault(e => e.Name.LocalName == "Value")?.Value ?? string.Empty;
+                data.MatrixDataMetadata ??= new Dictionary<string, string>();
+                data.MatrixDataMetadata.TryAdd(key, value);
             }
         }
 
@@ -1009,52 +1034,13 @@ namespace MxPlot.Extensions.Tiff
 
         #region Type Utilities
 
-        private int GetBitsPerSample()
-        {
-            if (typeof(T) == typeof(short) || typeof(T) == typeof(ushort))
-                return 16;
-            if (typeof(T) == typeof(byte) || typeof(T) == typeof(sbyte))
-                return 8;
-            if (typeof(T) == typeof(int) || typeof(T) == typeof(uint))
-                return 32;
-            if (typeof(T) == typeof(float))
-                return 32;
-            if (typeof(T) == typeof(double))
-                return 64;
+        private int GetBitsPerSample() => TiffPixelType.BitsPerSample(typeof(T));
 
-            throw new NotSupportedException($"Type {typeof(T)} is not supported.");
-        }
+        private SampleFormat GetSampleFormat() => TiffPixelType.SampleFormatOf(typeof(T));
 
-        private SampleFormat GetSampleFormat()
-        {
-            if (typeof(T) == typeof(short) || typeof(T) == typeof(sbyte) || typeof(T) == typeof(int))
-                return SampleFormat.INT;
-            if (typeof(T) == typeof(ushort) || typeof(T) == typeof(byte) || typeof(T) == typeof(uint))
-                return SampleFormat.UINT;
-            if (typeof(T) == typeof(float) || typeof(T) == typeof(double))
-                return SampleFormat.IEEEFP;
+        private int GetBytesPerPixel() => TiffPixelType.BytesPerSample(typeof(T));
 
-            throw new NotSupportedException($"Type {typeof(T)} is not supported.");
-        }
-
-        private int GetBytesPerPixel()
-        {
-            return System.Runtime.InteropServices.Marshal.SizeOf<T>();
-        }
-
-        private string GetOmePixelType()
-        {
-            if (typeof(T) == typeof(short)) return "int16";
-            if (typeof(T) == typeof(ushort)) return "uint16";
-            if (typeof(T) == typeof(byte)) return "uint8";
-            if (typeof(T) == typeof(sbyte)) return "int8";
-            if (typeof(T) == typeof(int)) return "int32";
-            if (typeof(T) == typeof(uint)) return "uint32";
-            if (typeof(T) == typeof(float)) return "float";
-            if (typeof(T) == typeof(double)) return "double";
-
-            throw new NotSupportedException($"Type {typeof(T)} is not supported.");
-        }
+        private string GetOmePixelType() => TiffPixelType.OmeName(typeof(T));
 
         #endregion
 
@@ -1117,7 +1103,7 @@ namespace MxPlot.Extensions.Tiff
                 imageNode.Add(new XElement(ns + "AnnotationRef", new XAttribute("ID", "Annotation:CoordinateSystem:0")));
 
 
-                if (data.MatrixDataMetadata != null && data.MatrixDataMetadata.Count > 0)
+                if (GetSystemMetadata(data).Any())
                 {
                     imageNode.Add(new XElement(ns + "AnnotationRef", new XAttribute("ID", "Annotation:Map:Custom")));
                 }
@@ -1126,10 +1112,13 @@ namespace MxPlot.Extensions.Tiff
             }
 
             // Build StructuredAnnotations (coordinate system + custom metadata)
-            var structuredAnnotations = new XElement(sa + "StructuredAnnotations", 
+            var structuredAnnotations = new XElement(sa + "StructuredAnnotations",
                 CreateCoordinateSystemAnnotation(data, sa),
                 CreateMatrixDataMetadataAnnotation(data, sa)
                 );
+            // General metadata goes into OriginalMetadata annotations so that ImageJ / Bio-Formats can list it.
+            foreach (var annotation in CreateOriginalMetadataAnnotations(data, sa))
+                structuredAnnotations.Add(annotation);
 
             ome.Add(structuredAnnotations);
 
@@ -1343,29 +1332,24 @@ namespace MxPlot.Extensions.Tiff
             );
         }
         /// <summary>
-        /// Converts <c>MatrixData.Metadata</c> (IDictionary&lt;string, string&gt;) to an OME-XML MapAnnotation.
+        /// Converts the system entries of <c>MatrixData.Metadata</c> (<c>mxplot.*</c>: LUT, view settings, ...)
+        /// to an OME-XML MapAnnotation. The general entries go to <see cref="CreateOriginalMetadataAnnotations"/>.
         /// </summary>
         /// <param name="data"></param>
         /// <param name="sa"></param>
         /// <returns></returns>
         private XElement? CreateMatrixDataMetadataAnnotation(HyperstackMetadata data, XNamespace sa)
         {
-            // Return null if there is no metadata (XElement silently ignores null children)
-            if (data.MatrixDataMetadata == null || data.MatrixDataMetadata.Count == 0)
+            var systemEntries = GetSystemMetadata(data).ToList();
+            // Return null if there is nothing to write (XElement silently ignores null children)
+            if (systemEntries.Count == 0)
             {
                 return null;
             }
 
             var valueElement = new XElement(sa + "Value");
-            var metadata = data.MatrixDataMetadata;
-            foreach (var kvp in metadata)
+            foreach (var kvp in systemEntries)
             {
-                if (string.Equals(kvp.Key, OmeTiffHandler.OmeXmlKey, StringComparison.OrdinalIgnoreCase))
-                {
-                    // Avoid embedding OME-XML within itself
-                    continue;
-                }
-
                 // Escape the CDATA end sequence to safely embed arbitrary strings
                 string safeValue = kvp.Value?.Replace("]]>", "]]]]><![CDATA[>") ?? "";
 
@@ -1388,6 +1372,57 @@ namespace MxPlot.Extensions.Tiff
                 new XAttribute("Namespace", "mxplot/matrix-data/metadata/v1"),
                 valueElement
             );
+        }
+
+        /// <summary>Namespace that marks an XMLAnnotation as an original-metadata entry (Bio-Formats convention).</summary>
+        private const string OriginalMetadataNamespace = "openmicroscopy.org/OriginalMetadata";
+
+        private static bool IsSystemMetadataKey(string key)
+            => key.StartsWith("mxplot.", StringComparison.OrdinalIgnoreCase);
+
+        private static IEnumerable<KeyValuePair<string, string>> GetMetadataEntries(HyperstackMetadata data)
+        {
+            if (data.MatrixDataMetadata == null) yield break;
+            foreach (var kvp in data.MatrixDataMetadata)
+            {
+                // Avoid embedding OME-XML within itself
+                if (string.IsNullOrEmpty(kvp.Key) || string.Equals(kvp.Key, OmeTiffHandler.OmeXmlKey, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                yield return kvp;
+            }
+        }
+
+        private static IEnumerable<KeyValuePair<string, string>> GetSystemMetadata(HyperstackMetadata data)
+            => GetMetadataEntries(data).Where(kvp => IsSystemMetadataKey(kvp.Key));
+
+        /// <summary>
+        /// Writes the general entries (everything except <c>mxplot.*</c>) as one OriginalMetadata
+        /// XMLAnnotation per entry. A MapAnnotation with this namespace is not listed by ImageJ's
+        /// Show Info; only this form is.
+        /// </summary>
+        private static IEnumerable<XElement> CreateOriginalMetadataAnnotations(HyperstackMetadata data, XNamespace sa)
+        {
+            int index = 0;
+            foreach (var kvp in GetMetadataEntries(data).Where(kvp => !IsSystemMetadataKey(kvp.Key)))
+            {
+                yield return new XElement(sa + "XMLAnnotation",
+                    new XAttribute("ID", $"Annotation:Orig:{index++}"),
+                    new XAttribute("Namespace", OriginalMetadataNamespace),
+                    new XElement(sa + "Value",
+                        new XElement(sa + "OriginalMetadata",
+                            new XElement(sa + "Key", StripInvalidXmlChars(kvp.Key)),
+                            new XElement(sa + "Value", StripInvalidXmlChars(kvp.Value ?? "")))));
+            }
+        }
+
+        private static string StripInvalidXmlChars(string text)
+        {
+            foreach (char c in text)
+            {
+                if (!System.Xml.XmlConvert.IsXmlChar(c) && !char.IsSurrogate(c))
+                    return new string(text.Where(ch => System.Xml.XmlConvert.IsXmlChar(ch) || char.IsSurrogate(ch)).ToArray());
+            }
+            return text;
         }
 
         #endregion
@@ -1618,18 +1653,7 @@ namespace MxPlot.Extensions.Tiff
         // Override the base PixelType property
         public new string PixelType => GetPixelTypeString();
 
-        private string GetPixelTypeString()
-        {
-            if (typeof(T) == typeof(short)) return "int16";
-            if (typeof(T) == typeof(ushort)) return "uint16";
-            if (typeof(T) == typeof(byte)) return "uint8";
-            if (typeof(T) == typeof(sbyte)) return "int8";
-            if (typeof(T) == typeof(int)) return "int32";
-            if (typeof(T) == typeof(uint)) return "uint32";
-            if (typeof(T) == typeof(float)) return "float";
-            if (typeof(T) == typeof(double)) return "double";
-            throw new NotSupportedException($"Type {typeof(T)} is not supported.");
-        }
+        private string GetPixelTypeString() => TiffPixelType.OmeName(typeof(T));
 
 
         /// <summary>
@@ -1952,20 +1976,7 @@ namespace MxPlot.Extensions.Tiff
         }
 
         private static string InferPixelType(int bitsPerSample, SampleFormat sampleFormat)
-        {
-            return (bitsPerSample, sampleFormat) switch
-            {
-                (8, SampleFormat.UINT) => "uint8",
-                (8, SampleFormat.INT) => "int8",
-                (16, SampleFormat.UINT) => "uint16",
-                (16, SampleFormat.INT) => "int16",
-                (32, SampleFormat.UINT) => "uint32",
-                (32, SampleFormat.INT) => "int32",
-                (32, SampleFormat.IEEEFP) => "float",
-                (64, SampleFormat.IEEEFP) => "double",
-                _ => throw new NotSupportedException($"Unsupported format: {bitsPerSample}bit, {sampleFormat}")
-            };
-        }
+            => TiffPixelType.NameOf(bitsPerSample, sampleFormat);
     }
     #endregion
 }

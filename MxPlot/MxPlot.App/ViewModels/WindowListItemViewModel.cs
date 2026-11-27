@@ -65,6 +65,25 @@ namespace MxPlot.App.ViewModels
         [ObservableProperty]
         private bool _isSelected;
 
+        /// <summary>Whether the window shows a result that is kept up to date from other windows.</summary>
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ToolTipTitle))]
+        private bool _isLiveResult;
+
+        /// <summary>
+        /// The windows a live result is calculated from, for its tooltip: the word "from", then one name to a line,
+        /// indented. Empty for any other window.
+        /// </summary>
+        [ObservableProperty]
+        private string _liveSourceText = string.Empty;
+
+        /// <summary>
+        /// Whether the window is an input of a selected live result and is not itself selected, so that the list
+        /// tints it. A selected window shows only its selection.
+        /// </summary>
+        [ObservableProperty]
+        private bool _isLiveInput;
+
         /// <summary>
         /// <c>false</c> when the window is explicitly hidden by the user.
         /// The window remains loaded in memory.
@@ -261,7 +280,7 @@ namespace MxPlot.App.ViewModels
         /// <summary>
         /// Title string for the hover tooltip. Prefixed with "🔗[Linked] " for child windows.
         /// </summary>
-        public string ToolTipTitle => IsChild ? $"🔗[Linked] {FileName}" : FileName;
+        public string ToolTipTitle => IsLiveResult ? $"fx [Calculated] {FileName}" : IsChild ? $"🔗[Linked] {FileName}" : FileName;
 
         /// <summary>Direct children of this window in the managed-window hierarchy.</summary>
         internal List<WindowListItemViewModel> ChildItems { get; } = [];

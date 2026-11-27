@@ -1,5 +1,6 @@
 ﻿using Avalonia.Controls;
 using MxPlot.Core;
+using MxPlot.UI.Avalonia.Views;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -88,10 +89,11 @@ namespace MxPlot.UI.Avalonia.Commands
         /// <summary>
         /// Opens <paramref name="result"/> in a new window that follows this one: whenever this window's
         /// active frame changes or its data is refreshed, the window's data is recomputed by
-        /// <paramref name="transform"/>.
+        /// <paramref name="transform"/>. With <paramref name="properties"/>, the new window offers a menu item
+        /// that edits them and is recomputed after a change.
         /// </summary>
         void ShowSyncedResult(IMatrixData result, string title, string? compositeAxisName, bool copyDisplayState,
-            Func<SyncInput, CancellationToken, SyncOutput> transform);
+            Func<SyncInput, CancellationToken, SyncOutput> transform, ILinkedViewProperties? properties = null);
     }
 
     /// <summary>What a live result window recomputes from.</summary>
